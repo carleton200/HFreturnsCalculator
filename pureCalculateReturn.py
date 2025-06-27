@@ -188,7 +188,7 @@ class MyWindow(QWidget):
         self.save_to_db("Months",dbDates)
         
         apiData = {
-            "tranCols": "Investment in, Investing Entity, Amount, Transaction Type, Effective date",
+            "tranCols": "Investment in, Investing Entity, Transaction Type, Effective date, Cash flow change",
             "tranName": "InvestmentTransaction",
             "tranSort": "Effective date:desc",
             "accountCols": "As of Date, Balance Type, Asset Class, Sub-asset class, Value of Investments, Investing entity, Investment in",
@@ -216,27 +216,8 @@ class MyWindow(QWidget):
                                     "_name": "InvestmentTransaction",
                                     "rule": [
                                         {
-                                            "_op": "any_item",
-                                            "_prop": "Transaction type",
-                                            "values": [
-                                                [
-                                                    {
-                                                        "id": "d681dc62-f2a3-4dd7-b04f-55455d6576c2",
-                                                        "es": "L_TransactionType",
-                                                        "name": "Realized investment gain (loss)"
-                                                    },
-                                                    {
-                                                        "id": "7e564e00-3ec6-4fe3-8655-b11295f46c8d",
-                                                        "es": "L_TransactionType",
-                                                        "name": "Unrealized investment gain (loss)"
-                                                    },
-                                                    {
-                                                        "id": "b136525a-2708-45c9-9d5e-405de439eaca",
-                                                        "es": "L_TransactionType",
-                                                        "name": "Reversal of unrealized investment gain (loss)"
-                                                    }
-                                                ]
-                                            ]
+                                            "_op": "not_null",
+                                            "_prop": "Cash flow change"
                                         },
                                         {
                                             "_op": "all",
@@ -267,27 +248,8 @@ class MyWindow(QWidget):
                                     "_name": "InvestmentTransaction",
                                     "rule": [
                                         {
-                                            "_op": "any_item",
-                                            "_prop": "Transaction type",
-                                            "values": [
-                                                [
-                                                    {
-                                                        "id": "d681dc62-f2a3-4dd7-b04f-55455d6576c2",
-                                                        "es": "L_TransactionType",
-                                                        "name": "Realized investment gain (loss)"
-                                                    },
-                                                    {
-                                                        "id": "7e564e00-3ec6-4fe3-8655-b11295f46c8d",
-                                                        "es": "L_TransactionType",
-                                                        "name": "Unrealized investment gain (loss)"
-                                                    },
-                                                    {
-                                                        "id": "b136525a-2708-45c9-9d5e-405de439eaca",
-                                                        "es": "L_TransactionType",
-                                                        "name": "Reversal of unrealized investment gain (loss)"
-                                                    }
-                                                ]
-                                            ]
+                                            "_op": "not_null",
+                                            "_prop": "Cash flow change"
                                         },
                                         {
                                             "_op": "all",
@@ -478,12 +440,12 @@ class MyWindow(QWidget):
                 weightedCashFlow = 0
                 
                 for transaction in transactions:
-                    cashFlowSum += float(transaction["Value"])
-                    weightedCashFlow += float(transaction["Value"])  *  (totalDays -int(datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S").day))/totalDays
+                    cashFlowSum -= float(transaction["Value"])
+                    weightedCashFlow -= float(transaction["Value"])  *  (totalDays -int(datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S").day))/totalDays
                 returnFrac = (float(endEntry["Value"]) - float(startEntry["Value"]) - cashFlowSum)/( float(startEntry["Value"]) + weightedCashFlow)
                 returnPerc = round(returnFrac * 100, 2)
                 returnCash = round((float(endEntry["Value"]) - float(startEntry["Value"]) - cashFlowSum),2)
-                returns.append({"Pool":pool , "Fund" : "","Month" : month["Month"], "Return (%)" : returnPerc, "Return ($)" : returnCash})
+                returns.append({"Pool":pool , "Fund" : "","Month" : month["Month"], "Return (%)" : returnPerc, "Return ($)" : returnCash, "StartVal" : float(startEntry["Value"]), "endVal" : float(endEntry["Value"])})
                 #Start fund level calculations
                 funds = []
                 lowAccounts = self.load_from_db("positions_low","WHERE [Source name] = ?",(pool,))
@@ -503,25 +465,23 @@ class MyWindow(QWidget):
                     startEntry = startEntry[0]
                     endEntry = endEntry[0]
 
-                        
-                        
                     transactions = self.load_from_db("transactions_low", f"WHERE [Target name] = ? And [Date] BETWEEN ? AND ?", (fund,month["tranStart"],month["tranEnd"]))
                     cashFlowSum = 0
                     weightedCashFlow = 0
                     
                     for transaction in transactions:
-                        cashFlowSum += float(transaction["Value"])
-                        weightedCashFlow += float(transaction["Value"])  *  (totalDays -int(datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S").day))/totalDays
+                        cashFlowSum -= float(transaction["CashFlow"])
+                        weightedCashFlow -= float(transaction["CashFlow"])  *  (totalDays -int(datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S").day))/totalDays
                     try:
                         returnFrac = (float(endEntry["Value"]) - float(startEntry["Value"]) - cashFlowSum)/( float(startEntry["Value"]) + weightedCashFlow)
                         returnPerc = round(returnFrac * 100, 2)
                         returnCash = round((float(endEntry["Value"]) - float(startEntry["Value"]) - cashFlowSum),2)
-                        returns.append({"Pool":pool , "Fund" : fund, "Month" : month["Month"], "Return (%)" : returnPerc, "Return ($)" : returnCash})
+                        returns.append({"Pool":pool , "Fund" : fund, "Month" : month["Month"], "Return (%)" : returnPerc, "Return ($)" : returnCash, "StartVal" : float(startEntry["Value"]), "endVal" : float(endEntry["Value"])})
                     except:
                         print(f"Skipped fund {fund}")
                         #skips fund if the values are zero and cause an error
-                    
         self.populate(self.resultTable,returns)
+        
 
     def save_to_db(self, table, rows):
         conn = sqlite3.connect(DATABASE_PATH)
