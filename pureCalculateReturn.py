@@ -6,6 +6,7 @@ import sqlite3
 import requests
 import calendar
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 from dateutil.relativedelta import relativedelta
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QStackedWidget, QVBoxLayout,
@@ -16,14 +17,18 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtGui import QBrush, QColor
 from PyQt5.QtCore import Qt
 
+testDataMode = False
+
 # Determine assets path, works in PyInstaller bundle or script
 if getattr(sys, 'frozen', False):
     BASE_DIR = sys._MEIPASS
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ASSETS_DIR = os.path.join(BASE_DIR, 'assets')
-TIMESTAMP_FILE = os.path.join(ASSETS_DIR, 'last_update.txt')
-DATABASE_PATH = os.path.join(ASSETS_DIR, 'Acc_Tran.db')
+if testDataMode:
+    DATABASE_PATH = os.path.join(ASSETS_DIR, 'Acc_Tran_Test.db')
+else:
+    DATABASE_PATH = os.path.join(ASSETS_DIR, 'Acc_Tran.db')
 
 mainURL = "https://api.dynamosoftware.com/api/v2.2"
 
@@ -35,7 +40,7 @@ class MyWindow(QWidget):
 
         os.makedirs(ASSETS_DIR, exist_ok=True)
         self.api_key = None
-
+        self.executor = ThreadPoolExecutor()
         # main stack
         self.stack = QStackedWidget()
         self.init_api_key_page()
@@ -46,6 +51,8 @@ class MyWindow(QWidget):
         main_layout = QVBoxLayout()
         main_layout.addWidget(self.stack)
         self.setLayout(main_layout)
+
+        
 
     def init_api_key_page(self):
         page = QWidget()
@@ -71,9 +78,8 @@ class MyWindow(QWidget):
         form.addRow(btn_to_results)
 
         # form inputs (submit disabled)
-        self.investor_input = QLineEdit()
+        self.investor_input = QComboBox()
         form.addRow('Investor:', self.investor_input)
-        self.investor_input.setText("James A. Haslam II Descendants Trust")
         self.radio_group = QButtonGroup()
         self.radio_total = QRadioButton('Total Portfolio')
         self.radio_asset = QRadioButton('Asset')
@@ -112,21 +118,9 @@ class MyWindow(QWidget):
 
         page.setLayout(form)
         self.stack.addWidget(page)
-    def submitForm(self):
-        self.investor = self.investor_input.text()
-        btn = self.radio_group.checkedButton()
-        self.classType = btn.text()
-        self.classString = None
-        if self.classType == "Asset":
-            self.classString = self.asset_input.text()
-        elif self.classType == "Sub-asset":
-            self.classString = self.subasset_input.text()
-        self.month = self.month_combo.currentText()
-        self.year = self.year_combo.currentText()
-        print(f"'{self.investor}'", self.classType, self.month, self.year)
-        if self.investor != "" and (self.classString is None or self.classString != ""):
-            print("yes")
-            self.pullData()
+        future = self.executor.submit(self.pullInvestorNames)
+    
+        
 
     def init_results_page(self):
         page = QWidget()
@@ -148,7 +142,29 @@ class MyWindow(QWidget):
 
         page.setLayout(layout)
         self.stack.addWidget(page)
-
+    def submitForm(self):
+        self.investor = self.investor_input.currentText()
+        btn = self.radio_group.checkedButton()
+        self.classType = btn.text()
+        self.classString = None
+        if self.classType == "Asset":
+            self.classString = self.asset_input.text()
+        elif self.classType == "Sub-asset":
+            self.classString = self.subasset_input.text()
+        self.month = self.month_combo.currentText()
+        self.year = self.year_combo.currentText()
+        print(f"'{self.investor}'", self.classType, self.month, self.year)
+        if self.investor != "" and (self.classString is None or self.classString != ""):
+            print("yes")
+            self.pullData()
+    def pullInvestorNames(self):
+        accountsHigh = self.load_from_db('positions_high')
+        investors = []
+        for account in accountsHigh:
+            if account["Source name"] not in investors:
+                investors.append(account["Source name"])
+        investors.sort()
+        self.investor_input.addItems(investors)
     def update_fields(self):
         self.asset_input.setEnabled(self.radio_asset.isChecked() or self.radio_subasset.isChecked())
         self.subasset_input.setEnabled(self.radio_subasset.isChecked())
@@ -265,17 +281,6 @@ class MyWindow(QWidget):
                                                 f"{tranStart}",
                                                 f"{tranEnd}"
                                             ]
-                                        },
-                                        {
-                                            "_op": "is_item",
-                                            "_prop": "Investing entity",
-                                            "values": [
-                                                {
-                                                    "id": "41883d69-5f52-4bd4-995e-30b9730b234e",
-                                                    "es": "InvestorAccount",
-                                                    "name": f"{self.investor}"
-                                                }
-                                            ]
                                         }
                                     ]
                                 }
@@ -362,17 +367,6 @@ class MyWindow(QWidget):
                                                             f"{accountStart}",
                                                             f"{accountEnd}"
                                                         ]
-                                                    },
-                                                    {
-                                                        "_op": "is_item",
-                                                        "_prop": "Investing entity",
-                                                        "values": [
-                                                            {
-                                                                "id": "41883d69-5f52-4bd4-995e-30b9730b234e",
-                                                                "es": "InvestorAccount",
-                                                                "name": f"{self.investor}"
-                                                            }
-                                                        ]
                                                     }
                                                 ]
                                             }
@@ -420,7 +414,7 @@ class MyWindow(QWidget):
 
     def calculateReturn(self):
         print("Calculating return....")
-        highAccounts = self.load_from_db("positions_high")
+        highAccounts = self.load_from_db("positions_high", f"WHERE [Source name] = ?",(self.investor,))
         self.populate(self.resultTable,highAccounts)
         pools = []
         for item in highAccounts:
@@ -432,31 +426,34 @@ class MyWindow(QWidget):
             totalDays = int(datetime.strptime(month["tranEnd"], "%Y-%m-%dT%H:%M:%S").day  - datetime.strptime(month["tranStart"], "%Y-%m-%dT%H:%M:%S").day) + 1
             for pool in pools:
                 #investor to pool level calculations
-                startEntry = self.load_from_db("positions_high", f"WHERE [Target name] = ? AND [Date] LIKE ?",(pool,month["accountStart"]))[0]
-                endEntry = self.load_from_db("positions_high", f"WHERE [Target name] = ? AND [Date] LIKE ?",(pool,month["accountEnd"]))[0]
+                startEntry = self.load_from_db("positions_high", f"WHERE [Source name] = ? AND [Target name] = ? AND [Date] LIKE ?",(self.investor, pool,month["accountStart"]))[0]
+                endEntry = self.load_from_db("positions_high", f"WHERE [Source name] = ? AND [Target name] = ? AND [Date] LIKE ?",(self.investor, pool,month["accountEnd"]))[0]
                 
-                transactions = self.load_from_db("transactions_high", f"WHERE [Target name] = ? And [Date] BETWEEN ? AND ?", (pool,month["tranStart"],month["tranEnd"]))
+                transactions = self.load_from_db("transactions_high", f"WHERE [Source name] = ? AND [Target name] = ? And [Date] BETWEEN ? AND ?", (self.investor,pool,month["tranStart"],month["tranEnd"]))
                 cashFlowSum = 0
                 weightedCashFlow = 0
                 
                 for transaction in transactions:
-                    cashFlowSum -= float(transaction["Value"])
-                    weightedCashFlow -= float(transaction["Value"])  *  (totalDays -int(datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S").day))/totalDays
+                    cashFlowSum -= float(transaction["CashFlow"])
+                    weightedCashFlow -= float(transaction["CashFlow"])  *  (totalDays -int(datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S").day))/totalDays
                 returnFrac = (float(endEntry["Value"]) - float(startEntry["Value"]) - cashFlowSum)/( float(startEntry["Value"]) + weightedCashFlow)
                 returnPerc = round(returnFrac * 100, 2)
-                returnCash = round((float(endEntry["Value"]) - float(startEntry["Value"]) - cashFlowSum),2)
-                returns.append({"Pool":pool , "Fund" : "","Month" : month["Month"], "Return (%)" : returnPerc, "Return ($)" : returnCash, "StartVal" : float(startEntry["Value"]), "endVal" : float(endEntry["Value"])})
+                poolReturnCash = (float(endEntry["Value"]) - float(startEntry["Value"]) - cashFlowSum)
+                poolReturnCashDisp = round(poolReturnCash,2)
+                returns.append({"Pool":pool , "Fund" : "","Month" : month["Month"], "Return (%)" : returnPerc, "Return ($)" : poolReturnCashDisp, "StartVal" : float(startEntry["Value"]), "endVal" : float(endEntry["Value"])})
                 #Start fund level calculations
                 funds = []
                 lowAccounts = self.load_from_db("positions_low","WHERE [Source name] = ?",(pool,))
                 for account in lowAccounts:
                     if account["Target name"] not in funds:
                         funds.append(account["Target name"])
+                poolGainSum = 0
+                fundIndex = len(returns)
                 for fund in funds:
                     startEntry = self.load_from_db("positions_low", f"WHERE [Target name] = ? AND [Date] LIKE ?",(fund,month["accountStart"]))
                     endEntry = self.load_from_db("positions_low", f"WHERE [Target name] = ? AND [Date] LIKE ?",(fund,month["accountEnd"]))
                     if len(startEntry) < 1 or len(endEntry) < 1: #skips if missing the values
-                        break
+                        continue
                     elif len(startEntry) > 1 and len(endEntry) > 1: #combines the values for fund sub classes
                         for entry in startEntry[1:]:
                             startEntry[0]["Value"] = str(float(startEntry[0]["Value"]) + float(entry["Value"])) #adds values to the first index
@@ -475,11 +472,24 @@ class MyWindow(QWidget):
                     try:
                         returnFrac = (float(endEntry["Value"]) - float(startEntry["Value"]) - cashFlowSum)/( float(startEntry["Value"]) + weightedCashFlow)
                         returnPerc = round(returnFrac * 100, 2)
-                        returnCash = round((float(endEntry["Value"]) - float(startEntry["Value"]) - cashFlowSum),2)
+                        returnCash = (float(endEntry["Value"]) - float(startEntry["Value"]) - cashFlowSum)
+                        poolGainSum += returnCash
                         returns.append({"Pool":pool , "Fund" : fund, "Month" : month["Month"], "Return (%)" : returnPerc, "Return ($)" : returnCash, "StartVal" : float(startEntry["Value"]), "endVal" : float(endEntry["Value"])})
                     except:
                         print(f"Skipped fund {fund}")
                         #skips fund if the values are zero and cause an error
+                sum = 0
+                fracSum = 0
+                for row in returns[fundIndex:]:
+                    try:
+                        cashFraction = row["Return ($)"]/poolGainSum
+                        fracSum += cashFraction
+                        cashFraction = cashFraction * poolReturnCash
+                        #fraction of total gain times the total investors gain
+                    except:
+                        cashFraction = 0 #divide by zero protection
+                    row["Return ($)"] = round(cashFraction,2)
+                    sum += cashFraction
         self.populate(self.resultTable,returns)
         
 
