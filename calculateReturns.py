@@ -17,7 +17,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtGui import QBrush, QColor
 from PyQt5.QtCore import Qt
 
-testDataMode = False
+testDataMode = True
 
 # Determine assets path, works in PyInstaller bundle or script
 if getattr(sys, 'frozen', False):
@@ -159,6 +159,29 @@ class MyWindow(QWidget):
             self.classString = self.subasset_input.text()
         self.month = self.month_combo.currentText()
         self.year = self.year_combo.currentText()
+        self.updateMonths()
+        
+
+    def updateMonths(self):
+        month = int(datetime.strptime(self.month, "%B").month)
+        year = str(self.year)
+        lastDayCurrent = calendar.monthrange(int(year),month)[1]
+        lastDayCurrent   = str(lastDayCurrent).zfill(2)
+        lastDayLast = calendar.monthrange(int(year),month - 1)[1]
+        lastDayLast   = str(lastDayLast).zfill(2)
+        startMonth = str(month - 1).zfill(2)
+        month = str(month).zfill(2)
+        
+        tranStart = f"{year}-{month}-01T00:00:00.000Z"
+        bothEnd = f"{year}-{month}-{lastDayCurrent}T00:00:00.000Z"
+        accountStart = f"{year}-{startMonth}-{lastDayLast}T00:00:00.000Z"
+
+        self.startDate = accountStart
+        self.endDate = bothEnd
+
+        dbDates = [{"Month" : self.month, "tranStart" : tranStart.removesuffix(".000Z"), "endDay" : bothEnd.removesuffix(".000Z"), "accountStart" : accountStart.removesuffix(".000Z")}]
+        self.save_to_db("Months",dbDates)
+
     def pullInvestorNames(self):
         accountsHigh = self.load_from_db('positions_high')
         investors = []
@@ -166,6 +189,7 @@ class MyWindow(QWidget):
             if account["Source name"] not in investors:
                 investors.append(account["Source name"])
         investors.sort()
+        self.allInvestors = investors
         self.investor_input.addItems(investors)
     def update_fields(self):
         self.asset_input.setEnabled(self.radio_asset.isChecked() or self.radio_subasset.isChecked())
@@ -185,25 +209,7 @@ class MyWindow(QWidget):
         self.stack.setCurrentIndex(2)
 
     def pullData(self):
-        month = int(datetime.strptime(self.month, "%B").month)
-        
-        year = str(self.year)
-        lastDayCurrent = calendar.monthrange(int(year),month)[1]
-        lastDayCurrent   = str(lastDayCurrent).zfill(2)
-        lastDayLast = calendar.monthrange(int(year),month - 1)[1]
-        lastDayLast   = str(lastDayLast).zfill(2)
-
-        startMonth = str(month - 1).zfill(2)
-        month = str(month).zfill(2)
-        
-        
-        tranStart = f"{year}-{month}-01T00:00:00.000Z"
-        tranEnd = f"{year}-{month}-{lastDayCurrent}T00:00:00.000Z"
-        accountStart = f"{year}-{startMonth}-{lastDayLast}T00:00:00.000Z"
-        accountEnd = f"{year}-{month}-{lastDayCurrent}T00:00:00.000Z"
-
-        dbDates = [{"Month" : self.month, "tranStart" : tranStart.removesuffix(".000Z"), "tranEnd" : tranEnd.removesuffix(".000Z"), "accountStart" : accountStart.removesuffix(".000Z"), "accountEnd" : accountEnd.removesuffix(".000Z")}]
-        self.save_to_db("Months",dbDates)
+        self.updateMonths()
         
         apiData = {
             "tranCols": "Investment in, Investing Entity, Transaction Type, Effective date, Cash flow change",
@@ -248,8 +254,8 @@ class MyWindow(QWidget):
                                             "_op": "between_date",
                                             "_prop": "Effective date",
                                             "values": [
-                                                f"{tranStart}",
-                                                f"{tranEnd}"
+                                                f"{self.startDate}",
+                                                f"{self.endDate}"
                                             ]
                                         }
                                     ]
@@ -280,8 +286,8 @@ class MyWindow(QWidget):
                                             "_op": "between_date",
                                             "_prop": "Effective date",
                                             "values": [
-                                                f"{tranStart}",
-                                                f"{tranEnd}"
+                                                f"{self.startDate}",
+                                                f"{self.endDate}"
                                             ]
                                         }
                                     ]
@@ -338,8 +344,8 @@ class MyWindow(QWidget):
                                                 "_op": "between_date",
                                                 "_prop": "As of date",
                                                 "values": [
-                                                    f"{accountStart}",
-                                                    f"{accountEnd}"
+                                                    f"{self.startDate}",
+                                                    f"{self.endDate}"
                                                 ]
                                             }
                                         ]
@@ -366,8 +372,8 @@ class MyWindow(QWidget):
                                                         "_op": "between_date",
                                                         "_prop": "As of date",
                                                         "values": [
-                                                            f"{accountStart}",
-                                                            f"{accountEnd}"
+                                                            f"{self.startDate}",
+                                                            f"{self.endDate}"
                                                         ]
                                                     }
                                                 ]
@@ -418,6 +424,8 @@ class MyWindow(QWidget):
         self.updateFormVars()
         self.stack.setCurrentIndex(2)
         print("Calculating return....")
+        self.save_to_db("calcdata",None, action="reset")
+        print(f"'{self.investor}'", self.classType, self.month, self.year)
         highAccounts = self.load_from_db("positions_high", f"WHERE [Source name] = ?",(self.investor,))
         self.populate(self.resultTable,highAccounts)
         pools = []
@@ -425,37 +433,23 @@ class MyWindow(QWidget):
             if item["Target name"] not in pools:
                 pools.append(item["Target name"])
         months = self.load_from_db("Months")
-        returns =[]
+        calculations = []
         for month in months:
-            totalDays = int(datetime.strptime(month["tranEnd"], "%Y-%m-%dT%H:%M:%S").day  - datetime.strptime(month["tranStart"], "%Y-%m-%dT%H:%M:%S").day) + 1
+            totalDays = int(datetime.strptime(month["endDay"], "%Y-%m-%dT%H:%M:%S").day  - datetime.strptime(month["tranStart"], "%Y-%m-%dT%H:%M:%S").day) + 1
             for pool in pools:
-                #investor to pool level calculations
-                startEntry = self.load_from_db("positions_high", f"WHERE [Source name] = ? AND [Target name] = ? AND [Date] LIKE ?",(self.investor, pool,month["accountStart"]))[0]
-                endEntry = self.load_from_db("positions_high", f"WHERE [Source name] = ? AND [Target name] = ? AND [Date] LIKE ?",(self.investor, pool,month["accountEnd"]))[0]
-                
-                transactions = self.load_from_db("transactions_high", f"WHERE [Source name] = ? AND [Target name] = ? And [Date] BETWEEN ? AND ?", (self.investor,pool,month["tranStart"],month["tranEnd"]))
-                cashFlowSum = 0
-                weightedCashFlow = 0
-                
-                for transaction in transactions:
-                    cashFlowSum -= float(transaction["CashFlow"])
-                    weightedCashFlow -= float(transaction["CashFlow"])  *  (totalDays -int(datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S").day))/totalDays
-                returnFrac = (float(endEntry["Value"]) - float(startEntry["Value"]) - cashFlowSum)/( float(startEntry["Value"]) + weightedCashFlow)
-                returnPerc = round(returnFrac * 100, 2)
-                poolReturnCash = (float(endEntry["Value"]) - float(startEntry["Value"]) - cashFlowSum)
-                poolReturnCashDisp = round(poolReturnCash,2)
-                returns.append({"Pool":pool , "Fund" : "","Month" : month["Month"], "Return (%)" : returnPerc, "Return ($)" : poolReturnCashDisp, "StartVal" : float(startEntry["Value"]), "endVal" : float(endEntry["Value"])})
-                #Start fund level calculations
+                poolFunds = self.load_from_db("positions_low", f"WHERE [Source name] = ? AND [Date] BETWEEN ? AND ?",(pool,month["accountStart"],month["endDay"]))
+                #find MD denominator for each investor
+                #find total gain per pool
                 funds = []
-                lowAccounts = self.load_from_db("positions_low","WHERE [Source name] = ?",(pool,))
-                for account in lowAccounts:
+                for account in poolFunds:
                     if account["Target name"] not in funds:
                         funds.append(account["Target name"])
                 poolGainSum = 0
-                fundIndex = len(returns)
+                poolNAV = 0
+                MDdenominator = 0
                 for fund in funds:
                     startEntry = self.load_from_db("positions_low", f"WHERE [Target name] = ? AND [Date] LIKE ?",(fund,month["accountStart"]))
-                    endEntry = self.load_from_db("positions_low", f"WHERE [Target name] = ? AND [Date] LIKE ?",(fund,month["accountEnd"]))
+                    endEntry = self.load_from_db("positions_low", f"WHERE [Target name] = ? AND [Date] LIKE ?",(fund,month["endDay"]))
                     if len(startEntry) < 1 or len(endEntry) < 1: #skips if missing the values
                         continue
                     elif len(startEntry) > 1 and len(endEntry) > 1: #combines the values for fund sub classes
@@ -466,41 +460,164 @@ class MyWindow(QWidget):
                     startEntry = startEntry[0]
                     endEntry = endEntry[0]
 
-                    transactions = self.load_from_db("transactions_low", f"WHERE [Target name] = ? And [Date] BETWEEN ? AND ?", (fund,month["tranStart"],month["tranEnd"]))
+                    poolTransactions = self.load_from_db("transactions_low", f"WHERE [Target name] = ? AND [Date] BETWEEN ? AND ?", (fund,month["tranStart"],month["endDay"]))
                     cashFlowSum = 0
                     weightedCashFlow = 0
                     
-                    for transaction in transactions:
+                    for transaction in poolTransactions:
                         cashFlowSum -= float(transaction["CashFlow"])
                         weightedCashFlow -= float(transaction["CashFlow"])  *  (totalDays -int(datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S").day))/totalDays
                     try:
-                        returnFrac = (float(endEntry["Value"]) - float(startEntry["Value"]) - cashFlowSum)/( float(startEntry["Value"]) + weightedCashFlow)
-                        returnPerc = round(returnFrac * 100, 2)
                         returnCash = (float(endEntry["Value"]) - float(startEntry["Value"]) - cashFlowSum)
                         poolGainSum += returnCash
-                        returns.append({"Pool":pool , "Fund" : fund, "Month" : month["Month"], "Return (%)" : returnPerc, "Return ($)" : returnCash, "StartVal" : float(startEntry["Value"]), "endVal" : float(endEntry["Value"])})
-                    except:
-                        print(f"Skipped fund {fund}")
+                        MDdenominator += float(startEntry["Value"]) + weightedCashFlow
+                        poolNAV += float(endEntry["Value"])
+                    except Exception as e:
+                        print(f"Skipped fund {fund} for {pool} in {month["Month"]} because: {e}")
                         #skips fund if the values are zero and cause an error
-                sum = 0
-                fracSum = 0
-                for row in returns[fundIndex:]:
+                monthPoolEntry = {"Month": month["Month"], "Pool" : pool, "NAV" : poolNAV, "Gain" : poolGainSum, "MDdenominator" : MDdenominator}
+                investorMDdenominatorSum = 0
+                tempInvestorDicts = {}
+                for investor in self.allInvestors:
+                    investorWeightedCashFlow = 0
+                    investorCashFlowSum = 0
+                    tempInvestorDict = {}
                     try:
-                        cashFraction = row["Return ($)"]/poolGainSum
-                        fracSum += cashFraction
-                        cashFraction = cashFraction * poolReturnCash
-                        #fraction of total gain times the total investors gain
-                    except:
-                        cashFraction = 0 #divide by zero protection
-                    row["Return ($)"] = round(cashFraction,2)
-                    sum += cashFraction
-        self.populate(self.resultTable,returns)
+                        startEntry = self.load_from_db("positions_high", f"WHERE [Source name] = ? AND [Target name] = ? AND [Date] LIKE ?",(investor, pool,month["accountStart"]))[0]
+                        tempInvestorDict["Active"] = True
+                    except Exception as e:
+                        #skip month for this investor if there is no starting balance
+                        print(f"Skipping {investor} pool calculations for {month["Month"]} because {e}.")
+                        tempInvestorDict["Active"] = False
+                        continue
+                    investorTransactions = self.load_from_db("transactions_high",f"WHERE [Source name] = ? AND [Target name] = ? AND [Date] BETWEEN ? AND ?", (investor,pool,month["tranStart"],month["endDay"]))
+                    for transaction in investorTransactions:
+                        investorCashFlowSum -= float(transaction["CashFlow"])
+                        investorWeightedCashFlow -= float(transaction["CashFlow"])  *  (totalDays -int(datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S").day))/totalDays
+                    investorMDdenominator = float(startEntry["Value"]) + investorWeightedCashFlow
+                    tempInvestorDict["MDden"] = investorMDdenominator
+                    tempInvestorDict["cashFlow"] = investorCashFlowSum
+                    tempInvestorDict["startVal"] = float(startEntry["Value"])
+                    investorMDdenominatorSum += investorMDdenominator
+                    tempInvestorDicts[investor] = tempInvestorDict
+                for investor in tempInvestorDicts.keys():
+                    if tempInvestorDicts[investor]["Active"]:
+                        investorMDdenominator = tempInvestorDicts[investor]["MDden"]
+                        investorGain = poolGainSum * investorMDdenominator / investorMDdenominatorSum
+                        investorReturn = investorGain / investorMDdenominator
+                        monthPoolEntry[investor] = round(investorReturn * 100 , 2)
+                        investorEOM = tempInvestorDicts[investor]["startVal"] + tempInvestorDicts[investor]["cashFlow"] + investorGain
+                        inputs = (investorEOM, investor,pool, month["endDay"])
+                        EOMcheck = self.load_from_db("positions_high", f"WHERE [Source name] = ? AND [Target name] = ? AND [Date] = ?",inputs[1:])
+                        if len(EOMcheck) < 1:
+                            EOMentry = {"Date" : month["endDay"], "Source name" : investor, "Target name" : pool, "Value" : investorEOM}
+                            self.save_to_db("positions_high",EOMentry, action="add")
+                        else:
+                            query = "UPDATE positions_high SET Value = ? WHERE [Source name] = ? AND [Target name] = ? AND [Date] = ?"
+                            self.save_to_db("positions_high",None, action = "replace", query=query, inputs = inputs)
+                print(tempInvestorDicts)
+                calculations.append(monthPoolEntry)
+        self.populate(self.resultTable,calculations)
+        # returns =[]
+        # for month in months:
+        #     totalDays = int(datetime.strptime(month["tranEnd"], "%Y-%m-%dT%H:%M:%S").day  - datetime.strptime(month["tranStart"], "%Y-%m-%dT%H:%M:%S").day) + 1
+        #     for pool in pools:
+        #         #investor to pool level calculations
+        #         try:
+        #             startEntry = self.load_from_db("positions_high", f"WHERE [Source name] = ? AND [Target name] = ? AND [Date] LIKE ?",(self.investor, pool,month["accountStart"]))[0]
+        #         except:
+        #             #skip month for this pool if there is no starting balance
+        #             continue
+        #         endEntry = self.load_from_db("positions_high", f"WHERE [Source name] = ? AND [Target name] = ? AND [Date] LIKE ?",(self.investor, pool,month["accountEnd"]))[0]
+                
+        #         transactions = self.load_from_db("transactions_high", f"WHERE [Source name] = ? AND [Target name] = ? And [Date] BETWEEN ? AND ?", (self.investor,pool,month["tranStart"],month["tranEnd"]))
+        #         cashFlowSum = 0
+        #         weightedCashFlow = 0
+                
+        #         for transaction in transactions:
+        #             cashFlowSum -= float(transaction["CashFlow"])
+        #             weightedCashFlow -= float(transaction["CashFlow"])  *  (totalDays -int(datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S").day))/totalDays
+        #         returnFrac = (float(endEntry["Value"]) - float(startEntry["Value"]) - cashFlowSum)/( float(startEntry["Value"]) + weightedCashFlow)
+        #         returnPerc = round(returnFrac * 100, 2)
+        #         poolReturnCash = (float(endEntry["Value"]) - float(startEntry["Value"]) - cashFlowSum)
+        #         poolReturnCashDisp = round(poolReturnCash,2)
+        #         returns.append({"Pool":pool , "Fund" : "","Month" : month["Month"], "Return (%)" : returnPerc, "Return ($)" : poolReturnCashDisp, "StartVal" : float(startEntry["Value"]), "endVal" : float(endEntry["Value"])})
+        #         #Start fund level calculations
+        #         funds = []
+        #         lowAccounts = self.load_from_db("positions_low","WHERE [Source name] = ?",(pool,))
+        #         for account in lowAccounts:
+        #             if account["Target name"] not in funds:
+        #                 funds.append(account["Target name"])
+        #         poolGainSum = 0
+        #         fundIndex = len(returns)
+        #         for fund in funds:
+        #             startEntry = self.load_from_db("positions_low", f"WHERE [Target name] = ? AND [Date] LIKE ?",(fund,month["accountStart"]))
+        #             endEntry = self.load_from_db("positions_low", f"WHERE [Target name] = ? AND [Date] LIKE ?",(fund,month["accountEnd"]))
+        #             if len(startEntry) < 1 or len(endEntry) < 1: #skips if missing the values
+        #                 continue
+        #             elif len(startEntry) > 1 and len(endEntry) > 1: #combines the values for fund sub classes
+        #                 for entry in startEntry[1:]:
+        #                     startEntry[0]["Value"] = str(float(startEntry[0]["Value"]) + float(entry["Value"])) #adds values to the first index
+        #                 for entry in endEntry[1:]:
+        #                     endEntry[0]["Value"] = str(float(endEntry[0]["Value"]) + float(entry["Value"])) #adds values to the first index
+        #             startEntry = startEntry[0]
+        #             endEntry = endEntry[0]
+
+        #             transactions = self.load_from_db("transactions_low", f"WHERE [Target name] = ? And [Date] BETWEEN ? AND ?", (fund,month["tranStart"],month["tranEnd"]))
+        #             cashFlowSum = 0
+        #             weightedCashFlow = 0
+                    
+        #             for transaction in transactions:
+        #                 cashFlowSum -= float(transaction["CashFlow"])
+        #                 weightedCashFlow -= float(transaction["CashFlow"])  *  (totalDays -int(datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S").day))/totalDays
+        #             try:
+        #                 returnFrac = (float(endEntry["Value"]) - float(startEntry["Value"]) - cashFlowSum)/( float(startEntry["Value"]) + weightedCashFlow)
+        #                 returnPerc = round(returnFrac * 100, 2)
+        #                 returnCash = (float(endEntry["Value"]) - float(startEntry["Value"]) - cashFlowSum)
+        #                 poolGainSum += returnCash
+        #                 returns.append({"Pool":pool , "Fund" : fund, "Month" : month["Month"], "Return (%)" : returnPerc, "Return ($)" : returnCash, "StartVal" : float(startEntry["Value"]), "endVal" : float(endEntry["Value"])})
+        #             except:
+        #                 print(f"Skipped fund {fund}")
+        #                 #skips fund if the values are zero and cause an error
+        #         sum = 0
+        #         fracSum = 0
+        #         for row in returns[fundIndex:]:
+        #             try:
+        #                 cashFraction = row["Return ($)"]/poolGainSum
+        #                 fracSum += cashFraction
+        #                 cashFraction = cashFraction * poolReturnCash
+        #                 #fraction of total gain times the total investors gain
+        #             except:
+        #                 cashFraction = 0 #divide by zero protection
+        #             row["Return ($)"] = round(cashFraction,2)
+        #             sum += cashFraction
+        # self.populate(self.resultTable,returns)
         
 
-    def save_to_db(self, table, rows):
+    def save_to_db(self, table, rows, action = "", query = "",inputs = None):
         conn = sqlite3.connect(DATABASE_PATH)
         cur = conn.cursor()
-        if rows:
+        if action == "reset":
+            cur.execute(f"DROP TABLE IF EXISTS {table}")
+        elif action == "add":
+            try:
+                cols = list(rows.keys())
+                quoted_cols = ','.join(f'"{c}"' for c in cols)
+                placeholders = ','.join('?' for _ in cols)
+                sql = f'INSERT INTO "{table}" ({quoted_cols}) VALUES ({placeholders})'
+                vals = tuple(str(rows.get(c, '')) for c in cols)
+                cur.execute(sql,vals)
+                conn.commit()
+            except Exception as e:
+                print(f"Error inserting row into database: {e}")
+                print("e.args:", e.args)
+                # maybe also:
+                import traceback
+                print(traceback.format_exc())
+        elif action == "replace":
+            cur.execute(query,inputs)
+            conn.commit()
+        elif rows:
             cols = list(rows[0].keys())
             quoted_cols = ','.join(f'"{c}"' for c in cols)
             col_defs = ','.join(f'"{c}" TEXT' for c in cols)
