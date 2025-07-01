@@ -7,18 +7,33 @@ import requests
 import calendar
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
+import queue
 from dateutil.relativedelta import relativedelta
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QStackedWidget, QVBoxLayout,
     QLabel, QLineEdit, QPushButton, QFormLayout,
     QRadioButton, QButtonGroup, QComboBox, QHBoxLayout,
-    QTableWidget, QTableWidgetItem
+    QTableWidget, QTableWidgetItem, QProgressBar
 )
 from PyQt5.QtGui import QBrush, QColor
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTimer
 
 testDataMode = True
 
+executor = ThreadPoolExecutor()
+gui_queue = queue.Queue()
+
+def poll_queue():
+    try:
+        while True:
+            callback = gui_queue.get_nowait()
+            if callback:
+                try:
+                    callback()  # Run the GUI update in the main thread
+                except Exception as e:
+                    print(f"Error occured while attempting to run background gui update: {e}")
+    except queue.Empty:
+        pass
 # Determine assets path, works in PyInstaller bundle or script
 if getattr(sys, 'frozen', False):
     BASE_DIR = sys._MEIPASS
@@ -40,7 +55,6 @@ class MyWindow(QWidget):
 
         os.makedirs(ASSETS_DIR, exist_ok=True)
         self.api_key = None
-        self.executor = ThreadPoolExecutor()
         # main stack
         self.stack = QStackedWidget()
         self.init_api_key_page()
@@ -112,13 +126,23 @@ class MyWindow(QWidget):
         self.year_combo.setCurrentText(str(datetime.now().year))
         form.addRow('Year:', self.year_combo)
 
-        submit = QPushButton('Import Data')
-        submit.clicked.connect(self.beginImport)
-        form.addRow(submit)
+        self.importButton = QPushButton('Import Data')
+        self.importButton.clicked.connect(self.beginImport)
+        form.addRow(self.importButton)
+
+        self.apiLoadingBarBox = QWidget()
+        t2 = QVBoxLayout()
+        t2.addWidget(QLabel("Pulling transaction and account data from server..."))
+        self.apiLoadingBar = QProgressBar()
+        self.apiLoadingBar.setRange(0,100)
+        t2.addWidget(self.apiLoadingBar)
+        self.apiLoadingBarBox.setLayout(t2)
+        self.apiLoadingBarBox.setVisible(False)
+        form.addRow(self.apiLoadingBarBox)
 
         page.setLayout(form)
         self.stack.addWidget(page)
-        future = self.executor.submit(self.pullInvestorNames)
+        self.pullInvestorNames()
     
         
 
@@ -127,9 +151,13 @@ class MyWindow(QWidget):
         layout = QVBoxLayout()
         self.info_label = QLabel('Results')
         layout.addWidget(self.info_label)
-        self.recalculateButton = QPushButton("Recalculate Data")
-        self.recalculateButton.clicked.connect(lambda: self.calculateReturn())
-        layout.addWidget(self.recalculateButton)
+        self.calculateButton = QPushButton("Recalculate Data")
+        self.calculateButton.clicked.connect(lambda: self.calculatePushed())
+        layout.addWidget(self.calculateButton)
+        self.calculationLoadingBar = QProgressBar()
+        self.calculationLoadingBar.setRange(0,100)
+        self.calculationLoadingBar.setVisible(False)
+        layout.addWidget(self.calculationLoadingBar)
 
         hl = QHBoxLayout()
         self.resultTable = QTableWidget(); self.resultTable.setSortingEnabled(True)
@@ -142,11 +170,13 @@ class MyWindow(QWidget):
 
         page.setLayout(layout)
         self.stack.addWidget(page)
+    def calculatePushed(self):
+        executor.submit(self.calculateReturn)
     def beginImport(self):
         self.updateFormVars()
         print(f"'{self.investor}'", self.classType, self.month, self.year)
         if self.investor != "" and (self.classString is None or self.classString != ""):
-            self.pullData()
+            executor.submit(self.pullData)
     def updateFormVars(self):
         self.investor = self.investor_input.currentText()
         btn = self.radio_group.checkedButton()
@@ -177,14 +207,20 @@ class MyWindow(QWidget):
             month = int(monthDT.month)
             lastDayCurrent = calendar.monthrange(int(year),month)[1]
             lastDayCurrent   = str(lastDayCurrent).zfill(2)
-            lastDayLast = calendar.monthrange(int(year),month - 1)[1]
-            lastDayLast   = str(lastDayLast).zfill(2)
-            prevMonth = str(month - 1).zfill(2)
+            if month - 1 > 0:
+                prevMonth =  month - 1
+                prevMyear = year
+            else:
+                prevMonth = 12
+                prevMyear = str(int(year) - 1)
+            lastDayPrev = calendar.monthrange(int(prevMyear),prevMonth)[1]
+            lastDayPrev   = str(lastDayPrev).zfill(2)
+            prevMonth = str(prevMonth).zfill(2)
             month = str(month).zfill(2)
             
             tranStart = f"{year}-{month}-01T00:00:00.000Z"
             bothEnd = f"{year}-{month}-{lastDayCurrent}T00:00:00.000Z"
-            accountStart = f"{year}-{prevMonth}-{lastDayLast}T00:00:00.000Z"
+            accountStart = f"{prevMyear}-{prevMonth}-{lastDayPrev}T00:00:00.000Z"
 
             if firstRun:
                 self.startDate = accountStart
@@ -195,6 +231,7 @@ class MyWindow(QWidget):
             monthEntry = {"dateTime" : monthDT, "Month" : dateString, "tranStart" : tranStart.removesuffix(".000Z"), "endDay" : bothEnd.removesuffix(".000Z"), "accountStart" : accountStart.removesuffix(".000Z")}
             dbDates.append(monthEntry)
         self.endDate = bothEnd
+        print(self.startDate, self.endDate)
         self.save_to_db("Months",dbDates)
 
     def pullInvestorNames(self):
@@ -224,6 +261,10 @@ class MyWindow(QWidget):
         self.stack.setCurrentIndex(2)
 
     def pullData(self):
+        gui_queue.put(lambda: self.apiLoadingBarBox.setVisible(True))
+        gui_queue.put(lambda: self.importButton.setEnabled(False))
+        startDate = self.startDate
+        endDate = self.endDate
         self.pullInvestorNames()
         self.updateMonths()
         
@@ -235,6 +276,7 @@ class MyWindow(QWidget):
             "accountName": "InvestmentPosition",
             "accountSort": "As of Date:desc",
         }
+        loadingIdx = 0
         for i in range(2):
             cols_key = 'accountCols' if i == 1 else 'tranCols'
             name_key = 'accountName' if i == 1 else 'tranName'
@@ -246,6 +288,9 @@ class MyWindow(QWidget):
                 "x-sort": apiData[sort_key]
             }
             for j in range(2): #0: fund level, 1: pool to high investor level
+                gui_queue.put(lambda: self.apiLoadingBar.setValue(int((loadingIdx)/4 * 100)))
+                loadingIdx += 1
+                print(f"Loading idx: {loadingIdx} , result: {int((loadingIdx)/4 * 100)}")
                 investmentLevel = "Investing entity" if j == 0 else "Investment in"
                 if i == 0: #transaction
                     if j == 0:
@@ -270,8 +315,8 @@ class MyWindow(QWidget):
                                             "_op": "between_date",
                                             "_prop": "Effective date",
                                             "values": [
-                                                f"{self.startDate}",
-                                                f"{self.endDate}"
+                                                f"{startDate}",
+                                                f"{endDate}"
                                             ]
                                         }
                                     ]
@@ -302,8 +347,8 @@ class MyWindow(QWidget):
                                             "_op": "between_date",
                                             "_prop": "Effective date",
                                             "values": [
-                                                f"{self.startDate}",
-                                                f"{self.endDate}"
+                                                f"{startDate}",
+                                                f"{endDate}"
                                             ]
                                         }
                                     ]
@@ -360,8 +405,8 @@ class MyWindow(QWidget):
                                                 "_op": "between_date",
                                                 "_prop": "As of date",
                                                 "values": [
-                                                    f"{self.startDate}",
-                                                    f"{self.endDate}"
+                                                    f"{startDate}",
+                                                    f"{endDate}"
                                                 ]
                                             }
                                         ]
@@ -388,8 +433,8 @@ class MyWindow(QWidget):
                                                         "_op": "between_date",
                                                         "_prop": "As of date",
                                                         "values": [
-                                                            f"{self.startDate}",
-                                                            f"{self.endDate}"
+                                                            f"{startDate}",
+                                                            f"{endDate}"
                                                         ]
                                                     }
                                                 ]
@@ -426,22 +471,28 @@ class MyWindow(QWidget):
                         pass
                 if i == 1:
                     if j == 0:
-                        self.save_to_db('positions_low', rows)
+                        gui_queue.put(lambda: self.save_to_db('positions_low', rows))
                     else:
-                        self.save_to_db('positions_high', rows)
+                        gui_queue.put(lambda:self.save_to_db('positions_high', rows))
                 else:
                     if j == 0:
-                        self.save_to_db('transactions_low', rows)
+                        gui_queue.put(lambda:self.save_to_db('transactions_low', rows))
                     else:
-                        self.save_to_db('transactions_high', rows)
+                        gui_queue.put(lambda:self.save_to_db('transactions_high', rows))
+        gui_queue.put(lambda: self.stack.setCurrentIndex(2))
+        gui_queue.put(lambda: self.apiLoadingBarBox.setVisible(False))
         self.calculateReturn()
+        gui_queue.put(lambda: self.importButton.setEnabled(True))
 
     def calculateReturn(self):
+        gui_queue.put(lambda: self.calculateButton.setEnabled(False))
         self.updateFormVars()
         self.stack.setCurrentIndex(2)
         print("Calculating return....")
         self.save_to_db("calcdata",None, action="reset")
         print(f"'{self.investor}'", self.classType, self.month, self.year)
+        # Queue up a callable that, when run on the GUI thread, will hide the bar:
+        gui_queue.put(lambda: self.calculationLoadingBar.setVisible(True))
         highAccounts = self.load_from_db("positions_high")
         pools = []
         for item in highAccounts:
@@ -449,7 +500,10 @@ class MyWindow(QWidget):
                 pools.append(item["Target name"])
         months = self.load_from_db("Months", f"ORDER BY [dateTime] ASC")
         calculations = []
+        loadingIdx = 0
         for month in months:
+            gui_queue.put(lambda: self.calculationLoadingBar.setValue(int(loadingIdx/len(months) * 100)))
+            loadingIdx += 1
             print(f"Calculating month {month['Month']}")
             totalDays = int(datetime.strptime(month["endDay"], "%Y-%m-%dT%H:%M:%S").day  - datetime.strptime(month["tranStart"], "%Y-%m-%dT%H:%M:%S").day) + 1
             for pool in pools:
@@ -548,7 +602,10 @@ class MyWindow(QWidget):
             for key in row.keys():
                 if key not in keys:
                     keys.append(key)
-        self.populate(self.resultTable,calculations,keys = keys)
+        gui_queue.put(lambda: self.populate(self.resultTable,calculations,keys = keys))
+        gui_queue.put(lambda: self.calculationLoadingBar.setVisible(False))
+        gui_queue.put(lambda: self.calculateButton.setEnabled(True))
+        print("Calculations complete.")
         # returns =[]
         # for month in months:
         #     totalDays = int(datetime.strptime(month["tranEnd"], "%Y-%m-%dT%H:%M:%S").day  - datetime.strptime(month["tranStart"], "%Y-%m-%dT%H:%M:%S").day) + 1
@@ -710,6 +767,9 @@ if __name__ == '__main__':
     key = os.environ.get('Dynamo_API')
     ok = key and key != 'value'
     app = QApplication(sys.argv)
+    timer = QTimer()
+    timer.timeout.connect(poll_queue)
+    timer.start(500)
     w = MyWindow(start_index=0 if not ok else 1)
     if ok: w.api_key = key
     w.show()
