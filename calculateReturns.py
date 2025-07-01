@@ -146,7 +146,6 @@ class MyWindow(QWidget):
         self.updateFormVars()
         print(f"'{self.investor}'", self.classType, self.month, self.year)
         if self.investor != "" and (self.classString is None or self.classString != ""):
-            print("yes")
             self.pullData()
     def updateFormVars(self):
         self.investor = self.investor_input.currentText()
@@ -163,23 +162,39 @@ class MyWindow(QWidget):
         
 
     def updateMonths(self):
-        month = int(datetime.strptime(self.month, "%B").month)
+        startMonth = int(datetime.strptime(self.month, "%B").month)
         year = str(self.year)
-        lastDayCurrent = calendar.monthrange(int(year),month)[1]
-        lastDayCurrent   = str(lastDayCurrent).zfill(2)
-        lastDayLast = calendar.monthrange(int(year),month - 1)[1]
-        lastDayLast   = str(lastDayLast).zfill(2)
-        startMonth = str(month - 1).zfill(2)
-        month = str(month).zfill(2)
-        
-        tranStart = f"{year}-{month}-01T00:00:00.000Z"
-        bothEnd = f"{year}-{month}-{lastDayCurrent}T00:00:00.000Z"
-        accountStart = f"{year}-{startMonth}-{lastDayLast}T00:00:00.000Z"
+        start = datetime(int(year),int(startMonth),1)
+        end = datetime.now()
+        index = start
+        monthList = []
+        while index < end:
+            monthList.append(index)
+            index += relativedelta(months=1)
+        dbDates = []
+        firstRun = True
+        for monthDT in monthList:
+            month = int(monthDT.month)
+            lastDayCurrent = calendar.monthrange(int(year),month)[1]
+            lastDayCurrent   = str(lastDayCurrent).zfill(2)
+            lastDayLast = calendar.monthrange(int(year),month - 1)[1]
+            lastDayLast   = str(lastDayLast).zfill(2)
+            prevMonth = str(month - 1).zfill(2)
+            month = str(month).zfill(2)
+            
+            tranStart = f"{year}-{month}-01T00:00:00.000Z"
+            bothEnd = f"{year}-{month}-{lastDayCurrent}T00:00:00.000Z"
+            accountStart = f"{year}-{prevMonth}-{lastDayLast}T00:00:00.000Z"
 
-        self.startDate = accountStart
+            if firstRun:
+                self.startDate = accountStart
+                firstRun = False
+            
+            dateString = monthDT.strftime("%B %Y")
+
+            monthEntry = {"dateTime" : monthDT, "Month" : dateString, "tranStart" : tranStart.removesuffix(".000Z"), "endDay" : bothEnd.removesuffix(".000Z"), "accountStart" : accountStart.removesuffix(".000Z")}
+            dbDates.append(monthEntry)
         self.endDate = bothEnd
-
-        dbDates = [{"Month" : self.month, "tranStart" : tranStart.removesuffix(".000Z"), "endDay" : bothEnd.removesuffix(".000Z"), "accountStart" : accountStart.removesuffix(".000Z")}]
         self.save_to_db("Months",dbDates)
 
     def pullInvestorNames(self):
@@ -209,6 +224,7 @@ class MyWindow(QWidget):
         self.stack.setCurrentIndex(2)
 
     def pullData(self):
+        self.pullInvestorNames()
         self.updateMonths()
         
         apiData = {
@@ -426,15 +442,15 @@ class MyWindow(QWidget):
         print("Calculating return....")
         self.save_to_db("calcdata",None, action="reset")
         print(f"'{self.investor}'", self.classType, self.month, self.year)
-        highAccounts = self.load_from_db("positions_high", f"WHERE [Source name] = ?",(self.investor,))
-        self.populate(self.resultTable,highAccounts)
+        highAccounts = self.load_from_db("positions_high")
         pools = []
         for item in highAccounts:
             if item["Target name"] not in pools:
                 pools.append(item["Target name"])
-        months = self.load_from_db("Months")
+        months = self.load_from_db("Months", f"ORDER BY [dateTime] ASC")
         calculations = []
         for month in months:
+            print(f"Calculating month {month['Month']}")
             totalDays = int(datetime.strptime(month["endDay"], "%Y-%m-%dT%H:%M:%S").day  - datetime.strptime(month["tranStart"], "%Y-%m-%dT%H:%M:%S").day) + 1
             for pool in pools:
                 poolFunds = self.load_from_db("positions_low", f"WHERE [Source name] = ? AND [Date] BETWEEN ? AND ?",(pool,month["accountStart"],month["endDay"]))
@@ -447,9 +463,10 @@ class MyWindow(QWidget):
                 poolGainSum = 0
                 poolNAV = 0
                 MDdenominator = 0
+                poolWeightedCashFlow = 0
                 for fund in funds:
-                    startEntry = self.load_from_db("positions_low", f"WHERE [Target name] = ? AND [Date] LIKE ?",(fund,month["accountStart"]))
-                    endEntry = self.load_from_db("positions_low", f"WHERE [Target name] = ? AND [Date] LIKE ?",(fund,month["endDay"]))
+                    startEntry = self.load_from_db("positions_low", f"WHERE [Source name] = ? AND [Target name] = ? AND [Date] LIKE ?",(pool, fund,month["accountStart"]))
+                    endEntry = self.load_from_db("positions_low", f"WHERE [Source name] = ? AND [Target name] = ? AND [Date] LIKE ?",(pool, fund,month["endDay"]))
                     if len(startEntry) < 1 or len(endEntry) < 1: #skips if missing the values
                         continue
                     elif len(startEntry) > 1 and len(endEntry) > 1: #combines the values for fund sub classes
@@ -472,9 +489,13 @@ class MyWindow(QWidget):
                         poolGainSum += returnCash
                         MDdenominator += float(startEntry["Value"]) + weightedCashFlow
                         poolNAV += float(endEntry["Value"])
+                        poolWeightedCashFlow += weightedCashFlow
                     except Exception as e:
                         print(f"Skipped fund {fund} for {pool} in {month["Month"]} because: {e}")
                         #skips fund if the values are zero and cause an error
+                if poolNAV == 0 and poolWeightedCashFlow == 0:
+                    #skips the pool if there is no cash flow or value in the pool
+                    continue
                 monthPoolEntry = {"Month": month["Month"], "Pool" : pool, "NAV" : poolNAV, "Gain" : poolGainSum, "MDdenominator" : MDdenominator}
                 investorMDdenominatorSum = 0
                 tempInvestorDicts = {}
@@ -487,7 +508,7 @@ class MyWindow(QWidget):
                         tempInvestorDict["Active"] = True
                     except Exception as e:
                         #skip month for this investor if there is no starting balance
-                        print(f"Skipping {investor} pool calculations for {month["Month"]} because {e}.")
+                        #print(f"Skipping '{investor}' pool '{pool}'' calculations for {month["Month"]} because {e}.")
                         tempInvestorDict["Active"] = False
                         continue
                     investorTransactions = self.load_from_db("transactions_high",f"WHERE [Source name] = ? AND [Target name] = ? AND [Date] BETWEEN ? AND ?", (investor,pool,month["tranStart"],month["endDay"]))
@@ -503,8 +524,14 @@ class MyWindow(QWidget):
                 for investor in tempInvestorDicts.keys():
                     if tempInvestorDicts[investor]["Active"]:
                         investorMDdenominator = tempInvestorDicts[investor]["MDden"]
-                        investorGain = poolGainSum * investorMDdenominator / investorMDdenominatorSum
-                        investorReturn = investorGain / investorMDdenominator
+                        if investorMDdenominatorSum == 0:
+                            investorGain = 0 #0 if no true value in the pool. avoids error
+                        else:
+                            investorGain = poolGainSum * investorMDdenominator / investorMDdenominatorSum
+                        if investorMDdenominator == 0:
+                            investorReturn = 0 #0 if investor has no value in pool. avoids error
+                        else:
+                            investorReturn = investorGain / investorMDdenominator
                         monthPoolEntry[investor] = round(investorReturn * 100 , 2)
                         investorEOM = tempInvestorDicts[investor]["startVal"] + tempInvestorDicts[investor]["cashFlow"] + investorGain
                         inputs = (investorEOM, investor,pool, month["endDay"])
@@ -515,9 +542,13 @@ class MyWindow(QWidget):
                         else:
                             query = "UPDATE positions_high SET Value = ? WHERE [Source name] = ? AND [Target name] = ? AND [Date] = ?"
                             self.save_to_db("positions_high",None, action = "replace", query=query, inputs = inputs)
-                print(tempInvestorDicts)
                 calculations.append(monthPoolEntry)
-        self.populate(self.resultTable,calculations)
+        keys = []
+        for row in calculations:
+            for key in row.keys():
+                if key not in keys:
+                    keys.append(key)
+        self.populate(self.resultTable,calculations,keys = keys)
         # returns =[]
         # for month in months:
         #     totalDays = int(datetime.strptime(month["tranEnd"], "%Y-%m-%dT%H:%M:%S").day  - datetime.strptime(month["tranStart"], "%Y-%m-%dT%H:%M:%S").day) + 1
@@ -634,10 +665,13 @@ class MyWindow(QWidget):
             print(f"No rows found for {table}")
         conn.close()
 
-    def populate(self, table, rows):
+    def populate(self, table, rows, keys = None):
         if not rows:
             return
-        headers = list(rows[0].keys())
+        if keys is None:
+            headers = list(rows[0].keys())
+        else:
+            headers = list(keys)
         table.setColumnCount(len(headers))
         table.setHorizontalHeaderLabels(headers)
         table.setRowCount(len(rows))
@@ -661,6 +695,8 @@ class MyWindow(QWidget):
             try:
                 if condStatement != "" and parameters is not None:
                     cur.execute(f'SELECT * FROM {table} {condStatement}',parameters)
+                elif condStatement != "" and parameters is None:
+                    cur.execute(f'SELECT * FROM {table} {condStatement}')
                 else:
                     cur.execute(f'SELECT * FROM {table}')
                 cols = [d[0] for d in cur.description]
