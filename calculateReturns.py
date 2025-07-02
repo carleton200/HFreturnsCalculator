@@ -19,7 +19,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtGui import QBrush, QColor
 from PyQt5.QtCore import Qt, QTimer
 
-testDataMode = False
+testDataMode = True
 
 executor = ThreadPoolExecutor()
 gui_queue = queue.Queue()
@@ -160,6 +160,9 @@ class MyWindow(QWidget):
         layout = QVBoxLayout()
         self.info_label = QLabel('Results')
         layout.addWidget(self.info_label)
+        btn_to_form = QPushButton('Go to Form')
+        btn_to_form.clicked.connect(lambda: self.stack.setCurrentIndex(1))
+        layout.addWidget(btn_to_form)
         self.calculateButton = QPushButton("Recalculate Data")
         self.calculateButton.clicked.connect(lambda: self.calculatePushed())
         layout.addWidget(self.calculateButton)
@@ -179,9 +182,7 @@ class MyWindow(QWidget):
         hl.addWidget(self.resultTable)
         layout.addLayout(hl)
 
-        btn_to_form = QPushButton('Go to Form')
-        btn_to_form.clicked.connect(lambda: self.stack.setCurrentIndex(1))
-        layout.addWidget(btn_to_form)
+        
 
         page.setLayout(layout)
         self.stack.addWidget(page)
@@ -515,9 +516,11 @@ class MyWindow(QWidget):
             print("Calculating return....")
             highAccounts = self.load_from_db("positions_high")
             pools = []
+            poolNames = []
             for item in highAccounts:
-                if item["Target name"] not in pools:
-                    pools.append(item["Target name"])
+                if item["Target name"] not in poolNames:
+                    pools.append({"poolName" : item["Target name"], "assetClass" : item["ExposureAssetClass"], "subAssetClass" : item["ExposureAssetClassSub-assetClass(E)"]})
+                    poolNames.append(item["Target name"])
             months = self.load_from_db("Months", f"ORDER BY [dateTime] ASC")
             calculations = []
             loadingIdx = 0
@@ -527,6 +530,9 @@ class MyWindow(QWidget):
             else:
                 noCalculations = False
             for month in months:
+                totalNAV = 0
+                totalGain = 0
+                totalMDdenominator = 0
                 monthCalculations = []
                 perc = int(loadingIdx/loadingTotal * 100)
                 if perc < 0 or perc > 100:
@@ -545,10 +551,23 @@ class MyWindow(QWidget):
                         gui_queue.put(lambda: self.calculationLabel.setText(f"Using cached data for {month['Month']}"))
                         loadingTotal -= 1
                         continue
-                loadingIdx += 1
                 gui_queue.put(lambda: self.calculationLabel.setText(f"Calculating Financial Data for : {month['Month']}"))
                 totalDays = int(datetime.strptime(month["endDay"], "%Y-%m-%dT%H:%M:%S").day  - datetime.strptime(month["tranStart"], "%Y-%m-%dT%H:%M:%S").day) + 1
-                for pool in pools:
+                loadingPoolIdx = 0
+                totalPoolNum = len(pools)
+                for poolDict in pools:
+                    try:
+                        perc = int((loadingIdx/loadingTotal + loadingPoolIdx/totalPoolNum *1/loadingTotal ) * 100)
+                    except:
+                        #guard against divide by zero
+                        print("Warning: divide by zero in loading bar calculations.")
+                        pass
+                    loadingPoolIdx += 1
+                    if perc < 0 or perc > 100:
+                        print(f"Warning: percentage failure. loading idx: {loadingIdx}, loading total : {loadingTotal}, percentage: {perc}")
+                        perc = int(90) #should not happen but I'm putting a safeguard
+                    gui_queue.put(lambda: self.calculationLoadingBar.setValue(perc))
+                    pool = poolDict["poolName"]
                     poolFunds = self.load_from_db("positions_low", f"WHERE [Source name] = ? AND [Date] BETWEEN ? AND ?",(pool,month["accountStart"],month["endDay"]))
                     #find MD denominator for each investor
                     #find total gain per pool
@@ -558,8 +577,9 @@ class MyWindow(QWidget):
                             funds.append(account["Target name"])
                     poolGainSum = 0
                     poolNAV = 0
-                    MDdenominator = 0
+                    poolMDdenominator = 0
                     poolWeightedCashFlow = 0
+                    fundEntryList = []
                     for fund in funds:
                         startEntry = self.load_from_db("positions_low", f"WHERE [Source name] = ? AND [Target name] = ? AND [Date] = ?",(pool, fund,month["accountStart"]))
                         endEntry = self.load_from_db("positions_low", f"WHERE [Source name] = ? AND [Target name] = ? AND [Date] = ?",(pool, fund,month["endDay"]))
@@ -579,20 +599,40 @@ class MyWindow(QWidget):
                             cashFlowSum -= float(transaction["CashFlow"])
                             weightedCashFlow -= float(transaction["CashFlow"])  *  (totalDays -int(datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S").day))/totalDays
                         try:
-                            returnCash = (float(endEntry["Value"]) - float(startEntry["Value"]) - cashFlowSum)
-                            poolGainSum += returnCash
-                            MDdenominator += float(startEntry["Value"]) + weightedCashFlow
-                            poolNAV += float(endEntry["Value"])
+                            fundGain = (float(endEntry["Value"]) - float(startEntry["Value"]) - cashFlowSum)
+                            fundMDdenominator = float(startEntry["Value"]) + weightedCashFlow
+                            fundNAV = float(endEntry["Value"])
+                            fundReturn = fundGain/fundMDdenominator * 100 if fundMDdenominator != 0 else 0
+                            poolGainSum += fundGain
+                            poolMDdenominator += fundMDdenominator
+                            poolNAV += fundNAV
                             poolWeightedCashFlow += weightedCashFlow
+                            monthFundEntry = {"dateTime" : month["dateTime"], "Investor" : "Total Fund", "Pool" : pool, "Fund" : fund ,
+                                              "assetClass" : poolDict["assetClass"], "subAssetClass" : poolDict["subAssetClass"],
+                                              "NAV" : fundNAV, "Gain" : fundGain, "Return" : fundReturn , 
+                                              "MDdenominator" : fundMDdenominator}
+                            calculations.append(monthFundEntry)
+                            monthCalculations.append(monthFundEntry)
+                            fundEntryList.append(monthFundEntry)
+
+
                         except Exception as e:
                             print(f"Skipped fund {fund} for {pool} in {month["Month"]} because: {e}")
                             #skips fund if the values are zero and cause an error
                     if poolNAV == 0 and poolWeightedCashFlow == 0:
                         #skips the pool if there is no cash flow or value in the pool
                         continue
-                    monthPoolEntry = {"dateTime" : month["dateTime"], "Month": month["Month"], "Pool" : pool, "NAV" : poolNAV, "Gain" : poolGainSum, "MDdenominator" : MDdenominator}
+                    totalNAV += poolNAV
+                    totalGain += poolGainSum
+                    totalMDdenominator += poolMDdenominator
+                    if poolMDdenominator == 0:
+                        poolReturn = 0
+                    else:
+                        poolReturn = poolGainSum/poolMDdenominator * 100
+                    monthPoolEntry = {"dateTime" : month["dateTime"], "Investor" : "Total Pool", "Pool" : pool, "Fund" : None ,"assetClass" : poolDict["assetClass"], "subAssetClass" : poolDict["subAssetClass"] ,"NAV" : poolNAV, "Gain" : poolGainSum, "Return" : poolReturn , "MDdenominator" : poolMDdenominator, "Ownership" : None}
                     investorMDdenominatorSum = 0
                     tempInvestorDicts = {}
+                    poolOwnershipSum = 0
                     for investor in self.allInvestors:
                         investorWeightedCashFlow = 0
                         investorCashFlowSum = 0
@@ -614,6 +654,8 @@ class MyWindow(QWidget):
                         tempInvestorDict["startVal"] = float(startEntry["Value"])
                         investorMDdenominatorSum += investorMDdenominator
                         tempInvestorDicts[investor] = tempInvestorDict
+                    investorEOMsum = 0
+                    monthPoolEntryInvestorList = []
                     for investor in tempInvestorDicts.keys():
                         if tempInvestorDicts[investor]["Active"]:
                             investorMDdenominator = tempInvestorDicts[investor]["MDden"]
@@ -625,8 +667,15 @@ class MyWindow(QWidget):
                                 investorReturn = 0 #0 if investor has no value in pool. avoids error
                             else:
                                 investorReturn = investorGain / investorMDdenominator
-                            monthPoolEntry[investor] = round(investorReturn * 100 , 2)
                             investorEOM = tempInvestorDicts[investor]["startVal"] + tempInvestorDicts[investor]["cashFlow"] + investorGain
+                            investorEOMsum += investorEOM
+                            monthPoolEntryInvestor = monthPoolEntry.copy()
+                            monthPoolEntryInvestor["Investor"] = investor
+                            monthPoolEntryInvestor["NAV"] = investorEOM
+                            monthPoolEntryInvestor["Gain"] = investorGain
+                            monthPoolEntryInvestor["Return"] = investorReturn * 100
+                            monthPoolEntryInvestor["MDdenominator"] = investorMDdenominator
+                            monthPoolEntryInvestorList.append(monthPoolEntryInvestor)
                             inputs = (investorEOM, investor,pool, month["endDay"])
                             EOMcheck = self.load_from_db("positions_high", f"WHERE [Source name] = ? AND [Target name] = ? AND [Date] = ?",inputs[1:])
                             if len(EOMcheck) < 1:
@@ -635,11 +684,43 @@ class MyWindow(QWidget):
                             else:
                                 query = "UPDATE positions_high SET Value = ? WHERE [Source name] = ? AND [Target name] = ? AND [Date] = ?"
                                 self.save_to_db("positions_high",None, action = "replace", query=query, inputs = inputs)
+                    for investorEntry in monthPoolEntryInvestorList:
+                        if investorEOMsum != 0:
+                            investorEOM = investorEntry["NAV"]
+                            ownershipPerc = investorEOM/investorEOMsum * 100
+                            investorEntry["Ownership"] = ownershipPerc
+                            poolOwnershipSum += ownershipPerc
+                        calculations.append(investorEntry)
+                        monthCalculations.append(investorEntry)
+                    monthPoolEntry["Ownership"] = poolOwnershipSum
+                    
+                    
+                    for investorEntry in monthPoolEntryInvestorList:
+                        for fundEntry in fundEntryList:
+                            fundInvestorNAV = investorEntry["Ownership"] * fundEntry["NAV"]
+                            fundInvestorGain = fundEntry["Gain"] / monthPoolEntry["Gain"] * investorEntry["Gain"] if monthPoolEntry["Gain"] != 0 else None
+                            fundInvestorMDdenominator = investorEntry["MDdenominator"] / monthPoolEntry["MDdenominator"] * fundEntry["MDdenominator"] if monthPoolEntry["MDdenominator"] != 0 else None
+                            fundInvestorReturn = fundInvestorGain / fundInvestorMDdenominator if fundInvestorMDdenominator != 0 else None
+                            fundInvestorOwnership = fundInvestorNAV /  fundEntry["NAV"] if fundEntry["NAV"] != 0 else None
+                            monthFundInvestorEntry = {"dateTime" : month["dateTime"], "Investor" : investorEntry["Investor"], "Pool" : pool, "Fund" : fundEntry["Fund"] ,
+                                              "assetClass" : poolDict["assetClass"], "subAssetClass" : poolDict["subAssetClass"],
+                                              "NAV" : fundInvestorNAV, "Gain" : fundInvestorGain , "Return" :  fundInvestorReturn, 
+                                              "MDdenominator" : fundInvestorMDdenominator, "Ownership" : fundInvestorOwnership}
+                            calculations.append(monthFundInvestorEntry)
+                            monthCalculations.append(monthFundInvestorEntry)
                     calculations.append(monthPoolEntry)
                     monthCalculations.append(monthPoolEntry)
+                    #End of pools loop
+                    
+                
+                if totalNAV != 0 and totalMDdenominator != 0:
+                    monthTotalEntry = {"dateTime" : month["dateTime"], "Investor" : "Total Portfolio", "Pool" : None, "Fund" : None ,"assetClass" : None, "subAssetClass" : None ,"NAV" : totalNAV, "Gain" : totalGain, "Return" : totalGain/totalMDdenominator * 100 , "MDdenominator" : totalMDdenominator}
+                    calculations.append(monthTotalEntry)
+                    monthCalculations.append(monthTotalEntry)
                 if datetime.now() > twoMonthAhead and not noCalculations:
                     self.save_to_db("calculations",monthCalculations, inputs=(month["dateTime"],), action="calculationUpdate")
-            
+                loadingIdx += 1
+                #end of months loop
             keys = []
             for row in calculations:
                 for key in row.keys():
@@ -728,15 +809,24 @@ class MyWindow(QWidget):
         table.setHorizontalHeaderLabels(headers)
         table.setRowCount(len(rows))
 
-        # Determine if we need to shade rows where 'Fund' is empty
-        shade_index = headers.index('Fund') if 'Fund' in headers else None
+        green = QColor(181, 235, 135)
+        lightGreen = QColor(213, 236, 193)
 
         for r, row in enumerate(rows):
-            is_empty_fund = (row.get('Fund', '') == '') if shade_index is not None else False
+            is_total_pool = (row.get('Investor', '') == "Total Pool")
+            is_total_portfolio = (row.get('Investor', '') == "Total Portfolio")
+            is_total_fund = (row.get('Fund', '') is not None) and (row.get('Investor', '') == "Total Fund")
+            is_fund = (row.get('Fund', '') is not None) and (row.get('Investor', '') != "Total Fund")
             for c, h in enumerate(headers):
                 item = QTableWidgetItem(str(row.get(h, '')))
-                if is_empty_fund:
+                if is_total_pool:
                     item.setBackground(QBrush(Qt.lightGray))
+                elif is_total_portfolio:
+                    item.setBackground(QBrush(Qt.darkGray))
+                elif is_fund:
+                    item.setBackground(QBrush(lightGreen))
+                elif is_total_fund:
+                    item.setBackground(QBrush(green))
                 table.setItem(r, c, item)
 
     def load_from_db(self,table, condStatement = "",parameters = None):
