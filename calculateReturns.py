@@ -6,6 +6,7 @@ import sqlite3
 import requests
 import calendar
 import time
+import copy
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 import queue
@@ -14,10 +15,10 @@ from PyQt5.QtWidgets import (
     QApplication, QWidget, QStackedWidget, QVBoxLayout,
     QLabel, QLineEdit, QPushButton, QFormLayout,
     QRadioButton, QButtonGroup, QComboBox, QHBoxLayout,
-    QTableWidget, QTableWidgetItem, QProgressBar
+    QTableWidget, QTableWidgetItem, QProgressBar, QTableView, QCheckBox
 )
 from PyQt5.QtGui import QBrush, QColor
-from PyQt5.QtCore import Qt, QTimer, QAbstractTableModel, QModelIndex
+from PyQt5.QtCore import Qt, QTimer, QAbstractTableModel, QModelIndex, QObject, pyqtSignal, QThread
 
 testDataMode = False
 
@@ -60,6 +61,7 @@ class MyWindow(QWidget):
 
         os.makedirs(ASSETS_DIR, exist_ok=True)
         self.api_key = None
+        self.filterCallLock = False
         # main stack
         self.main_layout = QVBoxLayout()
         self.stack = QStackedWidget()
@@ -68,7 +70,6 @@ class MyWindow(QWidget):
         self.init_api_key_page() #1
         self.init_returns_page() #2
         self.init_calculation_page() #3
-        self.init_form_page()  #4
 
         self.stack.setCurrentIndex(start_index)
         self.main_layout.addWidget(self.stack)
@@ -109,60 +110,6 @@ class MyWindow(QWidget):
         page.setLayout(layout)
         self.stack.addWidget(page)
 
-    def init_form_page(self):
-        page = QWidget()
-        form = QFormLayout()
-    
-
-        # navigation to results (loads from DB)
-        
-
-        # form inputs (submit disabled)
-        self.investor_input = QComboBox()
-        form.addRow('Investor:', self.investor_input)
-        self.radio_group = QButtonGroup()
-        self.radio_total = QRadioButton('Total Portfolio')
-        self.radio_asset = QRadioButton('Asset')
-        self.radio_subasset = QRadioButton('Sub-Asset')
-        for rb in (self.radio_total, self.radio_asset, self.radio_subasset):
-            self.radio_group.addButton(rb)
-        self.radio_total.setChecked(True)
-        tl = QHBoxLayout()
-        tl.addWidget(self.radio_total)
-        tl.addWidget(self.radio_asset)
-        tl.addWidget(self.radio_subasset)
-        form.addRow('Select Type:', tl)
-
-        self.asset_input = QLineEdit(); self.asset_input.setEnabled(False)
-        form.addRow('Asset:', self.asset_input)
-        self.subasset_input = QLineEdit(); self.subasset_input.setEnabled(False)
-        form.addRow('Sub-asset:', self.subasset_input)
-        for rb in (self.radio_total, self.radio_asset, self.radio_subasset):
-            rb.toggled.connect(self.update_fields)
-
-        self.month_combo = QComboBox()
-        months = ['January','February','March','April','May','June','July','August','September','October','November','December']
-        self.month_combo.addItems(months)
-        self.month_combo.setCurrentIndex((datetime.now()-relativedelta(months=1)).month-1)
-        form.addRow('Month:', self.month_combo)
-
-        self.year_combo = QComboBox()
-        years = [str(y) for y in range(datetime.now().year-10, datetime.now().year+1)]
-        self.year_combo.addItems(years)
-        self.year_combo.setCurrentText(str(datetime.now().year))
-        form.addRow('Year:', self.year_combo)
-
-        
-
-
-        
-
-        page.setLayout(form)
-        self.stack.addWidget(page)
-        self.pullInvestorNames()
-    
-        
-
     def init_calculation_page(self):
         page = QWidget()
         layout = QVBoxLayout()
@@ -174,7 +121,7 @@ class MyWindow(QWidget):
         
 
         hl = QHBoxLayout()
-        self.calculationTable = QTableWidget(); self.calculationTable.setSortingEnabled(True)
+        self.calculationTable = QTableView(); self.calculationTable.setSortingEnabled(True)
         hl.addWidget(self.calculationTable)
         layout.addLayout(hl)
 
@@ -205,6 +152,20 @@ class MyWindow(QWidget):
 
         fullFilterBox = QWidget()
         filterLayout = QHBoxLayout()
+
+        tableSelectorBox = QWidget()
+        tableSelectorLayout = QVBoxLayout()
+        self.tableBtnGroup = QButtonGroup()
+        self.complexTableBtn = QRadioButton("Complex Table")
+        self.monthlyTableBtn = QRadioButton("Monthly Table")
+        for rb in (self.complexTableBtn,self.monthlyTableBtn):
+            self.tableBtnGroup.addButton(rb)
+            #rb.toggled.connect(self.updateTableType)
+            tableSelectorLayout.addWidget(rb)
+        self.complexTableBtn.setChecked(True)
+        tableSelectorBox.setLayout(tableSelectorLayout)
+        filterLayout.addWidget(tableSelectorBox)
+
         filterOptions = [
                             {"key": "Investor",       "name": "Investor"},
                             {"key": "assetClass",     "name": "Asset Class"},
@@ -213,23 +174,37 @@ class MyWindow(QWidget):
                             {"key": "Fund",           "name": "Fund/Investment"},
                         ]
         self.filterDict = {}
+        self.filterRadioBtnDict = {}
+        self.filterBtnGroup = QButtonGroup()
+        self.filterBtnGroup.setExclusive(False)
         for filter in filterOptions:
             filterBox = QWidget()
             filterBoxLayout = QVBoxLayout()
-            filterLabel = QLabel(f"{filter["name"]}:")
+            self.filterRadioBtnDict[filter["key"]] = QCheckBox(f"{filter["name"]}:")
+            self.filterRadioBtnDict[filter["key"]].setChecked(True)
+            self.filterBtnGroup.addButton(self.filterRadioBtnDict[filter["key"]])
             self.filterDict[filter["key"]] = QComboBox()
-            filterBoxLayout.addWidget(filterLabel)
+            self.filterDict[filter["key"]].addItems([""])
+            self.filterDict[filter["key"]].currentTextChanged.connect(lambda text, level = filter["key"]: self.filterUpdate(text,level))
+            filterBoxLayout.addWidget(self.filterRadioBtnDict[filter["key"]])
             filterBoxLayout.addWidget(self.filterDict[filter["key"]])
             filterBox.setLayout(filterBoxLayout)
             filterLayout.addWidget(filterBox)
+        self.filterBtnGroup.buttonToggled.connect(self.filterBtnUpdate)
         fullFilterBox.setLayout(filterLayout)
         layout.addWidget(fullFilterBox)
-        returnsTable = QTableWidget()
-        layout.addWidget(returnsTable)
+        self.returnsTable = QTableWidget()
+        layout.addWidget(self.returnsTable)
         
+        
+
 
         page.setLayout(layout)
         self.stack.addWidget(page)
+
+        self.pullInvestorNames()
+        self.pullLevelNames()
+        self.buildReturnTable()
     def init_data_processing(self):
         self.calcSubmitted = False
         lastImport = self.load_from_db("history") if len(self.load_from_db("history")) == 1 else None
@@ -247,25 +222,140 @@ class MyWindow(QWidget):
             else:
                 calculations = self.load_from_db("displayCalculations")
                 if calculations != []:
-                    executor.submit(lambda: self.populate(self.calculationTable,calculations))
+                    self.populate(self.calculationTable,calculations)
                 else:
                     executor.submit(self.calculateReturn)
         else:
             calculations = self.load_from_db("displayCalculations")
             if calculations != []:
-                executor.submit(lambda: self.populate(self.calculationTable,calculations))
+                self.populate(self.calculationTable,calculations)
             else:
                 executor.submit(self.calculateReturn)
         
-
-
+    def filterBtnUpdate(self, button, checked):
+        if not self.filterCallLock:
+            if button.text() == "Sub-Asset Class:" and checked:
+                self.filterRadioBtnDict["assetClass"].setChecked(True)
+            elif button.text() == "Pool:" and checked:
+                self.filterRadioBtnDict["assetClass"].setChecked(True)
+                self.filterRadioBtnDict["subAssetClass"].setChecked(True)
+            elif button.text() == "Fund/Investment:" and checked:
+                self.filterRadioBtnDict["assetClass"].setChecked(True)
+                self.filterRadioBtnDict["subAssetClass"].setChecked(True)
+                self.filterRadioBtnDict["Pool"].setChecked(True)
+            self.filterCallLock = True
+            if not self.filterRadioBtnDict["assetClass"].isChecked():
+                self.filterRadioBtnDict["subAssetClass"].setChecked(False)
+            if not self.filterRadioBtnDict["subAssetClass"].isChecked():
+                self.filterRadioBtnDict["Pool"].setChecked(False)
+            if not self.filterRadioBtnDict["Pool"].isChecked():
+                self.filterRadioBtnDict["Fund"].setChecked(False)
+            self.filterCallLock = False
     def resetData(self):
         self.save_to_db("calculations",None,action="reset") #reset calculations so new data will be freshly calculated
         executor.submit(self.pullData)
     def beginImport(self):
         executor.submit(self.pullData)
-        
-
+    def buildReturnTable(self):
+        if self.filterDict["Investor"].currentText() == "":
+            totalOptions = ("Total Fund","Total Asset", "Total Portfolio","Total subAsset", "Total Pool")
+            placeholders = ",".join("?" for _ in totalOptions) 
+            data = self.load_from_db("displayCalculations", f"WHERE [Investor] IN ({placeholders})", totalOptions)
+            output = {"Total Portfolio" : {}}
+            assets = self.levelNames.keys()
+            for asset in assets:
+                output[asset] = {}
+                subAssets = self.levelNames[asset].keys()
+                for subAsset in subAssets:
+                    output[subAsset] = {}
+                    pools = self.levelNames[asset][subAsset].keys()
+                    for pool in pools:
+                        output[pool] = {}
+                        for fund in self.levelNames[asset][subAsset][pool]:
+                            output[fund] = {}
+            for entry in data:
+                Dtype = entry["Investor"]
+                level = Dtype
+                if level == "Total Asset":
+                    level = entry["assetClass"]
+                elif level == "Total subAsset":
+                    level = entry["subAssetClass"]
+                elif level == "Total Pool":
+                    level = entry["Pool"]
+                elif level == "Total Fund":
+                    level = entry["Fund"]
+                date = datetime.strftime(datetime.strptime(entry["dateTime"], "%Y-%m-%d %H:%M:%S"), "%B %Y")
+                if level in output.keys():
+                    output[level][date] = entry["NAV"]
+                else:
+                    output[level] = {}
+                    output[level][date] = entry["NAV"]
+                if "dataType" not in output[level].keys():
+                    output[level]["dataType"] = Dtype
+            outputKeys = output.keys()
+            deleteKeys = []
+            for key in outputKeys:
+                if len(output[key].keys()) == 0:
+                    deleteKeys.append(key)
+            for key in deleteKeys:
+                output.pop(key)
+            self.populateReturnsTable(output)
+    def filterUpdate(self, filterText, level):
+        def resetOptions(key,options):
+            currentText = self.filterDict[key].currentText()
+            comboBox = self.filterDict[key]
+            comboBox.clear()
+            comboBox.addItems([""])
+            comboBox.addItems(options)
+            if currentText in options:
+                comboBox.setCurrentText(currentText)
+        if not self.filterCallLock:
+            #prevents recursion on calls from comboboxes being updated
+            self.filterCallLock = True
+            currentAsset = self.filterDict["assetClass"].currentText()
+            currentSubAsset = self.filterDict["subAssetClass"].currentText()
+            currentPool = self.filterDict["Pool"].currentText()
+            #reset filters if a higher level has been changed
+            if level == "assetClass":
+                currentSubAsset = ""
+                currentPool = ""
+            elif level == "subAssetClass":
+                currentPool = ""
+            if currentAsset == "" and currentSubAsset == "" and currentPool == "":
+                #if no filters, open all options and exit
+                resetOptions("Fund",self.fullLevelOptions["Fund"])
+                resetOptions("Pool",self.fullLevelOptions["Pool"])
+                resetOptions("subAssetClass",self.fullLevelOptions["subAssetClass"])
+                self.filterCallLock = False
+                return
+            subAssetOptions = []
+            poolOptions = []
+            fundOptions = []
+            subAssetLoopOptions = []
+            poolLoopOptions = []
+            assetOptions = self.levelNames.keys() if currentAsset == "" else [currentAsset]
+            for asset in assetOptions:
+                for subAsset in self.levelNames[asset].keys():
+                    subAssetOptions.append(subAsset)
+                subAssetLoopOptions = subAssetOptions if currentSubAsset == "" else [currentSubAsset]
+                for subAsset in subAssetLoopOptions:
+                    if subAsset not in self.levelNames[asset].keys():
+                        continue
+                    for pool in self.levelNames[asset][subAsset].keys():
+                        poolOptions.append(pool)
+                    poolLoopOptions = poolOptions if currentPool == "" else [currentPool]
+                    for pool in poolLoopOptions:
+                        if pool not in self.levelNames[asset][subAsset].keys():
+                            continue
+                        for fund in self.levelNames[asset][subAsset][pool]:
+                            fundOptions.append(fund)
+           
+            resetOptions("subAssetClass",subAssetOptions)
+            resetOptions("Pool",poolOptions)
+            resetOptions("Fund",fundOptions)
+            
+            self.filterCallLock = False
+            return
     def updateMonths(self):
         startMonth = int(1)
         year = str(2021)
@@ -318,12 +408,78 @@ class MyWindow(QWidget):
                     investors.append(account["Source name"])
             investors.sort()
             self.allInvestors = investors
-            self.investor_input.addItems(investors)
+            self.filterDict["Investor"].addItems(investors)
         else:
             self.allInvestors = []
-    def update_fields(self):
-        self.asset_input.setEnabled(self.radio_asset.isChecked() or self.radio_subasset.isChecked())
-        self.subasset_input.setEnabled(self.radio_subasset.isChecked())
+    def pullLevelNames(self):
+        levelNames = {}
+        assets = []
+        subAssets = []
+        pools = []
+        funds = []
+        accountsHigh = self.load_from_db("positions_high")
+        if accountsHigh is not None:
+            for account in accountsHigh:
+                assetClass = account["ExposureAssetClass"]
+                subAssetClass = account["ExposureAssetClassSub-assetClass(E)"]
+                pool = account["Target name"]
+                if assetClass is not None:
+                    if assetClass not in levelNames.keys():
+                        levelNames[assetClass] = {}
+                    if subAssetClass is not None:
+                        if subAssetClass not in levelNames[assetClass].keys():
+                            levelNames[assetClass][subAssetClass] = {}
+                        if pool is not None:
+                            if pool not in levelNames[assetClass][subAssetClass].keys():
+                                levelNames[assetClass][subAssetClass][pool] = []
+                if assetClass is not None and assetClass not in assets:
+                    assets.append(assetClass)
+                if subAssetClass is not None and subAssetClass not in subAssets:
+                    subAssets.append(subAssetClass)
+                if pool is not None and pool not in pools:
+                    pools.append(pool)
+        else:
+            print("no investor to pool accounts found")
+        accountsLow = self.load_from_db("positions_low")
+        if accountsLow is not None:
+            for lowAccount in accountsLow:
+                assetClass = lowAccount["ExposureAssetClass"]
+                subAssetClass = lowAccount["ExposureAssetClassSub-assetClass(E)"]
+                pool = lowAccount["Source name"]
+                fund = lowAccount["Target name"]
+                if assetClass is not None:
+                    if assetClass not in levelNames.keys():
+                        levelNames[assetClass] = {}
+                    if subAssetClass is not None:
+                        if subAssetClass not in levelNames[assetClass].keys():
+                            levelNames[assetClass][subAssetClass] = {}
+                        if pool is not None:
+                            if pool not in levelNames[assetClass][subAssetClass].keys():
+                                levelNames[assetClass][subAssetClass][pool] = []
+                            if fund is not None:
+                                if fund not in levelNames[assetClass][subAssetClass][pool]:
+                                    levelNames[assetClass][subAssetClass][pool].append(fund)
+                if fund is not None and fund not in funds:
+                    funds.append(fund)
+                if assetClass is not None and assetClass not in assets:
+                    assets.append(assetClass)
+                if subAssetClass is not None and subAssetClass not in subAssets:
+                    subAssets.append(subAssetClass)
+                if pool is not None and pool not in pools:
+                    pools.append(pool)
+        else:
+            print("no pool to fund accounts found")
+        assets.sort()
+        subAssets.sort()
+        pools.sort()
+        funds.sort()
+        self.filterDict["assetClass"].addItems(assets)
+        self.filterDict["subAssetClass"].addItems(subAssets)
+        self.filterDict["Pool"].addItems(pools)
+        self.filterDict["Fund"].addItems(funds)
+        self.levelNames = levelNames
+        self.fullLevelOptions = {"Fund" : funds, "Pool" : pools, "subAssetClass" : subAssets, "assetClass" : assets}
+
 
     def check_api_key(self):
         key = self.api_input.text().strip()
@@ -825,7 +981,7 @@ class MyWindow(QWidget):
                     if key not in keys:
                         keys.append(key)
             self.save_to_db("displayCalculations",calculations, keys=keys)
-            self.populate(self.calculationTable,calculations,keys = keys)
+            gui_queue( lambda: self.populate(self.calculationTable,calculations,keys = keys))
             gui_queue.put(lambda: self.calculationLoadingBox.setVisible(False))
             if not testDataMode:
                 gui_queue.put(lambda: self.importButton.setEnabled(True))
@@ -898,7 +1054,70 @@ class MyWindow(QWidget):
         else:
             print(f"No rows found for data input to '{table}'")
         conn.close()
+    def populateReturnsTable(self, rows: dict):
+        if not rows:
+            # nothing to show
+            self.returnsTable.clear()
+            self.returnsTable.setRowCount(0)
+            self.returnsTable.setColumnCount(0)
+            return
 
+        # 1) Determine the full set of columns
+        cleanedRows = copy.deepcopy(rows)
+        keys = rows.keys()
+        for key in keys:
+            cleanedRows[key].pop("dataType")
+        col_keys = set()
+        for row_dict in cleanedRows.values():
+            col_keys.update(row_dict.keys())
+        col_keys = list(col_keys)
+        for idx in range(len(col_keys)):
+            col_keys[idx] = datetime.strptime(col_keys[idx],"%B %Y")
+        col_keys = sorted(col_keys)
+        for idx in range(len(col_keys)):
+            col_keys[idx] = datetime.strftime(col_keys[idx],"%B %Y")
+
+        # 2) Configure table size and headers
+        self.returnsTable.setRowCount(len(rows))
+        self.returnsTable.setColumnCount(len(col_keys))
+        self.returnsTable.setVerticalHeaderLabels(list(cleanedRows.keys()))
+        self.returnsTable.setHorizontalHeaderLabels(col_keys)
+
+        # 3) Populate each cell
+        for r, (row_label, row_dict) in enumerate(rows.items()):
+            if "dataType" in row_dict.keys():
+                dataType = row_dict["dataType"]
+                row_dict.pop("dataType")
+            else:
+                dataType = ""
+        # decide if this row should be grey
+            if dataType == "Total Portfolio":
+                row_color = QColor(Qt.darkGray)
+            elif dataType == "Total Pool":
+                row_color = QColor(Qt.lightGray)
+            elif dataType == "Total Fund":
+                row_color = QColor(213, 236, 193)
+            elif dataType == "Total Asset":
+                row_color = QColor(181, 135, 235)
+            elif dataType == "Total subAsset":
+                row_color = QColor(213, 193, 236)
+            else:
+                row_color = None
+
+            # 1) create (or override) the vertical header item for this row
+            header_item = QTableWidgetItem(row_label)
+            if row_color is not None:
+                header_item.setBackground(QBrush(row_color))
+            self.returnsTable.setVerticalHeaderItem(r, header_item)
+
+            # 2) fill in the row’s cells
+            for c, col in enumerate(col_keys):
+                val = row_dict.get(col, "")
+                val = round(float(val), 2) if val != "" else ""
+                item = QTableWidgetItem(str(val))
+                if row_color is not None:
+                    item.setBackground(QBrush(row_color))
+                self.returnsTable.setItem(r, c, item)
     def populate(self, table, rows, keys = None):
         if not rows:
             return
@@ -906,36 +1125,9 @@ class MyWindow(QWidget):
             headers = list(rows[0].keys())
         else:
             headers = list(keys)
-        gui_queue.put(lambda: table.setColumnCount(len(headers)))
-        gui_queue.put(lambda: table.setHorizontalHeaderLabels(headers))
-        gui_queue.put(lambda: table.setRowCount(len(rows)))
 
-        green = QColor(181, 235, 135)
-        lightGreen = QColor(213, 236, 193)
-
-        for r, row in enumerate(rows):
-            is_total_pool = (row.get('Investor', '') == "Total Pool")
-            is_total_portfolio = (row.get('Investor', '') == "Total Portfolio")
-            is_total_fund = (row.get('Fund', '') is not None) and (row.get('Fund', '') != "None") and (row.get('Investor', '') == "Total Fund")
-            is_fund = (row.get('Fund', '') is not None) and (row.get('Fund', '') != "None")
-            is_asset_total = (row.get('Investor', '') == "Total Asset")
-            is_subAsset_total = (row.get('Investor', '') == "Total subAsset")
-            for c, h in enumerate(headers):
-                item = QTableWidgetItem(str(row.get(h, '')))
-                if is_total_pool:
-                    item.setBackground(QBrush(Qt.lightGray))
-                elif is_total_portfolio:
-                    item.setBackground(QBrush(Qt.darkGray))
-                elif is_total_fund:
-                    item.setBackground(QBrush(green))
-                elif is_fund:
-                    item.setBackground(QBrush(lightGreen))
-                elif is_asset_total:
-                    item.setBackground(QColor(181, 135, 235))
-                elif is_subAsset_total:
-                    item.setBackground(QColor(213, 193, 236))
-                
-                gui_queue.put(lambda r=r, c=c, item=item: table.setItem(r, c, item))
+        calcTableModel = DictListModel(rows,headers, self)
+        table.setModel(calcTableModel)
 
     def load_from_db(self,table, condStatement = "",parameters = None):
         # Transactions
@@ -982,11 +1174,44 @@ class DictListModel(QAbstractTableModel):
         return len(self._headers)
 
     def data(self, index, role=Qt.DisplayRole):
-        if not index.isValid() or role != Qt.DisplayRole:
+        if not index.isValid():
             return None
         row = self._rows[index.row()]
         key = self._headers[index.column()]
-        return str(row.get(key, ''))
+        # Display the cell text
+        if role == Qt.DisplayRole:
+            return str(row.get(key, ''))
+
+        # Conditional background coloring
+        if role == Qt.BackgroundRole:
+            # Example: color 'Value' column green if above threshold
+            try:
+                Investor = str(row.get('Investor', ''))
+                Fund = row.get('Fund', '')
+                if Investor == "Total Portfolio":
+                    return QBrush(Qt.darkGray)  
+                elif Investor == "Total Asset":
+                    return QBrush(QColor(181, 135, 235)) 
+                elif Investor == "Total subAsset":
+                    return QBrush(QColor(213, 193, 236)) 
+                elif Investor == "Total Pool":
+                    return QBrush(Qt.lightGray) 
+                elif Fund is not None and Fund != "None" and Investor == "Total Fund":
+                    return QBrush(QColor(181, 235, 135))  
+                elif Fund is not None and Fund != "None": #Fund
+                    return QBrush(QColor(213, 236, 193)) 
+            except (ValueError, TypeError):
+                pass
+
+        # Alignment for numbers
+        if role == Qt.TextAlignmentRole:
+            try:
+                float(row.get(key))
+                return Qt.AlignVCenter | Qt.AlignRight
+            except (ValueError, TypeError):
+                return Qt.AlignVCenter | Qt.AlignLeft
+
+        return None
 
     def headerData(self, section, orientation, role=Qt.DisplayRole):
         if role == Qt.DisplayRole and orientation == Qt.Horizontal:
