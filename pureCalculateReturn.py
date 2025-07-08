@@ -53,7 +53,7 @@ if not os.path.exists(BASE_DIR):
 
 mainURL = "https://api.dynamosoftware.com/api/v2.2"
 
-class MyWindow(QWidget):
+class returnsApp(QWidget):
     def __init__(self, start_index=0):
         super().__init__()
         self.setWindowTitle('Returns Calculator')
@@ -210,6 +210,9 @@ class MyWindow(QWidget):
         layout.addWidget(fullFilterBox)
         self.returnsTable = QTableWidget()
         layout.addWidget(self.returnsTable)
+        self.viewUnderlyingDataBtn = QPushButton("View Underlying Data")
+        self.viewUnderlyingDataBtn.clicked.connect(self.viewUnderlyingData)
+        layout.addWidget(self.viewUnderlyingDataBtn)
         
 
 
@@ -247,7 +250,23 @@ class MyWindow(QWidget):
                 self.buildReturnTable()
             else:
                 executor.submit(self.calculateReturn)
-        
+    def viewUnderlyingData(self):
+        row = self.returnsTable.currentRow()
+        col = self.returnsTable.currentColumn()
+
+        vh_item = self.returnsTable.verticalHeaderItem(row)
+        row = vh_item.text() if vh_item else f"Row {row}"
+
+        # Get the horizontal (column) header text
+        hh_item = self.returnsTable.horizontalHeaderItem(col)
+        col = hh_item.text() if hh_item else f"Column {col}"
+        self.selectedCell = {"entity": row, "month" : col}
+        try:
+            window = underlyingDataWindow(parentSource=self)
+            self.udWindow = window
+            window.show()
+        except Exception as e:
+            print(f"Error in data viewing window: {e}")
     def filterBtnUpdate(self, button, checked):
         if not self.filterCallLock:
             self.filterCallLock = True
@@ -279,8 +298,10 @@ class MyWindow(QWidget):
         if self.tableBtnGroup.checkedButton().text() == "Complex Table":
             self.returnOutputType.setCurrentText("Return")
             self.returnOutputType.setVisible(False)
+            self.viewUnderlyingDataBtn.setVisible(False)
         else:
             self.returnOutputType.setVisible(True)
+            self.viewUnderlyingDataBtn.setVisible(True)
         condStatement = " WHERE [Investor] = ? "
         if self.filterDict["Investor"].currentText() == "":
             parameters = ["Total Fund"]
@@ -1406,6 +1427,87 @@ class DictListModel(QAbstractTableModel):
             return self._headers[section]
         return None            
 
+class underlyingDataWindow(QWidget):
+    """
+    A window that loads data from four database sources in the parent,
+    merges and sorts it by dateTime, and displays it in a QTableWidget
+    with a unified set of columns.
+    """
+    def __init__(self, parent=None, flags=Qt.WindowFlags(), parentSource = None):
+        super().__init__(parent, flags)
+        self.parent = parentSource
+        self.setWindowTitle("Underlying Data Viewer")
+        self.resize(1000, 600)
+
+        # Layout and table
+        layout = QVBoxLayout(self)
+        self.table = QTableWidget(self)
+        layout.addWidget(self.table)
+
+        selectedMonth = datetime.strptime(self.parent.selectedCell["month"], "%B %Y")
+        tranStart = selectedMonth.replace(day = 1)
+        accountStart = tranStart - relativedelta(days= 1)
+        allEnd = (tranStart + relativedelta(months=1)) - relativedelta(days=1)
+        print(tranStart,accountStart,allEnd)
+        tranStart = datetime.strftime(tranStart,"%Y-%m-%dT00:00:00")
+        accountStart = datetime.strftime(accountStart,"%Y-%m-%dT00:00:00")
+        allEnd = datetime.strftime(allEnd,"%Y-%m-%dT00:00:00")
+        entity = self.parent.selectedCell["entity"]
+        print(tranStart,accountStart,allEnd)
+        # 1) Define your four data sources (table names or identifiers)
+        sourceTables = {"positions_high": [accountStart,"[Target name]"], "positions_low" : [accountStart,"[Source name]"], 
+                   "transactions_high": [tranStart,"[Target name]"], "transactions_low": [tranStart,"[Source name]"]}
+        
+        
+        # 2) Load and tag each row with its source
+        all_rows = []
+        for accountTable in sourceTables.keys():
+            try:
+                rows = self.parent.load_from_db(accountTable, f"WHERE {sourceTables[accountTable][1]} = ? AND [Date] BETWEEN ? AND ?", (entity, sourceTables[accountTable][0],allEnd))
+            except Exception as e:
+                print(f"Error in call : {e}")
+                rows = []
+            for row in rows or []:
+                # Tag so you can see origin if needed
+                row['_source'] = accountTable
+                all_rows.append(row)
+        if len(all_rows) == 0:
+            #assume fund if previous found nothing
+            for accountTable in ("positions_low","transactions_low"):
+                try:
+                    rows = self.parent.load_from_db(accountTable, f"WHERE [Target name] = ? AND [Date] BETWEEN ? AND ?", (entity, sourceTables[accountTable][0],allEnd))
+                except Exception as e:
+                    print(f"Error in call : {e}")
+                    rows = []
+                for row in rows or []:
+                    # Tag so you can see origin if needed
+                    row['_source'] = accountTable
+                    all_rows.append(row)
+
+        # 3) Sort by dateTime column (handles ISO or space-separated)
+        def parse_dt(s):
+            return datetime.strptime(s, "%Y-%m-%dT00:00:00")
+
+        all_rows.sort(key=lambda r: parse_dt(r.get('Date', '')))
+
+        # 4) Collect the union of all column keys
+        all_cols = set()
+        for row in all_rows:
+            all_cols.update(row.keys())
+        all_cols = list(all_cols)
+
+        # 5) Configure the table widget
+        self.table.setRowCount(len(all_rows))
+        self.table.setColumnCount(len(all_cols))
+        self.table.setHorizontalHeaderLabels(all_cols)
+
+        # 6) Populate each cell
+        for r, row in enumerate(all_rows):
+            for c, key in enumerate(all_cols):
+                item = QTableWidgetItem(str(row.get(key, '')))
+                self.table.setItem(r, c, item)
+
+
 if __name__ == '__main__':
     key = os.environ.get('Dynamo_API')
     ok = key and key != 'value'
@@ -1413,7 +1515,7 @@ if __name__ == '__main__':
     timer = QTimer()
     timer.timeout.connect(poll_queue)
     timer.start(500)
-    w = MyWindow(start_index=0 if not ok else 1)
+    w = returnsApp(start_index=0 if not ok else 1)
     if ok: w.api_key = key
     w.show()
     w.init_data_processing()
