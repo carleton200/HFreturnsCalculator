@@ -15,9 +15,9 @@ from PyQt5.QtWidgets import (
     QApplication, QWidget, QStackedWidget, QVBoxLayout,
     QLabel, QLineEdit, QPushButton, QFormLayout,
     QRadioButton, QButtonGroup, QComboBox, QHBoxLayout,
-    QTableWidget, QTableWidgetItem, QProgressBar, QTableView, QCheckBox
+    QTableWidget, QTableWidgetItem, QProgressBar, QTableView, QCheckBox, QMessageBox
 )
-from PyQt5.QtGui import QBrush, QColor
+from PyQt5.QtGui import QBrush, QColor, QStandardItem, QStandardItemModel
 from PyQt5.QtCore import Qt, QTimer, QAbstractTableModel, QModelIndex, QObject, pyqtSignal, QThread
 
 testDataMode = False
@@ -62,6 +62,9 @@ class returnsApp(QWidget):
         os.makedirs(ASSETS_DIR, exist_ok=True)
         self.api_key = None
         self.filterCallLock = False
+        self.cancel = False
+        self.tableWindows = {}
+        self.earliestChangeDate = datetime(datetime.now().year,datetime.now().month + 1,datetime.now().day)
         # main stack
         self.main_layout = QVBoxLayout()
         self.stack = QStackedWidget()
@@ -90,8 +93,11 @@ class returnsApp(QWidget):
         self.calculationLoadingBar = QProgressBar()
         self.calculationLoadingBar.setRange(0,100)
         self.calculationLabel = QLabel()
+        self.cancelCalcBtn = QPushButton("Cancel Calculations")
+        self.cancelCalcBtn.clicked.connect(self.cancelCalc)
         loadLay.addWidget(self.calculationLabel)
         loadLay.addWidget(self.calculationLoadingBar)
+        loadLay.addWidget(self.cancelCalcBtn)
         self.calculationLoadingBox = QWidget()
         self.calculationLoadingBox.setLayout(loadLay)
         self.calculationLoadingBox.setVisible(False)
@@ -177,11 +183,11 @@ class returnsApp(QWidget):
         filterLayout.addWidget(tableSelectorBox)
 
         self.filterOptions = [
-                            {"key": "Investor",       "name": "Investor", "dataType" : "Investor"},
-                            {"key": "assetClass",     "name": "Asset Class", "dataType" : "Total Asset"},
-                            {"key": "subAssetClass",  "name": "Sub-Asset Class", "dataType" : "Total subAsset"},
-                            {"key": "Pool",           "name": "Pool", "dataType" : "Total Pool"},
-                            {"key": "Fund",           "name": "Fund/Investment", "dataType" : "Total Fund"},
+                            {"key": "Investor",       "name": "Investor", "dataType" : "Investor", "dynNameLow" : None},
+                            {"key": "assetClass",     "name": "Asset Class", "dataType" : "Total Asset", "dynNameLow" : "ExposureAssetClass"},
+                            {"key": "subAssetClass",  "name": "Sub-Asset Class", "dataType" : "Total subAsset", "dynNameLow" : "ExposureAssetClassSub-assetClass(E)"},
+                            {"key": "Pool",           "name": "Pool", "dataType" : "Total Pool" , "dynNameLow" : "Source name"},
+                            {"key": "Fund",           "name": "Fund/Investment", "dataType" : "Total Fund" , "dynNameLow" : "Target name"},
                         ]
         self.filterDict = {}
         self.filterRadioBtnDict = {}
@@ -237,19 +243,21 @@ class returnsApp(QWidget):
                 #pull data if in a new month or 5 days have elapsed
                 executor.submit(self.pullData)
             else:
-                calculations = self.load_from_db("displayCalculations")
+                calculations = self.load_from_db("calculations")
                 if calculations != []:
                     self.populate(self.calculationTable,calculations)
                     self.buildReturnTable()
                 else:
                     executor.submit(self.calculateReturn)
         else:
-            calculations = self.load_from_db("displayCalculations")
+            calculations = self.load_from_db("calculations")
             if calculations != []:
                 self.populate(self.calculationTable,calculations)
                 self.buildReturnTable()
             else:
                 executor.submit(self.calculateReturn)
+    def cancelCalc(self):
+        self.cancel = True
     def viewUnderlyingData(self):
         row = self.returnsTable.currentRow()
         col = self.returnsTable.currentColumn()
@@ -286,7 +294,6 @@ class returnsApp(QWidget):
                 self.populateReturnsTable(self.investorCalculations)
     def resetData(self):
         self.save_to_db("calculations",None,action="reset") #reset calculations so new data will be freshly calculated
-        self.save_to_db("displayCalculations",None,action="reset") 
         if testDataMode:
             executor.submit(self.calculateReturn)
         else:
@@ -295,6 +302,7 @@ class returnsApp(QWidget):
         executor.submit(self.pullData)
     def buildReturnTable(self):
         print("Building return table...")
+        self.stack.setCurrentIndex(1)
         if self.tableBtnGroup.checkedButton().text() == "Complex Table":
             self.returnOutputType.setCurrentText("Return")
             self.returnOutputType.setVisible(False)
@@ -312,7 +320,7 @@ class returnsApp(QWidget):
                 if self.filterDict[filter["key"]].currentText() != "":
                     condStatement += f" AND [{filter["key"]}] = ?"
                     parameters.append(self.filterDict[filter["key"]].currentText())
-        data = self.load_from_db("displayCalculations",condStatement, tuple(parameters))
+        data = self.load_from_db("calculations",condStatement, tuple(parameters))
         output = {"Total" : {}}
         output , data = self.calculateUpperLevels(output,data)
         complexOutput = copy.deepcopy(output)
@@ -336,9 +344,13 @@ class returnsApp(QWidget):
             dataOutputType = self.returnOutputType.currentText()
             if level in output.keys():
                 output[level][date] = entry[dataOutputType]
+            else:
+                output[level] = {}
             if "dataType" not in output[level].keys():
                 output[level]["dataType"] = Dtype
             if self.tableBtnGroup.checkedButton().text() == "Complex Table" and date == datetime.strftime(datetime.now() - relativedelta(months=1),"%B %Y"):
+                if level not in complexOutput.keys():
+                    complexOutput[level] = {}
                 if "dataType" not in complexOutput[level].keys():
                     complexOutput[level]["dataType"] = Dtype
                 complexOutput[level][f"NAV"] = entry["NAV"]
@@ -380,10 +392,35 @@ class returnsApp(QWidget):
                 if all(month in monthOutput[level].keys() for month in YR_times[yearKey]):
                     headerKey = f"{yearKey}YR"
                     complexOutput[level][headerKey] = 1
-                    for month in YTDtimes:
-                        complexOutput[level][headerKey] *= (1 + float(monthOutput[level][QTDtimes[0]]) / 100 )
-                    fullProduct = (complexOutput[level][headerKey] -1)
-                    complexOutput[level][headerKey] = (fullProduct ** (1/int(yearKey)) ) * 100 if fullProduct > 0 else -1 * (abs(fullProduct) ** (1/int(yearKey)) )* 100
+                    for month in YR_times[yearKey]:
+                        complexOutput[level][headerKey] *= (1 + float(monthOutput[level][month]) / 100 )
+                    complexOutput[level][headerKey] = ((complexOutput[level][headerKey] ** (1/int(yearKey)) ) - 1 ) * 100 if complexOutput[level][headerKey] > 0 else -1 * ((abs(complexOutput[level][headerKey]) ** (1/int(yearKey)) ) - 1)* 100
+            try:
+                monthCount = 0
+                if MTDtime in monthOutput[level].keys():
+                    #only runs ITD if it is a current fund (MTD month exists)
+                    ITDmonths = list(monthOutput[level].keys())
+                    ITDmonths = [m for m in ITDmonths if m != "dataType"]
+                    ITDmonths = sorted([datetime.strptime(date,"%B %Y") for date in ITDmonths])
+                    
+                    ITDmonths = [datetime.strftime(date,"%B %Y") for date in ITDmonths]
+                    if len(ITDmonths) >= 2:
+                        #only calculates if more than previous month
+                        #ITDmonths = ITDmonths[1:] #remove first month?? 
+                        complexOutput[level]["ITD"] = 1
+                        for month in ITDmonths:
+                            if month != "dataType" and month != datetime.strftime(datetime.now(),"%B %Y"):
+                                monthCount += 1
+                                complexOutput[level]["ITD"] *= (1 + float(monthOutput[level][month]) / 100 )
+                        complexOutput[level]["ITD"] = ((complexOutput[level]["ITD"] ** (12/int(monthCount)) ) - 1 ) * 100 if complexOutput[level]["ITD"] > 0 else -1 * ((abs(complexOutput[level]["ITD"]) ** (1/int(monthCount)) ) - 1)* 100
+                    else:
+                        #ITD is just the previous month if no more months are found
+                        complexOutput[level]["ITD"] = monthOutput[level][MTDtime]
+            except Exception as e:
+                pass
+
+
+
 
 
         return complexOutput
@@ -502,7 +539,7 @@ class returnsApp(QWidget):
             comboBox = self.filterDict[key]
             comboBox.clear()
             comboBox.addItems([""])
-            comboBox.addItems(options)
+            comboBox.addItems(sorted(options))
             if currentText in options:
                 comboBox.setCurrentText(currentText)
         def exitFunc():
@@ -514,44 +551,42 @@ class returnsApp(QWidget):
             currentAsset = self.filterDict["assetClass"].currentText()
             currentSubAsset = self.filterDict["subAssetClass"].currentText()
             currentPool = self.filterDict["Pool"].currentText()
-            #reset filters if a higher level has been changed
-            if level == "assetClass":
-                currentSubAsset = ""
-                currentPool = ""
-            elif level == "subAssetClass":
-                currentPool = ""
-            if currentAsset == "" and currentSubAsset == "" and currentPool == "":
+            currentFund = self.filterDict["Fund"].currentText()
+
+            if currentAsset == "" and currentSubAsset == "" and currentPool == "" and currentFund == "":
                 #if no filters, open all options and exit
                 resetOptions("Fund",self.fullLevelOptions["Fund"])
                 resetOptions("Pool",self.fullLevelOptions["Pool"])
                 resetOptions("subAssetClass",self.fullLevelOptions["subAssetClass"])
+                resetOptions("assetClass",self.fullLevelOptions["assetClass"])
                 exitFunc()
                 return
-            subAssetOptions = []
-            poolOptions = []
-            fundOptions = []
-            subAssetLoopOptions = []
-            poolLoopOptions = []
-            assetOptions = self.levelNames.keys() if currentAsset == "" else [currentAsset]
-            for asset in assetOptions:
-                for subAsset in self.levelNames[asset].keys():
-                    subAssetOptions.append(subAsset)
-                subAssetLoopOptions = subAssetOptions if currentSubAsset == "" else [currentSubAsset]
-                for subAsset in subAssetLoopOptions:
-                    if subAsset not in self.levelNames[asset].keys():
-                        continue
-                    for pool in self.levelNames[asset][subAsset].keys():
-                        poolOptions.append(pool)
-                    poolLoopOptions = poolOptions if currentPool == "" else [currentPool]
-                    for pool in poolLoopOptions:
-                        if pool not in self.levelNames[asset][subAsset].keys():
-                            continue
-                        for fund in self.levelNames[asset][subAsset][pool]:
-                            fundOptions.append(fund)
-           
-            resetOptions("subAssetClass",subAssetOptions)
-            resetOptions("Pool",poolOptions)
-            resetOptions("Fund",fundOptions)
+
+            condStatement = ""
+            first = True
+            parameters = []
+            for filter in self.filterOptions:
+                if filter["key"] != "Investor":
+                    if self.filterDict[filter["key"]].currentText() != "":
+                        if first:
+                            condStatement = f"WHERE [{filter["dynNameLow"]}] = ?"
+                            first = False
+                        else:
+                            condStatement += f" AND [{filter["dynNameLow"]}] = ?"
+                        parameters.append(self.filterDict[filter["key"]].currentText())
+            lowAccounts = self.load_from_db("positions_low", condStatement,tuple(parameters))
+            options = {}
+            for filter in self.filterOptions:
+                options[filter["key"]] = []
+            for account in lowAccounts:
+                for filter in self.filterOptions:
+                    if filter["key"] != "Investor":
+                        if account[filter["dynNameLow"]] not in options[filter["key"]]:
+                            options[filter["key"]].append(account[filter["dynNameLow"]])
+            for filter in self.filterOptions:
+                #resets options for everything but recently updated parameter
+                if filter["key"] != "Investor" and filter["key"] != level:
+                    resetOptions(filter["key"],options[filter["key"]])
             exitFunc()
             return
     def updateMonths(self):
@@ -610,7 +645,6 @@ class returnsApp(QWidget):
         else:
             self.allInvestors = []
     def pullLevelNames(self):
-        levelNames = {}
         assets = []
         subAssets = []
         pools = []
@@ -621,15 +655,6 @@ class returnsApp(QWidget):
                 assetClass = account["ExposureAssetClass"]
                 subAssetClass = account["ExposureAssetClassSub-assetClass(E)"]
                 pool = account["Target name"]
-                if assetClass is not None:
-                    if assetClass not in levelNames.keys():
-                        levelNames[assetClass] = {}
-                    if subAssetClass is not None:
-                        if subAssetClass not in levelNames[assetClass].keys():
-                            levelNames[assetClass][subAssetClass] = {}
-                        if pool is not None:
-                            if pool not in levelNames[assetClass][subAssetClass].keys():
-                                levelNames[assetClass][subAssetClass][pool] = []
                 if assetClass is not None and assetClass not in assets:
                     assets.append(assetClass)
                 if subAssetClass is not None and subAssetClass not in subAssets:
@@ -645,18 +670,6 @@ class returnsApp(QWidget):
                 subAssetClass = lowAccount["ExposureAssetClassSub-assetClass(E)"]
                 pool = lowAccount["Source name"]
                 fund = lowAccount["Target name"]
-                if assetClass is not None:
-                    if assetClass not in levelNames.keys():
-                        levelNames[assetClass] = {}
-                    if subAssetClass is not None:
-                        if subAssetClass not in levelNames[assetClass].keys():
-                            levelNames[assetClass][subAssetClass] = {}
-                        if pool is not None:
-                            if pool not in levelNames[assetClass][subAssetClass].keys():
-                                levelNames[assetClass][subAssetClass][pool] = []
-                            if fund is not None:
-                                if fund not in levelNames[assetClass][subAssetClass][pool]:
-                                    levelNames[assetClass][subAssetClass][pool].append(fund)
                 if fund is not None and fund not in funds:
                     funds.append(fund)
                 if assetClass is not None and assetClass not in assets:
@@ -675,7 +688,6 @@ class returnsApp(QWidget):
         self.filterDict["subAssetClass"].addItems(subAssets)
         self.filterDict["Pool"].addItems(pools)
         self.filterDict["Fund"].addItems(funds)
-        self.levelNames = levelNames
         self.fullLevelOptions = {"Fund" : funds, "Pool" : pools, "subAssetClass" : subAssets, "assetClass" : assets}
 
 
@@ -693,22 +705,78 @@ class returnsApp(QWidget):
         self.stack.setCurrentIndex(2)
 
     def pullData(self):
+        def checkNewestData(table, rows):
+            try:
+                diffCount = 0
+                differences = []
+                previous = self.load_from_db(table) or []
+
+                # Build a set of tuple‐keys for the old data
+                seen = set()
+                for rec in previous:
+                    value = rec['Value' if "position" in table else "CashFlow"]
+                    value = 0 if value is None or value == "None" else value
+                    seen.add((
+                        rec['Source name'] if rec['Source name'] is not None else "None",
+                        rec['Target name'] if rec['Target name'] is not None else "None",
+                        round(float(value),-2),               # normalize to float
+                        rec['Date'].replace(' ', 'T')      # normalize format if needed
+                    ))
+
+                earliest = None
+                for rec in rows:
+                    value = rec['Value' if "position" in table else "CashFlow"]
+                    value = 0 if value is None or value == "None" else value
+                    key = (
+                        rec['Source name'] if rec['Source name'] is not None else "None",
+                        rec['Target name'] if rec['Target name'] is not None else "None",
+                        round(float(value),-2),               
+                        rec['Date'].replace(' ', 'T')
+                    )
+                    if key in seen:
+                        continue
+                    diffCount += 1
+                    differences.append(rec)
+                    differences.append({"Source name" : key[0],"Target name" : key[1],"Value" : key[2],"Date" : key[3]})
+                    # parse the date for comparison
+                    dt = datetime.strptime(rec['Date'], "%Y-%m-%dT%H:%M:%S")
+                    if earliest is None or dt < earliest:
+                        earliest = dt
+                
+                if earliest:
+                    if earliest < self.earliestChangeDate:
+                        self.earliestChangeDate = earliest
+                print(f"Differences in {table} : {diffCount} of {len(rows)}")
+                if diffCount > 0:
+                    def openWindow():
+                        window = tableWindow(parentSource=self,all_rows=differences,table=table)
+                        self.tableWindows[table] = window
+                        window.show()
+                    gui_queue.put(lambda: openWindow())
+            except Exception as e:
+                print(f"Error searching old data: {e}")
+
+        self.earliestChangeDate = datetime(datetime.now().year,datetime.now().month + 1,datetime.now().day)
         gui_queue.put(lambda: self.apiLoadingBarBox.setVisible(True))
         gui_queue.put(lambda: self.importButton.setEnabled(False))
         self.updateMonths()
         startDate = f"2021-01-01T00:00:00.000Z" #around first day for most records
         startDate = self.startDate
         endDate = self.endDate
-        #endDate = f"2022-03-01T00:00:00.000Z"
         self.pullInvestorNames()
         apiData = {
-            "tranCols": "Investment in, Investing Entity, Transaction Type, Effective date, Cash flow change",
+            "tranCols": "Investment in, Investing Entity, Transaction Type, Effective date, Cash flow change, Asset Class (E), Sub-asset class (E)",
             "tranName": "InvestmentTransaction",
             "tranSort": "Effective date:desc",
             "accountCols": "As of Date, Balance Type, Asset Class, Sub-asset class, Value of Investments, Investing entity, Investment in",
             "accountName": "InvestmentPosition",
             "accountSort": "As of Date:desc",
         }
+        calculationsTest = self.load_from_db("calculations")
+        if calculationsTest != []:
+            skipCalculations = True
+        else:
+            skipCalculations = False
         loadingIdx = 0
         for i in range(2):
             cols_key = 'accountCols' if i == 1 else 'tranCols'
@@ -793,60 +861,32 @@ class returnsApp(QWidget):
                 else: #account (position)
                     if j == 0:
                         payload = {
-                            "advf": {
-                                "e": [
-                                    {
-                                        "_name": "InvestmentPosition",
-                                        "rule": [
+                                    "advf": {
+                                        "e": [
                                             {
-                                                "_op": "any_item",
-                                                "_prop": "Balance type",
-                                                "values": [
-                                                    [
-                                                        {
-                                                            "id": "23d15ba6-2743-4a32-bce1-5f6a6125e132",
-                                                            "es": "L_BalanceType",
-                                                            "name": "Actual"
-                                                        },
-                                                        {
-                                                            "id": "e37f6be0-6972-4f48-8228-102ea0e75a67",
-                                                            "es": "L_BalanceType",
-                                                            "name": "Internal Valuation"
-                                                        },
-                                                        {
-                                                            "id": "eecf766d-4941-451f-b88b-67eb9cd1b7ff",
-                                                            "es": "L_BalanceType",
-                                                            "name": "Manager Estimate"
-                                                        },
-                                                        {
-                                                            "id": "dc5c0527-94c0-4c28-8895-34bfa73b77a0",
-                                                            "es": "L_BalanceType",
-                                                            "name": "Custodian Estimate"
-                                                        }
-                                                    ]
-                                                ]
-                                            },
-                                            {
-                                                "_op": "all",
-                                                "_prop": f"{investmentLevel}",
-                                                "values": [
-                                                    "pool, llc"
-                                                ]
-                                            },
-                                            {
-                                                "_op": "between_date",
-                                                "_prop": "As of date",
-                                                "values": [
-                                                    f"{startDate}",
-                                                    f"{endDate}"
+                                                "_name": "InvestmentPosition",
+                                                "rule": [
+                                                    {
+                                                        "_op": "all",
+                                                        "_prop": f"{investmentLevel}",
+                                                        "values": [
+                                                            "pool, llc"
+                                                        ]
+                                                    },
+                                                    {
+                                                        "_op": "between_date",
+                                                        "_prop": "As of date",
+                                                        "values": [
+                                                            f"{startDate}",
+                                                            f"{endDate}"
+                                                        ]
+                                                    }
                                                 ]
                                             }
                                         ]
-                                    }
-                                ]
-                            },
-                            "mode": "compact"
-                        }
+                                    },
+                                    "mode": "compact"
+                                }
                     else:
                         payload = {
                                     "advf": {
@@ -903,18 +943,29 @@ class returnsApp(QWidget):
                         pass
                 if i == 1:
                     if j == 0:
+                        if skipCalculations:
+                            checkNewestData('positions_low',rows)
                         gui_queue.put(lambda: self.save_to_db('positions_low', rows))
                     else:
+                        #positions_high is not checked for new data, as the calculations overwrite Dynamo's calculations
                         gui_queue.put(lambda:self.save_to_db('positions_high', rows))
                 else:
                     if j == 0:
+                        if skipCalculations:
+                            checkNewestData('transactions_low',rows)
                         gui_queue.put(lambda:self.save_to_db('transactions_low', rows))
                     else:
+                        if skipCalculations:
+                            checkNewestData('transactions_high',rows)
                         gui_queue.put(lambda:self.save_to_db('transactions_high', rows))
+        if skipCalculations:
+            print("Earliest change: ", self.earliestChangeDate)
         gui_queue.put(lambda: self.stack.setCurrentIndex(2))
         gui_queue.put(lambda: self.apiLoadingBarBox.setVisible(False))
         while not gui_queue.empty(): #wait to assure database has been updated in main thread before continuing
             time.sleep(0.2)
+        
+
 
         self.save_to_db("history",None,action="reset") #clears history then updates most recent import
         currentTime = datetime.now().strftime("%B %d, %Y @ %I:%M %p")
@@ -930,6 +981,8 @@ class returnsApp(QWidget):
             gui_queue.put(lambda: self.importButton.setEnabled(False))
             gui_queue.put(lambda: self.calculationLoadingBox.setVisible(True))
             self.updateMonths()
+            gui_queue.put(lambda: self.pullInvestorNames())
+            gui_queue.put(lambda: self.pullLevelNames())
             gui_queue.put(lambda : self.stack.setCurrentIndex(2))
             print("Calculating return....")
             months = self.load_from_db("Months", f"ORDER BY [dateTime] ASC")
@@ -937,18 +990,30 @@ class returnsApp(QWidget):
             monthIdx = 0
             if self.load_from_db("calculations") == []:
                 noCalculations = True
-                firstSave = True
             else:
                 noCalculations = False
-                firstSave = False
+
+            if self.earliestChangeDate > datetime.now() and not noCalculations:
+                #if no new data exists, use old calculations
+                calculations = self.load_from_db("calculations")
+                keys = []
+                for row in calculations:
+                    for key in row.keys():
+                        if key not in keys:
+                            keys.append(key)
+                gui_queue.put( lambda: self.populate(self.calculationTable,calculations,keys = keys))
+                gui_queue.put( lambda: self.buildReturnTable())
+                gui_queue.put(lambda: self.calculationLoadingBox.setVisible(False))
+                if not testDataMode:
+                    gui_queue.put(lambda: self.importButton.setEnabled(True))
+                print("Calculations skipped.")
+                return
             skippedMonths = 0
             for monthIdx, month in enumerate(months):
                 monthCalculations = []
                 
                 #if the calculations for the month have already been complete, pull the old data
-                #only checks for more than 2 months ago so newer data may be accounted for
-                twoMonthAhead = datetime.strptime(month["dateTime"], "%Y-%m-%d %H:%M:%S") + relativedelta(months=2)
-                if datetime.now() > twoMonthAhead and not noCalculations:
+                if self.earliestChangeDate > datetime.strptime(month["endDay"], "%Y-%m-%dT%H:%M:%S") and not noCalculations:
                     previousCalculations = self.load_from_db("calculations",f"WHERE [dateTime] = ?", (month["dateTime"],))
                     if len(previousCalculations) > 0:
                         for calc in previousCalculations:
@@ -958,14 +1023,25 @@ class returnsApp(QWidget):
                         continue
                 gui_queue.put(lambda: self.calculationLabel.setText(f"Calculating Financial Data for : {month['Month']}"))
                 totalDays = int(datetime.strptime(month["endDay"], "%Y-%m-%dT%H:%M:%S").day  - datetime.strptime(month["tranStart"], "%Y-%m-%dT%H:%M:%S").day) + 1
-                monthLowAccounts = self.load_from_db("positions_low", f"WHERE [Date] BETWEEN ? AND ?",(month["accountStart"],month["endDay"]) )
+                monthLowAccounts = self.load_from_db("positions_low", f"WHERE [Date] BETWEEN ? AND ?",(month["accountStart"],month["endDay"]))
                 pools = []
                 poolNames = []
                 for item in monthLowAccounts:
                     if item["Source name"] not in poolNames:
                         pools.append({"poolName" : item["Source name"], "assetClass" : item["ExposureAssetClass"], "subAssetClass" : item["ExposureAssetClassSub-assetClass(E)"]})
                         poolNames.append(item["Source name"])
+                monthLowTransactions = self.load_from_db("transactions_low", f"WHERE [Date] BETWEEN ? AND ?",(month["tranStart"],month["endDay"]))
+                for item in monthLowTransactions:
+                    if item["Source name"] not in poolNames:
+                        pools.append({"poolName" : item["Source name"], "assetClass" : item["SysProp_FundTargetNameAssetClass(E)"], "subAssetClass" : item["SysProp_FundTargetNameSub-assetClass(E)"]})
+                        poolNames.append(item["Source name"])
                 for poolIdx, poolDict in enumerate(pools):
+                    if self.cancel:
+                        gui_queue.put(lambda: self.calculationLoadingBox.setVisible(False))
+                        gui_queue.put(lambda: self.importButton.setEnabled(True))
+                        gui_queue.put(lambda: QMessageBox.information(self,"Cancelling","Cancelling Calculation Process"))
+                        self.cancel = False
+                        return
                     countedMonths = len(months) - skippedMonths
                     loadingFraction = (monthIdx - skippedMonths)/countedMonths + poolIdx/len(pools)/countedMonths
                     perc = int(loadingFraction * 100) if int(loadingFraction * 100) >= 0 and int(loadingFraction * 100) <= 100 else 50
@@ -1024,9 +1100,17 @@ class returnsApp(QWidget):
                         cashFlowSum = 0
                         weightedCashFlow = 0
                         for transaction in poolTransactions:
+                            if assetClass is None or assetClass == "None":
+                                assetClass = transaction["SysProp_FundTargetNameAssetClass(E)"]
+                            if subAssetClass is None or subAssetClass == "None":
+                                subAssetClass = transaction["SysProp_FundTargetNameSub-assetClass(E)"]
                             cashFlowSum -= float(transaction["CashFlow"])
                             weightedCashFlow -= float(transaction["CashFlow"])  *  (totalDays -int(datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S").day))/totalDays
                         try:
+                            if startEntry["Value"] is None or startEntry["Value"] == "None":
+                                startEntry["Value"] = 0
+                            if endEntry["Value"] is None or endEntry["Value"] == "None":
+                                endEntry["Value"] = 0
                             if createFinalValue:
                                 #implies there is no gain (cash account)
                                 endEntry["Value"] = float(startEntry["Value"]) + cashFlowSum    
@@ -1142,28 +1226,14 @@ class returnsApp(QWidget):
                                             "MDdenominator" : fundInvestorMDdenominator, "Ownership" : fundInvestorOwnership * 100}
                             calculations.append(monthFundInvestorEntry)
                             monthCalculations.append(monthFundInvestorEntry)
-                    # calculations.append(monthPoolEntry)
-                    # monthCalculations.append(monthPoolEntry)
                     #End of pools loop
-                if firstSave and datetime.now() > twoMonthAhead and noCalculations and len(monthCalculations) > 0:
-                    #instantiates calculations if it did not exist, and populates with first month
-                    keys = []
-                    for row in calculations:
-                        for key in row.keys():
-                            if key not in keys:
-                                keys.append(key)
-                    self.save_to_db("calculations",monthCalculations, keys=keys)
-                    firstSave = False
-                elif datetime.now() > twoMonthAhead and len(monthCalculations) > 0:
-                    #only save if not the most recent two months to account for newer entries
-                    self.save_to_db("calculations",monthCalculations, inputs=(month["dateTime"],), action="calculationUpdate")
                 #end of months loop
             keys = []
             for row in calculations:
                 for key in row.keys():
                     if key not in keys:
                         keys.append(key)
-            self.save_to_db("displayCalculations",calculations, keys=keys)
+            self.save_to_db("calculations",calculations, keys=keys)
             gui_queue.put( lambda: self.populate(self.calculationTable,calculations,keys = keys))
             gui_queue.put( lambda: self.buildReturnTable())
             gui_queue.put(lambda: self.calculationLoadingBox.setVisible(False))
@@ -1323,7 +1393,11 @@ class returnsApp(QWidget):
             for c, col in enumerate(col_keys):
                 val = row_dict.get(col, "")
                 val = round(float(val), 2) if val is not None and val != "" and val != "None" else ""
-                item = QTableWidgetItem(str(val))
+                if val != "":
+                    val = f"{val:,.2f}"
+                item = QTableWidgetItem(val)
+                if val != "":
+                    item.setData(Qt.UserRole,val)
                 if row_color is not None:
                     item.setBackground(QBrush(row_color))
                 self.returnsTable.setItem(r, c, item)
@@ -1366,6 +1440,8 @@ class returnsApp(QWidget):
                 except:
                     pass
                 return []
+        else:
+            return []
 
 class DictListModel(QAbstractTableModel):
     """
@@ -1448,41 +1524,56 @@ class underlyingDataWindow(QWidget):
         tranStart = selectedMonth.replace(day = 1)
         accountStart = tranStart - relativedelta(days= 1)
         allEnd = (tranStart + relativedelta(months=1)) - relativedelta(days=1)
-        print(tranStart,accountStart,allEnd)
         tranStart = datetime.strftime(tranStart,"%Y-%m-%dT00:00:00")
         accountStart = datetime.strftime(accountStart,"%Y-%m-%dT00:00:00")
         allEnd = datetime.strftime(allEnd,"%Y-%m-%dT00:00:00")
         entity = self.parent.selectedCell["entity"]
-        print(tranStart,accountStart,allEnd)
         # 1) Define your four data sources (table names or identifiers)
-        sourceTables = {"positions_high": [accountStart,"[Target name]"], "positions_low" : [accountStart,"[Source name]"], 
-                   "transactions_high": [tranStart,"[Target name]"], "transactions_low": [tranStart,"[Source name]"]}
-        
-        
-        # 2) Load and tag each row with its source
+        assetLook = False
+        if entity in self.parent.fullLevelOptions["Pool"]:
+            highLook = "[Target name]"
+            lowLook = "[Source name]"
+        elif entity in self.parent.fullLevelOptions["Fund"]:
+            highLook = None
+            lowLook = "[Target name]"
+        elif entity in self.parent.fullLevelOptions["subAssetClass"]:
+            #account, transaction level name 
+            highLook = ["[ExposureAssetClassSub-assetClass(E)]", "[SysProp_FundTargetNameSub-assetClass(E)]"]
+            lowLook = highLook
+            assetLook = True
+        elif entity in self.parent.fullLevelOptions["assetClass"]:
+            #account, transaction level name 
+            highLook = ["[ExposureAssetClass]","[SysProp_FundTargetNameAssetClass(E)]"]
+            lowLook = highLook
+            assetLook = True
+        else:
+            QMessageBox.warning(self,"No data found","Selection could not be found in the funds,pools,subAssets, or assets (Selecting total portfolio is not an option)")
+            self.close()
+
+        highTables = {"positions_high": accountStart,"transactions_high" : tranStart}
+        lowTables = {"positions_low": accountStart,"transactions_low": tranStart}
+
         all_rows = []
-        for accountTable in sourceTables.keys():
-            try:
-                rows = self.parent.load_from_db(accountTable, f"WHERE {sourceTables[accountTable][1]} = ? AND [Date] BETWEEN ? AND ?", (entity, sourceTables[accountTable][0],allEnd))
-            except Exception as e:
-                print(f"Error in call : {e}")
-                rows = []
-            for row in rows or []:
-                # Tag so you can see origin if needed
-                row['_source'] = accountTable
-                all_rows.append(row)
-        if len(all_rows) == 0:
-            #assume fund if previous found nothing
-            for accountTable in ("positions_low","transactions_low"):
+        if self.parent.filterDict["Investor"].currentText() != "":
+            for idx, table in enumerate(highTables.keys()):
                 try:
-                    rows = self.parent.load_from_db(accountTable, f"WHERE [Target name] = ? AND [Date] BETWEEN ? AND ?", (entity, sourceTables[accountTable][0],allEnd))
+                    rows = self.parent.load_from_db(table, f"WHERE {highLook if not assetLook else highLook[idx]} = ? AND [Date] BETWEEN ? AND ?", (entity, highTables[table],allEnd))
                 except Exception as e:
-                    print(f"Error in call : {e}")
+                    print(f"Error in call : {e} ; {e.args}")
                     rows = []
                 for row in rows or []:
-                    # Tag so you can see origin if needed
-                    row['_source'] = accountTable
+                    row['_source'] = table
                     all_rows.append(row)
+        for idx, table in enumerate(lowTables.keys()):
+            try:
+                rows = self.parent.load_from_db(table, f"WHERE {lowLook if not assetLook else lowLook[idx]} = ? AND [Date] BETWEEN ? AND ?", (entity, lowTables[table],allEnd))
+                
+            except Exception as e:
+                print(f"Error in call : {e}; {e.args}")
+                rows = []
+            for row in rows or []:
+                row['_source'] = table
+                all_rows.append(row)
 
         # 3) Sort by dateTime column (handles ISO or space-separated)
         def parse_dt(s):
@@ -1504,9 +1595,83 @@ class underlyingDataWindow(QWidget):
         # 6) Populate each cell
         for r, row in enumerate(all_rows):
             for c, key in enumerate(all_cols):
-                item = QTableWidgetItem(str(row.get(key, '')))
+                raw = row.get(key,"")
+                try:
+                    num = float(raw)
+                    text = f"{num:,.2f}"
+                    item = QTableWidgetItem(text)
+                    item.setData(Qt.UserRole,num)
+                except:
+                    item = QTableWidgetItem(str(raw))
                 self.table.setItem(r, c, item)
 
+class tableWindow(QWidget):
+    """
+    A window that loads data from four database sources in the parent,
+    merges and sorts it by dateTime, and displays it in a QTableWidget
+    with a unified set of columns.
+    """
+    def __init__(self, parent=None, flags=Qt.WindowFlags(), parentSource = None, all_rows = [], table = ""):
+        super().__init__(parent, flags)
+        self.parent = parentSource
+        self.setWindowTitle(f"New data in {table}")
+        self.resize(1000, 600)
+
+        # Layout and table
+        layout = QVBoxLayout(self)
+        self.table = QTableWidget(self)
+        layout.addWidget(self.table)
+
+        
+
+        # 4) Collect the union of all column keys
+        all_cols = set()
+        for row in all_rows:
+            all_cols.update(row.keys())
+        all_cols = list(all_cols)
+
+        # 5) Configure the table widget
+        self.table.setRowCount(len(all_rows))
+        self.table.setColumnCount(len(all_cols))
+        self.table.setHorizontalHeaderLabels(all_cols)
+
+        # 6) Populate each cell
+        for r, row in enumerate(all_rows):
+            for c, key in enumerate(all_cols):
+                raw = row.get(key,"")
+                try:
+                    num = float(raw)
+                    text = f"{num:,.2f}"
+                    item = QTableWidgetItem(text)
+                    item.setData(Qt.UserRole,num)
+                except:
+                    item = QTableWidgetItem(str(raw))
+                self.table.setItem(r, c, item)
+
+class MultiSelectCombo(QComboBox):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setEditable(True)
+        self.lineEdit().setReadOnly(True)
+        model = QStandardItemModel(self)
+        self.setModel(model)
+        self.view().setSelectionMode(Qt.MultiSelection)
+        self.view().selectionModel().selectionChanged.connect(self._update_text)
+
+    def addItem(self, text, userData=None):
+        item = QStandardItem(text)
+        item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+        if userData is not None:
+            item.setData(userData, Qt.UserRole)
+        self.model().appendRow(item)
+
+    def _update_text(self, *args):
+        checked = [idx.data() for idx in self.view().selectionModel().selectedIndexes()]
+        self.lineEdit().setText(", ".join(checked))
+
+    def checkedItems(self):
+        return [idx.data(Qt.UserRole) 
+                for idx in self.view().selectionModel().selectedIndexes()]
 
 if __name__ == '__main__':
     key = os.environ.get('Dynamo_API')
