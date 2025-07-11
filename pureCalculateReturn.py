@@ -7,6 +7,9 @@ import requests
 import calendar
 import time
 import copy
+from openpyxl import Workbook
+from openpyxl.styles import PatternFill, Alignment
+from openpyxl.utils import get_column_letter
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 import queue
@@ -15,10 +18,11 @@ from PyQt5.QtWidgets import (
     QApplication, QWidget, QStackedWidget, QVBoxLayout,
     QLabel, QLineEdit, QPushButton, QFormLayout,
     QRadioButton, QButtonGroup, QComboBox, QHBoxLayout,
-    QTableWidget, QTableWidgetItem, QProgressBar, QTableView, QCheckBox, QMessageBox
+    QTableWidget, QTableWidgetItem, QProgressBar, QTableView, QCheckBox, QMessageBox,
+    QScrollArea, QFileDialog
 )
-from PyQt5.QtGui import QBrush, QColor, QStandardItem, QStandardItemModel
-from PyQt5.QtCore import Qt, QTimer, QAbstractTableModel, QModelIndex, QObject, pyqtSignal, QThread
+from PyQt5.QtGui import QBrush, QColor, QStandardItem, QStandardItemModel, QDesktopServices
+from PyQt5.QtCore import Qt, QTimer, QAbstractTableModel, QModelIndex, QObject, pyqtSignal, QThread, QPoint, QUrl
 
 testDataMode = False
 
@@ -53,6 +57,10 @@ if not os.path.exists(BASE_DIR):
 
 mainURL = "https://api.dynamosoftware.com/api/v2.2"
 
+nameHier = {
+                "Family Branch" : {"api" : "Parent investor", "dynHigh" : "Parentinvestor", "local" : "Family Branch"}
+            }
+
 class returnsApp(QWidget):
     def __init__(self, start_index=0):
         super().__init__()
@@ -64,7 +72,9 @@ class returnsApp(QWidget):
         self.filterCallLock = False
         self.cancel = False
         self.tableWindows = {}
+        self.dataTimeStart = datetime(2021,1,1)
         self.earliestChangeDate = datetime(datetime.now().year,datetime.now().month + 1,datetime.now().day)
+        self.currentTableData = None
         # main stack
         self.main_layout = QVBoxLayout()
         self.stack = QStackedWidget()
@@ -153,6 +163,24 @@ class returnsApp(QWidget):
         btn_to_results = QPushButton('See Calculation Database')
         btn_to_results.clicked.connect(self.show_results)
         controlsLayout.addWidget(btn_to_results)
+        self.exportBtn = QPushButton("Export Current Table to Excel")
+        self.exportBtn.clicked.connect(self.exportCurrentTable)
+        self.exportBtn.setStyleSheet("""
+                            QPushButton {
+                                background-color: #51AE2B;
+                                color: white;
+                                border: 1px solid #33721B;
+                                border-radius: 6px;
+                                padding: 4px 12px;
+                            }
+                            QPushButton:hover {
+                                background-color: #429321;
+                            }
+                            QPushButton:pressed {
+                                background-color: #33721B;
+                            }
+                        """)
+        controlsLayout.addWidget(self.exportBtn)
         controlsBox.setLayout(controlsLayout)
         layout.addWidget(controlsBox)
 
@@ -161,6 +189,8 @@ class returnsApp(QWidget):
 
         tableSelectorBox = QWidget()
         tableSelectorLayout = QVBoxLayout()
+        self.dataEndSelect = QComboBox()
+        tableSelectorLayout.addWidget(self.dataEndSelect)
         self.tableBtnGroup = QButtonGroup()
         self.complexTableBtn = QRadioButton("Complex Table")
         self.monthlyTableBtn = QRadioButton("Monthly Table")
@@ -183,12 +213,16 @@ class returnsApp(QWidget):
         filterLayout.addWidget(tableSelectorBox)
 
         self.filterOptions = [
+                            {"key": "Classification", "name": "HF Classification", "dataType" : None, "dynNameLow" : "Target nameExposureHFClassificationLevel2"},
+                            {"key" : nameHier["Family Branch"]["local"], "name" : nameHier["Family Branch"]["local"], "dataType" : None, "dynNameLow" : None, "dynNameHigh" : nameHier["Family Branch"]["dynHigh"]},
                             {"key": "Investor",       "name": "Investor", "dataType" : "Investor", "dynNameLow" : None},
                             {"key": "assetClass",     "name": "Asset Class", "dataType" : "Total Asset", "dynNameLow" : "ExposureAssetClass"},
                             {"key": "subAssetClass",  "name": "Sub-Asset Class", "dataType" : "Total subAsset", "dynNameLow" : "ExposureAssetClassSub-assetClass(E)"},
                             {"key": "Pool",           "name": "Pool", "dataType" : "Total Pool" , "dynNameLow" : "Source name"},
                             {"key": "Fund",           "name": "Fund/Investment", "dataType" : "Total Fund" , "dynNameLow" : "Target name"},
+                            
                         ]
+        self.filterBtnExclusions = ["Investor","Classification", nameHier["Family Branch"]["local"]]
         self.filterDict = {}
         self.filterRadioBtnDict = {}
         self.filterBtnGroup = QButtonGroup()
@@ -196,17 +230,17 @@ class returnsApp(QWidget):
         for filter in self.filterOptions:
             filterBox = QWidget()
             filterBoxLayout = QVBoxLayout()
-            if filter["key"] != "Investor":
+            if filter["key"] not in self.filterBtnExclusions:
                 #investor level is not filterable. It is total portfolio or shows the investors data
                 self.filterRadioBtnDict[filter["key"]] = QCheckBox(f"{filter["name"]}:")
                 self.filterRadioBtnDict[filter["key"]].setChecked(True)
                 self.filterBtnGroup.addButton(self.filterRadioBtnDict[filter["key"]])
                 filterBoxLayout.addWidget(self.filterRadioBtnDict[filter["key"]])
             else:
-                filterBoxLayout.addWidget(QLabel("Investor:"))
-            self.filterDict[filter["key"]] = QComboBox()
+                filterBoxLayout.addWidget(QLabel(f"{filter["name"]}:"))
+            self.filterDict[filter["key"]] = MultiSelectBox()
             self.filterDict[filter["key"]].addItems([""])
-            self.filterDict[filter["key"]].currentTextChanged.connect(lambda text, level = filter["key"]: self.filterUpdate(text,level))
+            self.filterDict[filter["key"]].popup.closed.connect(lambda level = filter["key"]: self.filterUpdate(None,level))
             
             filterBoxLayout.addWidget(self.filterDict[filter["key"]])
             filterBox.setLayout(filterBoxLayout)
@@ -227,6 +261,8 @@ class returnsApp(QWidget):
 
         self.pullInvestorNames()
         self.pullLevelNames()
+        self.updateMonthOptions()
+        self.dataEndSelect.currentTextChanged.connect(self.buildReturnTable)
         
     def init_data_processing(self):
         self.calcSubmitted = False
@@ -275,23 +311,137 @@ class returnsApp(QWidget):
             window.show()
         except Exception as e:
             print(f"Error in data viewing window: {e}")
+    def exportCurrentTable(self):
+        # helper to darken a 6-digit hex color by a given factor
+        def darken_color(hex_color, factor=0.01):
+            h = hex_color.strip("#")
+            r = int(h[0:2], 16)
+            g = int(h[2:4], 16)
+            b = int(h[4:6], 16)
+            dr = max(0, int(r * factor))
+            dg = max(0, int(g * factor))
+            db = max(0, int(b * factor))
+            return f"{dr:02X}{dg:02X}{db:02X}"
+
+        # 1) prompt user
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save as…", "", "Excel Files (*.xlsx)"
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".xlsx"):
+            path += ".xlsx"
+
+        data = self.currentTableData  # dict of dicts
+
+        # 2) determine hierarchy levels present
+        all_types = {row.get("dataType") for row in data.values()}
+        full_hierarchy = [
+            "Total", "Total Asset", "Total subAsset",
+            "Total Pool", "Total Fund",
+        ]
+        hierarchy_levels = [lvl for lvl in full_hierarchy if lvl in all_types]
+        num_hier = len(hierarchy_levels)
+
+        # 3) dynamic data columns minus "dataType"
+        all_cols = {
+            k for row in data.values() for k in row.keys()
+            if k != "dataType"
+        }
+        sorted_cols = sorted(all_cols)
+
+        # 4) create workbook
+        wb = Workbook()
+        ws = wb.active
+
+        # 5) header row
+        for idx, lvl in enumerate(hierarchy_levels, start=1):
+            ws.cell(row=1, column=idx, value=lvl)
+        for idx, colname in enumerate(sorted_cols, start=num_hier+1):
+            ws.cell(row=1, column=idx, value=colname)
+
+        split_cell = f"{get_column_letter(num_hier+1)}2"
+        ws.freeze_panes = split_cell
+
+        # 6) color map and percent exceptions
+        fill_map = {
+            "Total":          "999999",
+            "Total Asset":    "B587EB",
+            "Total subAsset": "D5C1EC",
+            "Total Pool":     "D5D7D5",
+            "Total Fund":     "FFFFFF",
+        }
+        percent_exceptions = {"NAV", "Gain"}
+
+        # 7) populate rows
+        for r, (row_name, row_dict) in enumerate(data.items(), start=2):
+            dtype = row_dict.get("dataType")
+            level = hierarchy_levels.index(dtype) if dtype in hierarchy_levels else 0
+
+            # fills
+            data_color = fill_map.get(dtype, "FFFFFF")
+            if r % 2 == 1:
+                data_color = darken_color(data_color,0.93)
+            header_color = darken_color(data_color, 0.9)
+            data_fill   = PatternFill("solid", data_color, data_color)
+            header_fill = PatternFill("solid", header_color, header_color)
+
+            # spread header fill across hierarchy cols
+            data_start = num_hier + 1
+            for col in range(level+1, data_start):
+                cell = ws.cell(row=r, column=col, value=row_name if col==level+1 else None)
+                cell.fill = header_fill
+                if col == level+1:
+                    cell.alignment = Alignment(indent=level)
+
+            # data cells with proper formatting
+            for c, colname in enumerate(sorted_cols, start=data_start):
+                val = row_dict.get(colname, None)
+                cell = ws.cell(row=r, column=c, value=val)
+                cell.fill = data_fill
+                if isinstance(val, (int, float)):
+                    if colname in percent_exceptions:
+                        # show with commas, two decimals
+                        cell.number_format = "#,##0.00"
+                    else:
+                        # interpret val as percentage (e.g. 10.5 → 10.5%)
+                        cell.value = val / 100.0
+                        cell.number_format = "0.00%"
+
+        # 8) autofit column widths
+        for idx, col_cells in enumerate(ws.columns, start=1):
+            max_len = 0
+            for cell in col_cells:
+                if cell.value is not None:
+                    text = str(cell.value)
+                    max_len = max(max_len, len(text))
+            ws.column_dimensions[get_column_letter(idx)].width = max_len + 2
+
+        # 9) save and notify
+        try:
+            wb.save(path)
+        except Exception as e:
+            QMessageBox.critical(self, "Save error", str(e))
+        else:
+            QMessageBox.information(self, "Saved", f"Excel saved to:\n{path}")
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
     def filterBtnUpdate(self, button, checked):
         if not self.filterCallLock:
             self.filterCallLock = True
             reloadRequired = False
             for filter in self.filterOptions:
-                if filter["key"] != "Investor":
+                if filter["key"] not in self.filterBtnExclusions:
                     if not self.filterRadioBtnDict[filter["key"]].isChecked():
-                        self.filterDict[filter["key"]].setCurrentText("")
+                        self.filterDict[filter["key"]].clearSelection()
                         self.filterDict[filter["key"]].setVisible(False)
                         reloadRequired = True
                     else:
                         self.filterDict[filter["key"]].setVisible(True)
             self.filterCallLock = False
-            if reloadRequired:
+            if reloadRequired or self.currentTableData is None:
                 self.buildReturnTable()
             else:
-                self.populateReturnsTable(self.investorCalculations)
+                self.populateReturnsTable(self.currentTableData)
     def resetData(self):
         self.save_to_db("calculations",None,action="reset") #reset calculations so new data will be freshly calculated
         if testDataMode:
@@ -300,8 +450,20 @@ class returnsApp(QWidget):
             executor.submit(self.pullData)
     def beginImport(self):
         executor.submit(self.pullData)
+    def updateMonthOptions(self):
+        start = self.dataTimeStart
+        end = datetime.now() - relativedelta(months=1) + relativedelta(hours=8)
+        #ends on the previous month. Adds a few hours so index will still be before it and count as a month on the 1st
+        index = start
+        monthList = []
+        while index < end:
+            monthList.append(datetime.strftime(index,"%B %Y"))
+            index += relativedelta(months=1)
+        self.dataEndSelect.addItems(monthList)
+        self.dataEndSelect.setCurrentText(monthList[-1])
     def buildReturnTable(self):
         print("Building return table...")
+        self.currentTableData = None #resets so a failed build won't be used
         self.stack.setCurrentIndex(1)
         if self.tableBtnGroup.checkedButton().text() == "Complex Table":
             self.returnOutputType.setCurrentText("Return")
@@ -310,21 +472,46 @@ class returnsApp(QWidget):
         else:
             self.returnOutputType.setVisible(True)
             self.viewUnderlyingDataBtn.setVisible(True)
-        condStatement = " WHERE [Investor] = ? "
-        if self.filterDict["Investor"].currentText() == "":
+        if self.filterDict["Investor"].checkedItems() == [] and self.filterDict[nameHier["Family Branch"]["local"]].checkedItems() == []:
+            #if no investor level selections,show full portfolio information
             parameters = ["Total Fund"]
+            condStatement = " WHERE [Investor] = ? "
         else:
-            parameters = [self.filterDict["Investor"].currentText()]
+            #show investor level fund data
+            condStatement = " WHERE"
+            parameters = []
+            if self.filterDict["Investor"].checkedItems() != []:
+                paramTemp = self.filterDict["Investor"].checkedItems()
+                placeholders = ','.join('?' for _ in paramTemp) 
+                condStatement += f" [Investor] IN ({placeholders}) "
+                for param in paramTemp:
+                    parameters.append(param)
+            if self.filterDict[nameHier["Family Branch"]["local"]].checkedItems() != []:
+                paramTemp = self.filterDict[nameHier["Family Branch"]["local"]].checkedItems()
+                placeholders = ','.join('?' for _ in paramTemp)
+                if condStatement == " WHERE":
+                    condStatement += f" [{nameHier["Family Branch"]["local"]}] IN ({placeholders}) "
+                else:
+                    condStatement += f" AND [{nameHier["Family Branch"]["local"]}] IN ({placeholders}) "
+                for param in paramTemp:
+                    parameters.append(param)
         for filter in self.filterOptions:
-            if filter["key"] != "Investor":
-                if self.filterDict[filter["key"]].currentText() != "":
-                    condStatement += f" AND [{filter["key"]}] = ?"
-                    parameters.append(self.filterDict[filter["key"]].currentText())
+            if filter["key"] != "Investor" and filter["key"] != nameHier["Family Branch"]["local"]:
+                if self.filterDict[filter["key"]].checkedItems() != []:
+                    paramTemp = self.filterDict[filter["key"]].checkedItems()
+                    for param in paramTemp:
+                        parameters.append(param)
+                    placeholders = ','.join('?' for _ in paramTemp)
+                    condStatement += f" AND [{filter["key"]}] IN ({placeholders})"
         data = self.load_from_db("calculations",condStatement, tuple(parameters))
         output = {"Total" : {}}
         output , data = self.calculateUpperLevels(output,data)
         complexOutput = copy.deepcopy(output)
         for entry in data:
+            if datetime.strptime(entry["dateTime"], "%Y-%m-%d %H:%M:%S") >  datetime.strptime(self.dataEndSelect.currentText(),"%B %Y"):
+                #don't build in data past the selection
+                continue
+            date = datetime.strftime(datetime.strptime(entry["dateTime"], "%Y-%m-%d %H:%M:%S"), "%B %Y")
             if entry["Fund"] is not None and entry["Fund"] != "None":
                 Dtype = "Total Fund"
                 level = entry["Fund"]
@@ -340,23 +527,34 @@ class returnsApp(QWidget):
             else:
                 Dtype = "Total"
                 level = "Total"
-            date = datetime.strftime(datetime.strptime(entry["dateTime"], "%Y-%m-%d %H:%M:%S"), "%B %Y")
+            
             dataOutputType = self.returnOutputType.currentText()
             if level in output.keys():
-                output[level][date] = entry[dataOutputType]
+                if date not in output[level].keys():
+                    #creates value if not exists. If it is not return percent, sums the values
+                    output[level][date] = float(entry[dataOutputType])
+                elif dataOutputType != "Return":
+                    output[level][date] += float(entry[dataOutputType])
             else:
                 output[level] = {}
             if "dataType" not in output[level].keys():
                 output[level]["dataType"] = Dtype
-            if self.tableBtnGroup.checkedButton().text() == "Complex Table" and date == datetime.strftime(datetime.now() - relativedelta(months=1),"%B %Y"):
+            if self.tableBtnGroup.checkedButton().text() == "Complex Table" and date == self.dataEndSelect.currentText():
                 if level not in complexOutput.keys():
                     complexOutput[level] = {}
                 if "dataType" not in complexOutput[level].keys():
                     complexOutput[level]["dataType"] = Dtype
-                complexOutput[level][f"NAV"] = entry["NAV"]
-                complexOutput[level][f"Gain"] = entry["Gain"]
-                if self.filterDict["Investor"].currentText() != "":
-                    complexOutput[level]["Ownership (%)"] = entry["Ownership"]
+                if "NAV" not in complexOutput[level].keys():
+                    complexOutput[level][f"NAV"] = float(entry["NAV"])
+                    complexOutput[level][f"Gain"] = float(entry["Gain"])
+                else:
+                    complexOutput[level][f"NAV"] += float(entry["NAV"])
+                    complexOutput[level][f"Gain"] += float(entry["Gain"])
+                if self.filterDict["Investor"].checkedItems() != []:
+                    if "Ownership (%)" not in complexOutput[level].keys():
+                        complexOutput[level]["Ownership (%)"] = entry["Ownership"]
+                    else:
+                        complexOutput[level]["Ownership (%)"] += entry["Ownership"]
         if self.tableBtnGroup.checkedButton().text() == "Complex Table":
             output = self.calculateComplexTable(output,complexOutput)
         outputKeys = output.keys()
@@ -366,15 +564,16 @@ class returnsApp(QWidget):
                 deleteKeys.append(key)
         for key in deleteKeys:
             output.pop(key)
-        self.investorCalculations = output
         self.populateReturnsTable(output)
+        self.currentTableData = output
     def calculateComplexTable(self,monthOutput,complexOutput):
-        MTDtime = datetime.strftime(datetime.now() - relativedelta(months=1),"%B %Y")
-        QTDtimes = [datetime.strftime(datetime.now() - relativedelta(months=i + 1),"%B %Y") for i in range(int((datetime.now().month) - 1) % 3 if (int(datetime.now().month) - 1) % 3 != 0 else 3)]
-        YTDtimes = [datetime.strftime(datetime.now() - relativedelta(months=i + 1),"%B %Y") for i in range(int((datetime.now().month) - 1) % 12 if (int(datetime.now().month) - 1) % 12 != 0 else 12)]
+        endTime = datetime.strptime(self.dataEndSelect.currentText(),"%B %Y")
+        MTDtime = datetime.strftime(endTime,"%B %Y")
+        QTDtimes = [datetime.strftime(endTime - relativedelta(months=i),"%B %Y") for i in range(int((endTime.month)) % 3 if (int(endTime.month)) % 3 != 0 else 3)]
+        YTDtimes = [datetime.strftime(endTime - relativedelta(months=i),"%B %Y") for i in range(int((endTime.month)) % 12 if (int(endTime.month)) % 12 != 0 else 12)]
         YR_times = {}
         for yr in (1,3,5,7,10,12,15,20):
-            YR_times[yr] = [datetime.strftime(datetime.now() - relativedelta(months=i + 1),"%B %Y") for i in range(12 * yr)]
+            YR_times[yr] = [datetime.strftime(endTime - relativedelta(months=i),"%B %Y") for i in range(12 * yr)]
         for level in monthOutput.keys():
             if MTDtime in monthOutput[level].keys():
                 complexOutput[level]["MTD"] = monthOutput[level][MTDtime]
@@ -409,7 +608,7 @@ class returnsApp(QWidget):
                         #ITDmonths = ITDmonths[1:] #remove first month?? 
                         complexOutput[level]["ITD"] = 1
                         for month in ITDmonths:
-                            if month != "dataType" and month != datetime.strftime(datetime.now(),"%B %Y"):
+                            if month != "dataType" and datetime.strptime(month,"%B %Y") <= datetime.strptime(self.dataEndSelect.currentText(),"%B %Y"):
                                 monthCount += 1
                                 complexOutput[level]["ITD"] *= (1 + float(monthOutput[level][month]) / 100 )
                         complexOutput[level]["ITD"] = ((complexOutput[level]["ITD"] ** (12/int(monthCount)) ) - 1 ) * 100 if complexOutput[level]["ITD"] > 0 else -1 * ((abs(complexOutput[level]["ITD"]) ** (1/int(monthCount)) ) - 1)* 100
@@ -418,6 +617,9 @@ class returnsApp(QWidget):
                         complexOutput[level]["ITD"] = monthOutput[level][MTDtime]
             except Exception as e:
                 pass
+        # for level in monthOutput.keys():
+        #     if "dataType" not in complexOutput[level].keys():
+        #         complexOutput.pop(level)
 
 
 
@@ -535,25 +737,25 @@ class returnsApp(QWidget):
                     
     def filterUpdate(self, filterText, level):
         def resetOptions(key,options):
-            currentText = self.filterDict[key].currentText()
-            comboBox = self.filterDict[key]
-            comboBox.clear()
-            comboBox.addItems([""])
-            comboBox.addItems(sorted(options))
-            if currentText in options:
-                comboBox.setCurrentText(currentText)
+            currentSelections = self.filterDict[key].checkedItems()
+            multiBox = self.filterDict[key]
+            multiBox.clearItems()
+            multiBox.addItems(sorted(options))
+            for currentText in currentSelections:
+                if currentText in options:
+                    multiBox.setCheckedItem(currentText)
         def exitFunc():
             self.filterCallLock = False
             self.buildReturnTable()
         if not self.filterCallLock:
             #prevents recursion on calls from comboboxes being updated
             self.filterCallLock = True
-            currentAsset = self.filterDict["assetClass"].currentText()
-            currentSubAsset = self.filterDict["subAssetClass"].currentText()
-            currentPool = self.filterDict["Pool"].currentText()
-            currentFund = self.filterDict["Fund"].currentText()
+            currentAssets = self.filterDict["assetClass"].checkedItems()
+            currentSubAssets = self.filterDict["subAssetClass"].checkedItems()
+            currentPools = self.filterDict["Pool"].checkedItems()
+            currentFunds = self.filterDict["Fund"].checkedItems()
 
-            if currentAsset == "" and currentSubAsset == "" and currentPool == "" and currentFund == "":
+            if currentAssets == [] and currentSubAssets == [] and currentPools == [] and currentFunds == []:
                 #if no filters, open all options and exit
                 resetOptions("Fund",self.fullLevelOptions["Fund"])
                 resetOptions("Pool",self.fullLevelOptions["Pool"])
@@ -566,21 +768,24 @@ class returnsApp(QWidget):
             first = True
             parameters = []
             for filter in self.filterOptions:
-                if filter["key"] != "Investor":
-                    if self.filterDict[filter["key"]].currentText() != "":
+                if filter["key"] not in self.filterBtnExclusions:
+                    if self.filterDict[filter["key"]].checkedItems() != []:
+                        paramTemp = self.filterDict[filter["key"]].checkedItems()
+                        placeholders = ','.join('?' for _ in paramTemp)
                         if first:
-                            condStatement = f"WHERE [{filter["dynNameLow"]}] = ?"
+                            condStatement = f"WHERE [{filter["dynNameLow"]}] IN ({placeholders})"
                             first = False
                         else:
-                            condStatement += f" AND [{filter["dynNameLow"]}] = ?"
-                        parameters.append(self.filterDict[filter["key"]].currentText())
+                            condStatement += f" AND [{filter["dynNameLow"]}] IN ({placeholders})"
+                        for param in paramTemp:
+                            parameters.append(param)
             lowAccounts = self.load_from_db("positions_low", condStatement,tuple(parameters))
             options = {}
             for filter in self.filterOptions:
                 options[filter["key"]] = []
             for account in lowAccounts:
                 for filter in self.filterOptions:
-                    if filter["key"] != "Investor":
+                    if filter["key"] not in self.filterBtnExclusions:
                         if account[filter["dynNameLow"]] not in options[filter["key"]]:
                             options[filter["key"]].append(account[filter["dynNameLow"]])
             for filter in self.filterOptions:
@@ -590,9 +795,7 @@ class returnsApp(QWidget):
             exitFunc()
             return
     def updateMonths(self):
-        startMonth = int(1)
-        year = str(2021)
-        start = datetime(int(year),int(startMonth),1)
+        start = self.dataTimeStart
         end = datetime.now()
         index = start
         monthList = []
@@ -600,7 +803,6 @@ class returnsApp(QWidget):
             monthList.append(index)
             index += relativedelta(months=1)
         dbDates = []
-        firstRun = True
         for monthDT in monthList:
             month = int(monthDT.month)
             year = int(monthDT.year)
@@ -621,27 +823,29 @@ class returnsApp(QWidget):
             bothEnd = f"{year}-{month}-{lastDayCurrent}T00:00:00.000Z"
             accountStart = f"{prevMyear}-{prevMonth}-{lastDayPrev}T00:00:00.000Z"
 
-            if firstRun:
-                self.startDate = accountStart
-                firstRun = False
             
             dateString = monthDT.strftime("%B %Y")
 
             monthEntry = {"dateTime" : monthDT, "Month" : dateString, "tranStart" : tranStart.removesuffix(".000Z"), "endDay" : bothEnd.removesuffix(".000Z"), "accountStart" : accountStart.removesuffix(".000Z")}
             dbDates.append(monthEntry)
-        self.endDate =  bothEnd
         self.save_to_db("Months",dbDates)
 
     def pullInvestorNames(self):
         accountsHigh = self.load_from_db('positions_high')
         if accountsHigh is not None:
             investors = []
+            familyBranches = []
             for account in accountsHigh:
                 if account["Source name"] not in investors:
                     investors.append(account["Source name"])
+                if account[nameHier["Family Branch"]["dynHigh"]] not in familyBranches:
+                    familyBranches.append(account[nameHier["Family Branch"]["dynHigh"]])
             investors.sort()
+            familyBranches.sort()
             self.allInvestors = investors
             self.filterDict["Investor"].addItems(investors)
+            self.allFamilyBranches = familyBranches
+            self.filterDict[nameHier["Family Branch"]["local"]].addItems(familyBranches)
         else:
             self.allInvestors = []
     def pullLevelNames(self):
@@ -649,6 +853,7 @@ class returnsApp(QWidget):
         subAssets = []
         pools = []
         funds = []
+        classifications = []
         accountsHigh = self.load_from_db("positions_high")
         if accountsHigh is not None:
             for account in accountsHigh:
@@ -670,6 +875,7 @@ class returnsApp(QWidget):
                 subAssetClass = lowAccount["ExposureAssetClassSub-assetClass(E)"]
                 pool = lowAccount["Source name"]
                 fund = lowAccount["Target name"]
+                classification = lowAccount["Target nameExposureHFClassificationLevel2"]
                 if fund is not None and fund not in funds:
                     funds.append(fund)
                 if assetClass is not None and assetClass not in assets:
@@ -678,6 +884,8 @@ class returnsApp(QWidget):
                     subAssets.append(subAssetClass)
                 if pool is not None and pool not in pools:
                     pools.append(pool)
+                if classification is not None and classification not in classifications:
+                    classifications.append(classification)
         else:
             print("no pool to fund accounts found")
         assets.sort()
@@ -689,6 +897,8 @@ class returnsApp(QWidget):
         self.filterDict["Pool"].addItems(pools)
         self.filterDict["Fund"].addItems(funds)
         self.fullLevelOptions = {"Fund" : funds, "Pool" : pools, "subAssetClass" : subAssets, "assetClass" : assets}
+        self.filterDict["Classification"].addItems(classifications)
+        self.filterDict["Classification"].setCheckedItem("HFC")
 
 
     def check_api_key(self):
@@ -753,228 +963,270 @@ class returnsApp(QWidget):
                         self.tableWindows[table] = window
                         window.show()
                     gui_queue.put(lambda: openWindow())
+                    #-------------
+                    diffCount = 0
+                    differences = []
+                    seen = set()
+                    for rec in previous:
+                        value = rec['Value' if "position" in table else "CashFlow"]
+                        value = 0 if value is None or value == "None" else value
+                        seen.add((
+                            rec['Source name'] if rec['Source name'] is not None else "None",
+                            rec['Target name'] if rec['Target name'] is not None else "None",
+                            round(float(value),-2),               # normalize to float
+                            rec['Date'].replace(' ', 'T')      # normalize format if needed
+                        ))
+
+                    earliest = None
+                    for rec in rows:
+                        value = rec['Value' if "position" in table else "CashFlow"]
+                        value = 0 if value is None or value == "None" else value
+                        key = (
+                            rec['Source name'] if rec['Source name'] is not None else "None",
+                            rec['Target name'] if rec['Target name'] is not None else "None",
+                            round(float(value),-2),               
+                            rec['Date'].replace(' ', 'T')
+                        )
+                        if key in seen:
+                            continue
+                        diffCount += 1
+                        differences.append(rec)
+                        differences.append({"Source name" : key[0],"Target name" : key[1],"Value" : key[2],"Date" : key[3]})
+                        # parse the date for comparison
+                        dt = datetime.strptime(rec['Date'], "%Y-%m-%dT%H:%M:%S")
+                        if earliest is None or dt < earliest:
+                            earliest = dt
+                    if diffCount > 0:
+                        newTable = table + "_reversed"
+                        def openWindow():
+                            windowR = tableWindow(parentSource=self,all_rows=differences,table=newTable)
+                            self.tableWindows[newTable] = windowR
+                            windowR.show()
+                        gui_queue.put(lambda: openWindow())
             except Exception as e:
                 print(f"Error searching old data: {e}")
-
-        self.earliestChangeDate = datetime(datetime.now().year,datetime.now().month + 1,datetime.now().day)
-        gui_queue.put(lambda: self.apiLoadingBarBox.setVisible(True))
-        gui_queue.put(lambda: self.importButton.setEnabled(False))
-        self.updateMonths()
-        startDate = f"2021-01-01T00:00:00.000Z" #around first day for most records
-        startDate = self.startDate
-        endDate = self.endDate
-        self.pullInvestorNames()
-        apiData = {
-            "tranCols": "Investment in, Investing Entity, Transaction Type, Effective date, Cash flow change, Asset Class (E), Sub-asset class (E)",
-            "tranName": "InvestmentTransaction",
-            "tranSort": "Effective date:desc",
-            "accountCols": "As of Date, Balance Type, Asset Class, Sub-asset class, Value of Investments, Investing entity, Investment in",
-            "accountName": "InvestmentPosition",
-            "accountSort": "As of Date:desc",
-        }
-        calculationsTest = self.load_from_db("calculations")
-        if calculationsTest != []:
-            skipCalculations = True
-        else:
-            skipCalculations = False
-        loadingIdx = 0
-        for i in range(2):
-            cols_key = 'accountCols' if i == 1 else 'tranCols'
-            name_key = 'accountName' if i == 1 else 'tranName'
-            sort_key = 'accountSort' if i == 1 else 'tranSort'
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-                "x-columns": apiData[cols_key],
-                "x-sort": apiData[sort_key]
+        try:
+            self.earliestChangeDate = datetime(datetime.now().year,datetime.now().month + 1,datetime.now().day)
+            gui_queue.put(lambda: self.apiLoadingBarBox.setVisible(True))
+            gui_queue.put(lambda: self.importButton.setEnabled(False))
+            self.updateMonths()
+            startDate = datetime.strftime(self.dataTimeStart, "%Y-%m-%dT00:00:00.000Z")
+            endDate = datetime.strftime(datetime.now(), "%Y-%m-%dT00:00:00.000Z")
+            self.pullInvestorNames()
+            apiData = {
+                "tranCols": "Investment in, Investing Entity, Transaction Type, Effective date, Cash flow change, Asset Class (E), Sub-asset class (E), HF Classification, Remaining commitment change",
+                "tranName": "InvestmentTransaction",
+                "tranSort": "Effective date:desc",
+                "accountCols": "As of Date, Balance Type, Asset Class, Sub-asset class, Value of Investments, Investing entity, Investment in, HF Classification, Parent investor",
+                "accountName": "InvestmentPosition",
+                "accountSort": "As of Date:desc",
             }
-            for j in range(2): #0: fund level, 1: pool to high investor level
-                gui_queue.put(lambda: self.apiLoadingBar.setValue(int((loadingIdx)/4 * 100)))
-                loadingIdx += 1
-                investmentLevel = "Investing entity" if j == 0 else "Investment in"
-                if i == 0: #transaction
-                    if j == 0:
-                        payload = {
-                        "advf": {
-                            "e": [
-                                {
-                                    "_name": "InvestmentTransaction",
-                                    "rule": [
-                                        {
-                                            "_op": "not_null",
-                                            "_prop": "Cash flow change"
-                                        },
-                                        {
-                                            "_op": "all",
-                                            "_prop": f"{investmentLevel}",
-                                            "values": [
-                                                "pool, llc"
-                                            ]
-                                        },
-                                        {
-                                            "_op": "between_date",
-                                            "_prop": "Effective date",
-                                            "values": [
-                                                f"{startDate}",
-                                                f"{endDate}"
-                                            ]
-                                        }
-                                    ]
-                                }
-                            ]
-                        },
-                        "mode": "compact"
-                    }
-                    else:
-                        payload = {
-                        "advf": {
-                            "e": [
-                                {
-                                    "_name": "InvestmentTransaction",
-                                    "rule": [
-                                        {
-                                            "_op": "not_null",
-                                            "_prop": "Cash flow change"
-                                        },
-                                        {
-                                            "_op": "all",
-                                            "_prop": f"{investmentLevel}",
-                                            "values": [
-                                                "pool, llc"
-                                            ]
-                                        },
-                                        {
-                                            "_op": "between_date",
-                                            "_prop": "Effective date",
-                                            "values": [
-                                                f"{startDate}",
-                                                f"{endDate}"
-                                            ]
-                                        }
-                                    ]
-                                }
-                            ]
-                        },
-                        "mode": "compact"
-                    }
-                    
-                else: #account (position)
-                    if j == 0:
-                        payload = {
-                                    "advf": {
-                                        "e": [
+            calculationsTest = self.load_from_db("calculations")
+            if calculationsTest != []:
+                skipCalculations = True
+            else:
+                skipCalculations = False
+            loadingIdx = 0
+            for i in range(2):
+                cols_key = 'accountCols' if i == 1 else 'tranCols'
+                name_key = 'accountName' if i == 1 else 'tranName'
+                sort_key = 'accountSort' if i == 1 else 'tranSort'
+                headers = {
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                    "x-columns": apiData[cols_key],
+                    "x-sort": apiData[sort_key]
+                }
+                for j in range(2): #0: fund level, 1: pool to high investor level
+                    gui_queue.put(lambda: self.apiLoadingBar.setValue(int((loadingIdx)/4 * 100)))
+                    loadingIdx += 1
+                    investmentLevel = "Investing entity" if j == 0 else "Investment in"
+                    if i == 0: #transaction
+                        if j == 0:
+                            payload = {
+                            "advf": {
+                                "e": [
+                                    {
+                                        "_name": "InvestmentTransaction",
+                                        "rule": [
                                             {
-                                                "_name": "InvestmentPosition",
-                                                "rule": [
-                                                    {
-                                                        "_op": "all",
-                                                        "_prop": f"{investmentLevel}",
-                                                        "values": [
-                                                            "pool, llc"
-                                                        ]
-                                                    },
-                                                    {
-                                                        "_op": "between_date",
-                                                        "_prop": "As of date",
-                                                        "values": [
-                                                            f"{startDate}",
-                                                            f"{endDate}"
-                                                        ]
-                                                    }
+                                                "_op": "not_null",
+                                                "_prop": "Cash flow change"
+                                            },
+                                            {
+                                                "_op": "all",
+                                                "_prop": f"{investmentLevel}",
+                                                "values": [
+                                                    "pool, llc"
+                                                ]
+                                            },
+                                            {
+                                                "_op": "between_date",
+                                                "_prop": "Effective date",
+                                                "values": [
+                                                    f"{startDate}",
+                                                    f"{endDate}"
                                                 ]
                                             }
                                         ]
-                                    },
-                                    "mode": "compact"
-                                }
-                    else:
-                        payload = {
-                                    "advf": {
-                                        "e": [
+                                    }
+                                ]
+                            },
+                            "mode": "compact"
+                        }
+                        else:
+                            payload = {
+                            "advf": {
+                                "e": [
+                                    {
+                                        "_name": "InvestmentTransaction",
+                                        "rule": [
                                             {
-                                                "_name": "InvestmentPosition",
-                                                "rule": [
-                                                    {
-                                                        "_op": "all",
-                                                        "_prop": "Investment in",
-                                                        "values": [
-                                                            "pool, llc"
-                                                        ]
-                                                    },
-                                                    {
-                                                        "_op": "between_date",
-                                                        "_prop": "As of date",
-                                                        "values": [
-                                                            f"{startDate}",
-                                                            f"{endDate}"
-                                                        ]
-                                                    }
+                                                "_op": "not_null",
+                                                "_prop": "Cash flow change"
+                                            },
+                                            {
+                                                "_op": "all",
+                                                "_prop": f"{investmentLevel}",
+                                                "values": [
+                                                    "pool, llc"
+                                                ]
+                                            },
+                                            {
+                                                "_op": "between_date",
+                                                "_prop": "Effective date",
+                                                "values": [
+                                                    f"{startDate}",
+                                                    f"{endDate}"
                                                 ]
                                             }
                                         ]
-                                    },
-                                    "mode": "compact"
-                                }
-                response = requests.post(f"{mainURL}/Search", headers=headers, data=json.dumps(payload))
-                if response.status_code == 200:
-                    try:
-                        data = response.json()
-                    except ValueError:
-                        continue
-                    if isinstance(data, dict):
-                        rows = data.get('data', data.get('rows', []))
-                    elif isinstance(data, list):
-                        rows = data
+                                    }
+                                ]
+                            },
+                            "mode": "compact"
+                        }
+                        
+                    else: #account (position)
+                        if j == 0:
+                            payload = {
+                                        "advf": {
+                                            "e": [
+                                                {
+                                                    "_name": "InvestmentPosition",
+                                                    "rule": [
+                                                        {
+                                                            "_op": "all",
+                                                            "_prop": f"{investmentLevel}",
+                                                            "values": [
+                                                                "pool, llc"
+                                                            ]
+                                                        },
+                                                        {
+                                                            "_op": "between_date",
+                                                            "_prop": "As of date",
+                                                            "values": [
+                                                                f"{startDate}",
+                                                                f"{endDate}"
+                                                            ]
+                                                        }
+                                                    ]
+                                                }
+                                            ]
+                                        },
+                                        "mode": "compact"
+                                    }
+                        else:
+                            payload = {
+                                        "advf": {
+                                            "e": [
+                                                {
+                                                    "_name": "InvestmentPosition",
+                                                    "rule": [
+                                                        {
+                                                            "_op": "all",
+                                                            "_prop": "Investment in",
+                                                            "values": [
+                                                                "pool, llc"
+                                                            ]
+                                                        },
+                                                        {
+                                                            "_op": "between_date",
+                                                            "_prop": "As of date",
+                                                            "values": [
+                                                                f"{startDate}",
+                                                                f"{endDate}"
+                                                            ]
+                                                        }
+                                                    ]
+                                                }
+                                            ]
+                                        },
+                                        "mode": "compact"
+                                    }
+                    response = requests.post(f"{mainURL}/Search", headers=headers, data=json.dumps(payload))
+                    if response.status_code == 200:
+                        try:
+                            data = response.json()
+                        except ValueError:
+                            continue
+                        if isinstance(data, dict):
+                            rows = data.get('data', data.get('rows', []))
+                        elif isinstance(data, list):
+                            rows = data
+                        else:
+                            rows = []
+
+                        keys_to_remove = {'_id', '_es'}
+                        rows = [
+                            {k: v for k, v in row.items() if k not in keys_to_remove}
+                            for row in rows
+                        ]
+
                     else:
-                        rows = []
-
-                    keys_to_remove = {'_id', '_es'}
-                    rows = [
-                        {k: v for k, v in row.items() if k not in keys_to_remove}
-                        for row in rows
-                    ]
-
-                else:
-                    print(f"Error in API call. Code: {response.status_code}. {response}")
-                    try:
-                        print(f"Error: {response.json()}")
-                        print(f"Headers used:  \n {headers}, \n payload used: \n {payload}")
-                    except:
-                        pass
-                if i == 1:
-                    if j == 0:
-                        if skipCalculations:
-                            checkNewestData('positions_low',rows)
-                        gui_queue.put(lambda: self.save_to_db('positions_low', rows))
+                        print(f"Error in API call. Code: {response.status_code}. {response}")
+                        try:
+                            print(f"Error: {response.json()}")
+                            print(f"Headers used:  \n {headers}, \n payload used: \n {payload}")
+                        except:
+                            pass
+                    if i == 1:
+                        if j == 0:
+                            if skipCalculations:
+                                checkNewestData('positions_low',rows)
+                            gui_queue.put(lambda: self.save_to_db('positions_low', rows))
+                        else:
+                            #positions_high is not checked for new data, as the calculations overwrite Dynamo's calculations
+                            gui_queue.put(lambda:self.save_to_db('positions_high', rows))
                     else:
-                        #positions_high is not checked for new data, as the calculations overwrite Dynamo's calculations
-                        gui_queue.put(lambda:self.save_to_db('positions_high', rows))
-                else:
-                    if j == 0:
-                        if skipCalculations:
-                            checkNewestData('transactions_low',rows)
-                        gui_queue.put(lambda:self.save_to_db('transactions_low', rows))
-                    else:
-                        if skipCalculations:
-                            checkNewestData('transactions_high',rows)
-                        gui_queue.put(lambda:self.save_to_db('transactions_high', rows))
-        if skipCalculations:
-            print("Earliest change: ", self.earliestChangeDate)
-        gui_queue.put(lambda: self.stack.setCurrentIndex(2))
-        gui_queue.put(lambda: self.apiLoadingBarBox.setVisible(False))
-        while not gui_queue.empty(): #wait to assure database has been updated in main thread before continuing
-            time.sleep(0.2)
-        
+                        if j == 0:
+                            if skipCalculations:
+                                checkNewestData('transactions_low',rows)
+                            gui_queue.put(lambda:self.save_to_db('transactions_low', rows))
+                        else:
+                            if skipCalculations:
+                                checkNewestData('transactions_high',rows)
+                            gui_queue.put(lambda:self.save_to_db('transactions_high', rows))
+            if skipCalculations:
+                print("Earliest change: ", self.earliestChangeDate)
+            gui_queue.put(lambda: self.stack.setCurrentIndex(2))
+            
+            while not gui_queue.empty(): #wait to assure database has been updated in main thread before continuing
+                time.sleep(0.2)
+            
 
 
-        self.save_to_db("history",None,action="reset") #clears history then updates most recent import
-        currentTime = datetime.now().strftime("%B %d, %Y @ %I:%M %p")
-        self.save_to_db("history",[{"lastImport" : currentTime}])
-        self.lastImportLabel.setText(f"Last Data Import: {currentTime}")
+            self.save_to_db("history",None,action="reset") #clears history then updates most recent import
+            currentTime = datetime.now().strftime("%B %d, %Y @ %I:%M %p")
+            self.save_to_db("history",[{"lastImport" : currentTime}])
+            self.lastImportLabel.setText(f"Last Data Import: {currentTime}")
 
-        self.calculateReturn()
+            self.calculateReturn()
+        except Exception as e:
+            QMessageBox.warning("Error Importing Data", f"Error pulling data from dynamo: {e} , {e.args}")
         if not testDataMode:
             gui_queue.put(lambda: self.importButton.setEnabled(True))
+        gui_queue.put(lambda: self.apiLoadingBarBox.setVisible(False))
 
     def calculateReturn(self):
         try:
@@ -1010,7 +1262,6 @@ class returnsApp(QWidget):
                 return
             skippedMonths = 0
             for monthIdx, month in enumerate(months):
-                monthCalculations = []
                 
                 #if the calculations for the month have already been complete, pull the old data
                 if self.earliestChangeDate > datetime.strptime(month["endDay"], "%Y-%m-%dT%H:%M:%S") and not noCalculations:
@@ -1074,6 +1325,7 @@ class returnsApp(QWidget):
                         hidden = fundDict["hidden"]
                         assetClass = None
                         subAssetClass = None
+                        fundClassification = None
                         startEntry = self.load_from_db("positions_low", f"WHERE [Source name] = ? AND [Target name] = ? AND [Date] = ?",(pool, fund,month["accountStart"]))
                         endEntry = self.load_from_db("positions_low", f"WHERE [Source name] = ? AND [Target name] = ? AND [Date] = ?",(pool, fund,month["endDay"]))
                         createFinalValue = False
@@ -1082,15 +1334,17 @@ class returnsApp(QWidget):
                         else:
                             assetClass = startEntry[0]["ExposureAssetClass"]
                             subAssetClass = startEntry[0]["ExposureAssetClassSub-assetClass(E)"]
+                            fundClassification = startEntry[0]["Target nameExposureHFClassificationLevel2"]
                         if len(startEntry) > 1: #combines the values for fund sub classes
                             for entry in startEntry[1:]:
                                 startEntry[0]["Value"] = str(float(startEntry[0]["Value"]) + float(entry["Value"])) #adds values to the first index
                         if len(endEntry) < 1:
                             createFinalValue = True
                             endEntry = [{"Value" : 0}]
-                        else:
+                        elif assetClass is None or subAssetClass is None or fundClassification is None:
                             assetClass = endEntry[0]["ExposureAssetClass"]
                             subAssetClass = endEntry[0]["ExposureAssetClassSub-assetClass(E)"]
+                            fundClassification = endEntry[0]["Target nameExposureHFClassificationLevel2"]
                         if len(endEntry) > 1:
                             for entry in endEntry[1:]:
                                 endEntry[0]["Value"] = str(float(endEntry[0]["Value"]) + float(entry["Value"])) #adds values to the first index
@@ -1104,6 +1358,8 @@ class returnsApp(QWidget):
                                 assetClass = transaction["SysProp_FundTargetNameAssetClass(E)"]
                             if subAssetClass is None or subAssetClass == "None":
                                 subAssetClass = transaction["SysProp_FundTargetNameSub-assetClass(E)"]
+                            if fundClassification is None or fundClassification == "None":
+                                fundClassification = transaction["Target nameExposureHFClassificationLevel2"]
                             cashFlowSum -= float(transaction["CashFlow"])
                             weightedCashFlow -= float(transaction["CashFlow"])  *  (totalDays -int(datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S").day))/totalDays
                         try:
@@ -1132,9 +1388,8 @@ class returnsApp(QWidget):
                             monthFundEntry = {"dateTime" : month["dateTime"], "Investor" : "Total Fund", "Pool" : pool, "Fund" : fund ,
                                             "assetClass" : assetClass, "subAssetClass" : subAssetClass,
                                             "NAV" : fundNAV, "Gain" : fundGain, "Return" : fundReturn , 
-                                            "MDdenominator" : fundMDdenominator, "Ownership" : ""}
+                                            "MDdenominator" : fundMDdenominator, "Ownership" : "", "Classification" : fundClassification}
                             calculations.append(monthFundEntry)
-                            monthCalculations.append(monthFundEntry)
                             fundEntryList.append(monthFundEntry)
 
 
@@ -1173,6 +1428,7 @@ class returnsApp(QWidget):
                         tempInvestorDict["startVal"] = float(startEntry["Value"])
                         tempInvestorDict["ExposureAssetClass"] = startEntry["ExposureAssetClass"]
                         tempInvestorDict["ExposureAssetClassSub-assetClass(E)"] = startEntry["ExposureAssetClassSub-assetClass(E)"]
+                        tempInvestorDict[nameHier["Family Branch"]["local"]] = startEntry[nameHier["Family Branch"]["dynHigh"]]
                         investorMDdenominatorSum += investorMDdenominator
                         tempInvestorDicts[investor] = tempInvestorDict
                     investorEOMsum = 0
@@ -1192,6 +1448,7 @@ class returnsApp(QWidget):
                             investorEOMsum += investorEOM
                             monthPoolEntryInvestor = monthPoolEntry.copy()
                             monthPoolEntryInvestor["Investor"] = investor
+                            monthPoolEntryInvestor[nameHier["Family Branch"]["local"]] = tempInvestorDicts[investor][nameHier["Family Branch"]["local"]]
                             monthPoolEntryInvestor["NAV"] = investorEOM
                             monthPoolEntryInvestor["Gain"] = investorGain
                             monthPoolEntryInvestor["Return"] = investorReturn * 100
@@ -1207,7 +1464,8 @@ class returnsApp(QWidget):
                             if len(EOMcheck) < 1:
                                 EOMentry = {"Date" : month["endDay"], "Source name" : investor, "Target name" : pool, "Value" : investorEOM,
                                              "Balancetype" : "Calculated_R", "ExposureAssetClass" : tempInvestorDicts[investor]["ExposureAssetClass"],
-                                               "ExposureAssetClassSub-assetClass(E)" : tempInvestorDicts[investor]["ExposureAssetClassSub-assetClass(E)"]}
+                                               "ExposureAssetClassSub-assetClass(E)" : tempInvestorDicts[investor]["ExposureAssetClassSub-assetClass(E)"],
+                                               nameHier["Family Branch"]["dynHigh"] : tempInvestorDicts[investor][nameHier["Family Branch"]["local"]]}
                                 self.save_to_db("positions_high",EOMentry, action="add")
                             else:
                                 query = "UPDATE positions_high SET Value = ? WHERE [Source name] = ? AND [Target name] = ? AND [Date] = ?"
@@ -1221,11 +1479,11 @@ class returnsApp(QWidget):
                             fundInvestorReturn = fundInvestorGain / fundInvestorMDdenominator if fundInvestorMDdenominator != 0 else 0
                             fundInvestorOwnership = fundInvestorNAV /  fundEntry["NAV"] if fundEntry["NAV"] != 0 else 0
                             monthFundInvestorEntry = {"dateTime" : month["dateTime"], "Investor" : investorEntry["Investor"], "Pool" : pool, "Fund" : fundEntry["Fund"] ,
-                                            "assetClass" : poolDict["assetClass"], "subAssetClass" : poolDict["subAssetClass"],
+                                            "assetClass" : fundEntry["assetClass"], "subAssetClass" : fundEntry["subAssetClass"],
                                             "NAV" : fundInvestorNAV, "Gain" : fundInvestorGain , "Return" :  fundInvestorReturn * 100, 
-                                            "MDdenominator" : fundInvestorMDdenominator, "Ownership" : fundInvestorOwnership * 100}
+                                            "MDdenominator" : fundInvestorMDdenominator, "Ownership" : fundInvestorOwnership * 100,
+                                            "Classification" : fundEntry["Classification"], nameHier["Family Branch"]["local"] : investorEntry[nameHier["Family Branch"]["local"]]}
                             calculations.append(monthFundInvestorEntry)
-                            monthCalculations.append(monthFundInvestorEntry)
                     #End of pools loop
                 #end of months loop
             keys = []
@@ -1242,6 +1500,7 @@ class returnsApp(QWidget):
             print("Calculations complete.")
         except Exception as e:
             gui_queue.put(lambda: self.calculationLoadingBox.setVisible(False))
+            gui_queue.put(lambda: self.importButton.setEnabled(True))
             print(f"Error occured running calculations: {e}")
             print("e.args:", e.args)
             # maybe also:
@@ -1319,7 +1578,7 @@ class returnsApp(QWidget):
         #prevents alteration of orignal data
         for filter in self.filterOptions:
             #removes the rows that the user has selected not to see
-            if filter["key"] != "Investor":
+            if filter["key"] not in self.filterBtnExclusions:
                 if not self.filterRadioBtnDict[filter["key"]].isChecked():
                     keys = rows.keys()
                     deleteKeys = []
@@ -1332,7 +1591,10 @@ class returnsApp(QWidget):
         cleanedRows = copy.deepcopy(rows)
         keys = rows.keys()
         for key in keys:
-            cleanedRows[key].pop("dataType")
+            try:
+                cleanedRows[key].pop("dataType")
+            except Exception as e:
+                print(f"Error occured: {e} from the following row: '{key}' :{cleanedRows[key]}")
         col_keys = set()
         for row_dict in cleanedRows.values():
             col_keys.update(row_dict.keys())
@@ -1435,7 +1697,7 @@ class returnsApp(QWidget):
                     elif table != "calculations":
                         print(f"Error loading from database: {e}, table: {table} condStatment: {condStatement}")
                     else:
-                        print("Info: no previous calculations table found")
+                        print(f"Info: {e}, {e.args}")
                     conn.close()
                 except:
                     pass
@@ -1648,30 +1910,113 @@ class tableWindow(QWidget):
                     item = QTableWidgetItem(str(raw))
                 self.table.setItem(r, c, item)
 
-class MultiSelectCombo(QComboBox):
+class ClickableLineEdit(QLineEdit):
+    clicked = pyqtSignal()
+    def mousePressEvent(self, event):
+        super().mousePressEvent(event)
+        self.clicked.emit()
+
+class PopupPanel(QWidget):
+    closed = pyqtSignal()
+    def __init__(self, parent=None):
+        super().__init__(parent, flags=Qt.Popup)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4,4,4,4)
+        # ClearFilter button
+        self.clear_btn = QPushButton("ClearFilter", self)
+        layout.addWidget(self.clear_btn)
+        # scrollable checkbox area
+        self.scroll = QScrollArea(self)
+        self.scroll.setWidgetResizable(True)
+        container = QWidget()
+        self.box_layout = QVBoxLayout(container)
+        self.box_layout.addStretch()
+        container.setLayout(self.box_layout)
+        self.scroll.setWidget(container)
+        self.scroll.setFixedHeight(150)
+        layout.addWidget(self.scroll)
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self.closed.emit()
+
+
+class MultiSelectBox(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setEditable(True)
-        self.lineEdit().setReadOnly(True)
-        model = QStandardItemModel(self)
-        self.setModel(model)
-        self.view().setSelectionMode(Qt.MultiSelection)
-        self.view().selectionModel().selectionChanged.connect(self._update_text)
 
-    def addItem(self, text, userData=None):
-        item = QStandardItem(text)
-        item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-        if userData is not None:
-            item.setData(userData, Qt.UserRole)
-        self.model().appendRow(item)
+        # ——— top line edit ———
+        self.line_edit = ClickableLineEdit(self)
+        self.line_edit.setReadOnly(True)
+        self.line_edit.setPlaceholderText("Click to select…")
+        self.line_edit.clicked.connect(self._togglePopup)
 
-    def _update_text(self, *args):
-        checked = [idx.data() for idx in self.view().selectionModel().selectedIndexes()]
-        self.lineEdit().setText(", ".join(checked))
+        # ——— pop-up panel ———
+        self.popup = PopupPanel(self)
+        # wire up clear button
+        self.popup.clear_btn.clicked.connect(self.clearSelection)
+        # react when popup closes
+
+        # keep track of checkboxes
+        self._checkboxes = {}
+
+        # overall layout
+        main = QVBoxLayout(self)
+        main.addWidget(self.line_edit)
+        main.setContentsMargins(0,0,0,0)
+        self.setLayout(main)
+
+    def _togglePopup(self):
+        if self.popup.isVisible():
+            self.popup.hide()
+        else:
+            p = self.line_edit.mapToGlobal(QPoint(0, self.line_edit.height()))
+            self.popup.move(p)
+            self.popup.resize(self.line_edit.width(),
+                              self.popup.sizeHint().height())
+            self.popup.show()
+    def addItems(self,items):
+        for item in items:
+            self.addItem(item)
+    def addItem(self, text):
+        if text in self._checkboxes:
+            return
+        cb = QCheckBox(text, self.popup)
+        cb.stateChanged.connect(self._updateLine)
+        self.popup.box_layout.insertWidget(
+            self.popup.box_layout.count() - 1, cb
+        )
+        self._checkboxes[text] = cb
+
+    def clearItems(self):
+        for cb in self._checkboxes.values():
+            self.popup.box_layout.removeWidget(cb)
+            cb.deleteLater()
+        self._checkboxes.clear()
+        self._updateLine()
+
+    def setCheckedItems(self, items):
+        for text, cb in self._checkboxes.items():
+            if text in items:
+                cb.setChecked(True)
+        self._updateLine()
+    def setCheckedItem(self, item):
+        for text, cb in self._checkboxes.items():
+            if text == item:
+                cb.setChecked(True)
+        self._updateLine()
 
     def checkedItems(self):
-        return [idx.data(Qt.UserRole) 
-                for idx in self.view().selectionModel().selectedIndexes()]
+        return [t for t, cb in self._checkboxes.items() if cb.isChecked()]
+
+    def clearSelection(self):
+        for cb in self._checkboxes.values():
+            cb.setChecked(False)
+        self._updateLine()
+
+    def _updateLine(self):
+        sel = self.checkedItems()
+        self.line_edit.setText(", ".join(sel))
 
 if __name__ == '__main__':
     key = os.environ.get('Dynamo_API')
