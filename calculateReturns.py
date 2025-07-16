@@ -2,11 +2,13 @@ import sys
 import os
 import json
 import subprocess
+import traceback
 import sqlite3
 import requests
 import calendar
 import time
 import copy
+import re
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Alignment
 from openpyxl.utils import get_column_letter
@@ -37,7 +39,8 @@ def poll_queue():
                 try:
                     callback()  # Run the GUI update in the main thread
                 except Exception as e:
-                    print(f"Error occured while attempting to run background gui update: {e}")
+                    trace = traceback.format_exc()
+                    print(f"Error occured while attempting to run background gui update: {e}. \n traceback: \n {trace}")
     except queue.Empty:
         pass
 # Determine assets path, works in PyInstaller bundle or script
@@ -58,8 +61,21 @@ if not os.path.exists(BASE_DIR):
 mainURL = "https://api.dynamosoftware.com/api/v2.2"
 
 nameHier = {
-                "Family Branch" : {"api" : "Parent investor", "dynHigh" : "Parentinvestor", "local" : "Family Branch"}
+                "Family Branch" : {"api" : "Parent investor", "dynHigh" : "Parentinvestor", "local" : "Family Branch"},
+                "Unfunded" : {"api" : "Remaining commitment change", "dynLow" : "RemainingCommitmentChange", "local" : "Unfunded"},
+                "Commitment" : {"api" : "Amount" , "dynLow" : "Value", "local" : "Commitment"},
+                "Transaction Time" : {"dynLow" : "TradeDate"},
             }
+
+commitmentChangeTransactionTypes = ["Commitment", "Transfer of commitment", "Transfer of commitment (out)", "Secondary - Original commitment (by secondary seller)"]
+headerOptions = ["Return","NAV", "Gain", "Ownership" , "MDdenominator", "Commitment", "Unfunded"]
+dataOptions = ["Investor","Family Branch","Classification", "dateTime"]
+yearOptions = (1,3,5,7,10,12,15,20)
+
+options = ["MTD","QTD","YTD", "Ownership", "Return", "ITD"]
+for year in yearOptions:
+    options.append(f"{year}YR")
+percent_headers = {option for option in options}
 
 class returnsApp(QWidget):
     def __init__(self, start_index=0):
@@ -75,6 +91,7 @@ class returnsApp(QWidget):
         self.dataTimeStart = datetime(2021,1,1)
         self.earliestChangeDate = datetime(datetime.now().year,datetime.now().month + 1,datetime.now().day)
         self.currentTableData = None
+        self.fullLevelOptions = {}
         # main stack
         self.main_layout = QVBoxLayout()
         self.stack = QStackedWidget()
@@ -201,13 +218,17 @@ class returnsApp(QWidget):
         self.tableBtnGroup.buttonClicked.connect(self.buildReturnTable)
         self.complexTableBtn.setChecked(True)
         self.returnOutputType = QComboBox()
-        self.returnOutputType.addItems(["Return","NAV", "Gain", "Ownership" , "MDdenominator"])
+        self.returnOutputType.addItems(headerOptions)
         self.returnOutputType.currentTextChanged.connect(self.buildReturnTable)
         tableSelectorLayout.addWidget(self.returnOutputType)
         tableSelectorLayout.addWidget(QLabel("Sort by: "))
         self.sortSelection = QComboBox()
         self.sortSelection.addItems(["Asset","Pool"])
         self.sortSelection.currentTextChanged.connect(self.buildReturnTable)
+        self.sortHierarchy = MultiSelectBox()
+        self.sortHierarchy.hierarchyMode()
+        self.sortHierarchy.popup.closed.connect(self.buildReturnTable)
+        tableSelectorLayout.addWidget(self.sortHierarchy)
         tableSelectorLayout.addWidget(self.sortSelection)
         tableSelectorBox.setLayout(tableSelectorLayout)
         filterLayout.addWidget(tableSelectorBox)
@@ -238,6 +259,8 @@ class returnsApp(QWidget):
                 filterBoxLayout.addWidget(self.filterRadioBtnDict[filter["key"]])
             else:
                 filterBoxLayout.addWidget(QLabel(f"{filter["name"]}:"))
+            if filter["key"] != "Fund":
+                self.sortHierarchy.addItem(filter["key"])
             self.filterDict[filter["key"]] = MultiSelectBox()
             self.filterDict[filter["key"]].addItems([""])
             self.filterDict[filter["key"]].popup.closed.connect(lambda level = filter["key"]: self.filterUpdate(None,level))
@@ -259,11 +282,9 @@ class returnsApp(QWidget):
         page.setLayout(layout)
         self.stack.addWidget(page)
 
-        self.pullInvestorNames()
         self.pullLevelNames()
         self.updateMonthOptions()
         self.dataEndSelect.currentTextChanged.connect(self.buildReturnTable)
-        
     def init_data_processing(self):
         self.calcSubmitted = False
         lastImport = self.load_from_db("history") if len(self.load_from_db("history")) == 1 else None
@@ -462,117 +483,112 @@ class returnsApp(QWidget):
         self.dataEndSelect.addItems(monthList)
         self.dataEndSelect.setCurrentText(monthList[-1])
     def buildReturnTable(self):
-        print("Building return table...")
-        self.currentTableData = None #resets so a failed build won't be used
-        self.stack.setCurrentIndex(1)
-        if self.tableBtnGroup.checkedButton().text() == "Complex Table":
-            self.returnOutputType.setCurrentText("Return")
-            self.returnOutputType.setVisible(False)
-            self.viewUnderlyingDataBtn.setVisible(False)
-        else:
-            self.returnOutputType.setVisible(True)
-            self.viewUnderlyingDataBtn.setVisible(True)
-        if self.filterDict["Investor"].checkedItems() == [] and self.filterDict[nameHier["Family Branch"]["local"]].checkedItems() == []:
-            #if no investor level selections,show full portfolio information
-            parameters = ["Total Fund"]
-            condStatement = " WHERE [Investor] = ? "
-        else:
-            #show investor level fund data
-            condStatement = " WHERE"
-            parameters = []
-            if self.filterDict["Investor"].checkedItems() != []:
-                paramTemp = self.filterDict["Investor"].checkedItems()
-                placeholders = ','.join('?' for _ in paramTemp) 
-                condStatement += f" [Investor] IN ({placeholders}) "
-                for param in paramTemp:
-                    parameters.append(param)
-            if self.filterDict[nameHier["Family Branch"]["local"]].checkedItems() != []:
-                paramTemp = self.filterDict[nameHier["Family Branch"]["local"]].checkedItems()
-                placeholders = ','.join('?' for _ in paramTemp)
-                if condStatement == " WHERE":
-                    condStatement += f" [{nameHier["Family Branch"]["local"]}] IN ({placeholders}) "
+        def buildTable():
+            try:
+                print("Building return table...")
+                self.currentTableData = None #resets so a failed build won't be used
+                
+                if self.tableBtnGroup.checkedButton().text() == "Complex Table":
+                    gui_queue.put(lambda: self.returnOutputType.setCurrentText("Return"))
+                    gui_queue.put(lambda: self.returnOutputType.setVisible(False))
+                    gui_queue.put(lambda: self.viewUnderlyingDataBtn.setVisible(False))
                 else:
-                    condStatement += f" AND [{nameHier["Family Branch"]["local"]}] IN ({placeholders}) "
-                for param in paramTemp:
-                    parameters.append(param)
-        for filter in self.filterOptions:
-            if filter["key"] != "Investor" and filter["key"] != nameHier["Family Branch"]["local"]:
-                if self.filterDict[filter["key"]].checkedItems() != []:
-                    paramTemp = self.filterDict[filter["key"]].checkedItems()
-                    for param in paramTemp:
-                        parameters.append(param)
-                    placeholders = ','.join('?' for _ in paramTemp)
-                    condStatement += f" AND [{filter["key"]}] IN ({placeholders})"
-        data = self.load_from_db("calculations",condStatement, tuple(parameters))
-        output = {"Total" : {}}
-        output , data = self.calculateUpperLevels(output,data)
-        complexOutput = copy.deepcopy(output)
-        for entry in data:
-            if datetime.strptime(entry["dateTime"], "%Y-%m-%d %H:%M:%S") >  datetime.strptime(self.dataEndSelect.currentText(),"%B %Y"):
-                #don't build in data past the selection
-                continue
-            date = datetime.strftime(datetime.strptime(entry["dateTime"], "%Y-%m-%d %H:%M:%S"), "%B %Y")
-            if entry["Fund"] is not None and entry["Fund"] != "None":
-                Dtype = "Total Fund"
-                level = entry["Fund"]
-            elif entry["Pool"] is not None and entry["Pool"] != "None":
-                Dtype = "Total Pool"
-                level = entry["Pool"]
-            elif entry["subAssetClass"] is not None and entry["subAssetClass"] != "None":
-                Dtype = "Total subAsset"
-                level = entry["subAssetClass"]
-            elif entry["assetClass"] is not None and entry["assetClass"] != "None":
-                Dtype = "Total Asset"
-                level = entry["assetClass"]
-            else:
-                Dtype = "Total"
-                level = "Total"
-            
-            dataOutputType = self.returnOutputType.currentText()
-            if level in output.keys():
-                if date not in output[level].keys():
-                    #creates value if not exists. If it is not return percent, sums the values
-                    output[level][date] = float(entry[dataOutputType])
-                elif dataOutputType != "Return":
-                    output[level][date] += float(entry[dataOutputType])
-            else:
-                output[level] = {}
-            if "dataType" not in output[level].keys():
-                output[level]["dataType"] = Dtype
-            if self.tableBtnGroup.checkedButton().text() == "Complex Table" and date == self.dataEndSelect.currentText():
-                if level not in complexOutput.keys():
-                    complexOutput[level] = {}
-                if "dataType" not in complexOutput[level].keys():
-                    complexOutput[level]["dataType"] = Dtype
-                if "NAV" not in complexOutput[level].keys():
-                    complexOutput[level][f"NAV"] = float(entry["NAV"])
-                    complexOutput[level][f"Gain"] = float(entry["Gain"])
+                    gui_queue.put(lambda: self.returnOutputType.setVisible(True))
+                    gui_queue.put(lambda: self.viewUnderlyingDataBtn.setVisible(True))
+                if self.filterDict["Investor"].checkedItems() == [] and self.filterDict[nameHier["Family Branch"]["local"]].checkedItems() == []:
+                    #if no investor level selections,show full portfolio information
+                    parameters = ["Total Fund"]
+                    condStatement = " WHERE [Investor] = ? "
                 else:
-                    complexOutput[level][f"NAV"] += float(entry["NAV"])
-                    complexOutput[level][f"Gain"] += float(entry["Gain"])
-                if self.filterDict["Investor"].checkedItems() != []:
-                    if "Ownership (%)" not in complexOutput[level].keys():
-                        complexOutput[level]["Ownership (%)"] = entry["Ownership"]
+                    #show investor level fund data
+                    condStatement = " WHERE"
+                    parameters = []
+                    if self.filterDict["Investor"].checkedItems() != []:
+                        paramTemp = self.filterDict["Investor"].checkedItems()
+                        placeholders = ','.join('?' for _ in paramTemp) 
+                        condStatement += f" [Investor] IN ({placeholders}) "
+                        for param in paramTemp:
+                            parameters.append(param)
+                    if self.filterDict[nameHier["Family Branch"]["local"]].checkedItems() != []:
+                        paramTemp = self.filterDict[nameHier["Family Branch"]["local"]].checkedItems()
+                        placeholders = ','.join('?' for _ in paramTemp)
+                        if condStatement == " WHERE":
+                            condStatement += f" [{nameHier["Family Branch"]["local"]}] IN ({placeholders}) "
+                        else:
+                            condStatement += f" AND [{nameHier["Family Branch"]["local"]}] IN ({placeholders}) "
+                        for param in paramTemp:
+                            parameters.append(param)
+                for filter in self.filterOptions:
+                    if filter["key"] != "Investor" and filter["key"] != nameHier["Family Branch"]["local"]:
+                        if self.filterDict[filter["key"]].checkedItems() != []:
+                            paramTemp = self.filterDict[filter["key"]].checkedItems()
+                            for param in paramTemp:
+                                parameters.append(param)
+                            placeholders = ','.join('?' for _ in paramTemp)
+                            condStatement += f" AND [{filter["key"]}] IN ({placeholders})"
+                data = self.load_from_db("calculations",condStatement, tuple(parameters))
+                output = {"Total##()##" : {}}
+                output , data = self.calculateUpperLevels(output,data)
+                complexOutput = copy.deepcopy(output)
+                for entry in data:
+                    if datetime.strptime(entry["dateTime"], "%Y-%m-%d %H:%M:%S") >  datetime.strptime(self.dataEndSelect.currentText(),"%B %Y"):
+                        #don't build in data past the selection
+                        continue
+                    date = datetime.strftime(datetime.strptime(entry["dateTime"], "%Y-%m-%d %H:%M:%S"), "%B %Y")
+                    Dtype = entry["Calculation Type"]
+                    level = entry["rowKey"]
+
+                    dataOutputType = self.returnOutputType.currentText()
+                    if level in output.keys():
+                        if date not in output[level].keys():
+                            #creates value if not exists. If it is not return percent, sums the values
+                            output[level][date] = float(entry[dataOutputType])
+                        elif dataOutputType != "Return":
+                            output[level][date] += float(entry[dataOutputType])
                     else:
-                        complexOutput[level]["Ownership (%)"] += entry["Ownership"]
-        if self.tableBtnGroup.checkedButton().text() == "Complex Table":
-            output = self.calculateComplexTable(output,complexOutput)
-        outputKeys = output.keys()
-        deleteKeys = []
-        for key in outputKeys:
-            if len(output[key].keys()) == 0:
-                deleteKeys.append(key)
-        for key in deleteKeys:
-            output.pop(key)
-        self.populateReturnsTable(output)
-        self.currentTableData = output
+                        output[level] = {}
+                    if "dataType" not in output[level].keys():
+                        output[level]["dataType"] = Dtype
+                    if self.tableBtnGroup.checkedButton().text() == "Complex Table" and date == self.dataEndSelect.currentText():
+                        if level not in complexOutput.keys():
+                            complexOutput[level] = {}
+                        if "dataType" not in complexOutput[level].keys():
+                            complexOutput[level]["dataType"] = Dtype
+                        if headerOptions[0] not in complexOutput[level].keys() and headerOptions:
+                            for option in headerOptions:
+                                complexOutput[level][option] = float(entry[option] if entry[option] is not None and entry[option] != '' else 0)
+                        else:
+                            for option in headerOptions:
+                                if option != "Ownership":
+                                    complexOutput[level][option] += float(entry[option] if entry[option] is not None and entry[option] != '' else 0)
+                        if self.filterDict["Investor"].checkedItems() != []:
+                            if "Ownership (%)" not in complexOutput[level].keys():
+                                complexOutput[level]["Ownership (%)"] = entry["Ownership"]
+                            else:
+                                complexOutput[level]["Ownership (%)"] += entry["Ownership"]
+                if self.tableBtnGroup.checkedButton().text() == "Complex Table":
+                    output = self.calculateComplexTable(output,complexOutput)
+                outputKeys = output.keys()
+                deleteKeys = []
+                for key in outputKeys:
+                    if len(output[key].keys()) == 0:
+                        deleteKeys.append(key)
+                for key in deleteKeys:
+                    output.pop(key)
+                gui_queue.put(lambda: self.populateReturnsTable(output))
+                self.currentTableData = output
+            except Exception as e:
+                tracebackMsg = traceback.format_exc()
+                gui_queue.put(lambda error = e: QMessageBox.warning(self, "Error building returns table", f"Error: {error}. {error.args}. Data entry: \n  \n Traceback:  \n {tracebackMsg}"))
+        self.stack.setCurrentIndex(1)
+        executor.submit(buildTable)
     def calculateComplexTable(self,monthOutput,complexOutput):
         endTime = datetime.strptime(self.dataEndSelect.currentText(),"%B %Y")
         MTDtime = datetime.strftime(endTime,"%B %Y")
         QTDtimes = [datetime.strftime(endTime - relativedelta(months=i),"%B %Y") for i in range(int((endTime.month)) % 3 if (int(endTime.month)) % 3 != 0 else 3)]
         YTDtimes = [datetime.strftime(endTime - relativedelta(months=i),"%B %Y") for i in range(int((endTime.month)) % 12 if (int(endTime.month)) % 12 != 0 else 12)]
         YR_times = {}
-        for yr in (1,3,5,7,10,12,15,20):
+        for yr in yearOptions:
             YR_times[yr] = [datetime.strftime(endTime - relativedelta(months=i),"%B %Y") for i in range(12 * yr)]
         for level in monthOutput.keys():
             if MTDtime in monthOutput[level].keys():
@@ -628,112 +644,126 @@ class returnsApp(QWidget):
         return complexOutput
 
     def calculateUpperLevels(self, tableStructure,data):
-        if self.sortSelection.currentText() == "Pool":
-            poolDict = {}
-            for idx, row in enumerate(data):
-                #builds dict of pools with their data indexes
-                if row["Pool"] not in poolDict.keys():
-                    poolDict[row["Pool"]] = [idx]
-                else:
-                    poolDict[row["Pool"]].append(idx)
-            totalEntries = {}
-            for pool in sorted(poolDict.keys()):
-                poolEntries = {}
-                #strucuters table dict to have a pool and all its funds beneath
-                tableStructure[pool] = {}
-                poolFundNames = []
-                for fundIdx in poolDict[pool]:
-                    poolFundNames.append(data[fundIdx]["Fund"])
-                    if data[fundIdx]["dateTime"] not in poolEntries.keys():
-                        #creates and sums the pool level data from the fund entries
-                        poolEntries[data[fundIdx]["dateTime"]] = {"dateTime" : data[fundIdx]["dateTime"], "Investor" : "Total Pool", "Pool" : pool, "Fund" : None ,
-                                            "assetClass" : None, "subAssetClass" : None,
-                                            "NAV" : float(data[fundIdx]["NAV"]), "Gain" : float(data[fundIdx]["Gain"]), "Return" : None , 
-                                            "MDdenominator" : float(data[fundIdx]["MDdenominator"]), "Ownership" : data[fundIdx]["Ownership"]}
-                    else:
-                        poolEntries[data[fundIdx]["dateTime"]]["NAV"] += float(data[fundIdx]["NAV"])
-                        poolEntries[data[fundIdx]["dateTime"]]["Gain"] += float(data[fundIdx]["Gain"])
-                        poolEntries[data[fundIdx]["dateTime"]]["MDdenominator"] += float(data[fundIdx]["MDdenominator"])
-                    if data[fundIdx]["dateTime"] not in totalEntries.keys():
-                        #creates and sums the pool level data from the fund entries
-                        totalEntries[data[fundIdx]["dateTime"]] = {"dateTime" : data[fundIdx]["dateTime"], "Investor" : "Total", "Pool" : None, "Fund" : None ,
-                                            "assetClass" : None, "subAssetClass" : None,
-                                            "NAV" : float(data[fundIdx]["NAV"]), "Gain" : float(data[fundIdx]["Gain"]), "Return" : None , 
-                                            "MDdenominator" : float(data[fundIdx]["MDdenominator"]), "Ownership" : None}
-                    else:
-                        totalEntries[data[fundIdx]["dateTime"]]["NAV"] += float(data[fundIdx]["NAV"])
-                        totalEntries[data[fundIdx]["dateTime"]]["Gain"] += float(data[fundIdx]["Gain"])
-                        totalEntries[data[fundIdx]["dateTime"]]["MDdenominator"] += float(data[fundIdx]["MDdenominator"])
-                for fundName in sorted(poolFundNames):
-                    tableStructure[fundName] = {}
-                for month in poolEntries.keys():
-                    poolEntries[month]["Return"] = poolEntries[month]["Gain"] / poolEntries[month]["MDdenominator"] * 100 if poolEntries[month]["MDdenominator"] != 0 else 0
-                    data.append(poolEntries[month])
-            for month in totalEntries.keys():
-                totalEntries[month]["Return"] = totalEntries[month]["Gain"] / totalEntries[month]["MDdenominator"] * 100 if totalEntries[month]["MDdenominator"] != 0 else 0
-                data.append(totalEntries[month])
-        elif self.sortSelection.currentText() == "Asset":
-            assetDict = {}
-            for idx, row in enumerate(data):
-                #builds dict of pools with their data indexes
-                asset = row["assetClass"] if row["assetClass"] != "Cash" else "Cash "
-                if asset not in assetDict.keys():
-                    assetDict[asset] = {row["subAssetClass"] : [idx]}
-                elif row["subAssetClass"] not in assetDict[asset].keys():
-                    assetDict[asset][row["subAssetClass"]] = [idx]
-                else:
-                    assetDict[asset][row["subAssetClass"]].append(idx)
-            totalEntries = {}
-            for asset in sorted(assetDict.keys()):
-                tableStructure[asset] = {}
-                assetEntries = {}
-                for subAsset in sorted(assetDict[asset].keys()):
-                    tableStructure[subAsset] = {}
-                    subAssetEntries = {}
-                    poolFundNames = []
-                    for fundIdx in assetDict[asset][subAsset]:
-                        poolFundNames.append(data[fundIdx]["Fund"])
-                        if data[fundIdx]["dateTime"] not in assetEntries.keys():
-                            assetEntries[data[fundIdx]["dateTime"]] = {"dateTime" : data[fundIdx]["dateTime"], "Investor" : "Total Asset", "Pool" : None, "Fund" : None ,
-                                                "assetClass" : asset, "subAssetClass" : None,
-                                                "NAV" : float(data[fundIdx]["NAV"]), "Gain" : float(data[fundIdx]["Gain"]), "Return" : None , 
-                                                "MDdenominator" : float(data[fundIdx]["MDdenominator"]), "Ownership" : data[fundIdx]["Ownership"]}
-                        else:
-                            assetEntries[data[fundIdx]["dateTime"]]["NAV"] += float(data[fundIdx]["NAV"])
-                            assetEntries[data[fundIdx]["dateTime"]]["Gain"] += float(data[fundIdx]["Gain"])
-                            assetEntries[data[fundIdx]["dateTime"]]["MDdenominator"] += float(data[fundIdx]["MDdenominator"])
-                        if data[fundIdx]["dateTime"] not in subAssetEntries.keys():
-                            #creates and sums the pool level data from the fund entries
-                            subAssetEntries[data[fundIdx]["dateTime"]] = {"dateTime" : data[fundIdx]["dateTime"], "Investor" : "Total subAsset", "Pool" : None, "Fund" : None ,
-                                                "assetClass" : asset, "subAssetClass" : subAsset,
-                                                "NAV" : float(data[fundIdx]["NAV"]), "Gain" : float(data[fundIdx]["Gain"]), "Return" : None , 
-                                                "MDdenominator" : float(data[fundIdx]["MDdenominator"]), "Ownership" : data[fundIdx]["Ownership"]}
-                        else:
-                            subAssetEntries[data[fundIdx]["dateTime"]]["NAV"] += float(data[fundIdx]["NAV"])
-                            subAssetEntries[data[fundIdx]["dateTime"]]["Gain"] += float(data[fundIdx]["Gain"])
-                            subAssetEntries[data[fundIdx]["dateTime"]]["MDdenominator"] += float(data[fundIdx]["MDdenominator"])
-                        if data[fundIdx]["dateTime"] not in totalEntries.keys():
-                            #creates and sums the pool level data from the fund entries
-                            totalEntries[data[fundIdx]["dateTime"]] = {"dateTime" : data[fundIdx]["dateTime"], "Investor" : "Total", "Pool" : None, "Fund" : None ,
-                                                "assetClass" : None, "subAssetClass" : None,
-                                                "NAV" : float(data[fundIdx]["NAV"]), "Gain" : float(data[fundIdx]["Gain"]), "Return" : None , 
-                                                "MDdenominator" : float(data[fundIdx]["MDdenominator"]), "Ownership" : None}
-                        else:
-                            totalEntries[data[fundIdx]["dateTime"]]["NAV"] += float(data[fundIdx]["NAV"])
-                            totalEntries[data[fundIdx]["dateTime"]]["Gain"] += float(data[fundIdx]["Gain"])
-                            totalEntries[data[fundIdx]["dateTime"]]["MDdenominator"] += float(data[fundIdx]["MDdenominator"])
-                    for fundName in sorted(poolFundNames):
-                        tableStructure[fundName] = {}
-                    for month in subAssetEntries.keys():
-                        subAssetEntries[month]["Return"] = subAssetEntries[month]["Gain"] / subAssetEntries[month]["MDdenominator"] * 100 if subAssetEntries[month]["MDdenominator"] != 0 else 0
-                        data.append(subAssetEntries[month])
-                for month in assetEntries.keys():
-                    assetEntries[month]["Return"] = assetEntries[month]["Gain"] / assetEntries[month]["MDdenominator"] * 100 if assetEntries[month]["MDdenominator"] != 0 else 0
-                    data.append(assetEntries[month])
-            for month in totalEntries.keys():
-                totalEntries[month]["Return"] = totalEntries[month]["Gain"] / totalEntries[month]["MDdenominator"] * 100 if totalEntries[month]["MDdenominator"] != 0 else 0
-                data.append(totalEntries[month])
-        return tableStructure,data
+        def buildCode(path):
+            code = f"##({"::".join(path)})##"
+            return code
+        def buildLevel(levelName,levelIdx, struc,data,path : list):
+            levelIdx += 1
+            entryTemplate = {"dateTime" : None, "Calculation Type" : "Total " + levelName, "Pool" : None, "Fund" : None ,
+                                            "assetClass" : None, "subAssetClass" : None, "Investor" : None,
+                                            "Return" : None , 
+                                            "Ownership" : None}
+            for header in headerOptions:
+                if header != "Ownership":
+                    entryTemplate[header] = 0
+
+            #check for filtering. If none, use all options
+            options = []
+            for entry in data: #all available data
+                if entry[levelName] not in options: #
+                    options.append(entry[levelName])
+            options.sort()
+            newTotalEntries = []
+            if len(sortHierarchy) > levelIdx: #more hierarchy levels to parse
+                highTotals = [] #all total values made on the level
+                for option in options:
+                    tempPath = path.copy()
+                    tempPath.append(option)
+                    
+                    highEntries = {}
+                    name = option if levelName != "assetClass" or option != "Cash" else "Cash "
+                    code = buildCode(tempPath)
+                    struc[name + code] = {} #place table space for that level selection
+                    levelData = []
+                    for entry in data: #separates out only relevant data
+                        if entry[levelName] == option:
+                            levelData.append(entry)
+                    struc, lowTotals, fullEntries = buildLevel(sortHierarchy[levelIdx],levelIdx,struc,levelData,tempPath)
+                    newTotalEntries.extend(fullEntries)
+                #gui_queue.put(lambda rows = highTotals, name = "Entries for: " + ",".join(options): self.openTableWindow(rows,f"{name} data"))
+                    for total in lowTotals:
+                        if total["dateTime"] not in highEntries.keys():
+                            highEntries[total["dateTime"]] = copy.deepcopy(entryTemplate)
+                            highEntries[total["dateTime"]]["rowKey"] = name + code
+                            for label in dataOptions:
+                                highEntries[total["dateTime"]][label] = total[label]
+                            if levelName not in ("Investor","Family Branch"):
+                                highEntries[total["dateTime"]][levelName] = total[levelName] if total[levelName] != "Cash" or levelName != "assetClass" else "Cash "
+                                if levelName == "subAssetClass":
+                                    highEntries[total["dateTime"]]["assetClass"] = total["assetClass"] if total["assetClass"] != "Cash" else "Cash "
+                        for header in headerOptions:
+                            if header != "Ownership":
+                                highEntries[total["dateTime"]][header] += float(total[header])
+                    for month in highEntries.keys():
+                        highEntries[month]["Return"] = highEntries[month]["Gain"] / highEntries[month]["MDdenominator"] * 100 if highEntries[month]["MDdenominator"] != 0 else 0
+                        highTotals.append(highEntries[month])
+                newTotalEntries.extend(highTotals)       
+                #high totals: all totals for the exact level
+                #newTotalEntries: all totals for every level being tracked
+                return struc, highTotals, newTotalEntries
+            else: #occurs at level of fund parent
+                newEntriesLow = []
+                totalDataLow = []
+                for option in options:
+                    tempPath = path.copy()
+                    tempPath.append(option)
+                    totalEntriesLow = {}
+                    name = option if levelName != "assetClass" or option != "Cash" else "Cash "
+                    code = buildCode(tempPath)
+                    struc[name + code] =  {}
+                    levelData = []
+                    for entry in data: #separates out only relevant data
+                        if entry[levelName] == option:
+                            levelData.append(entry)
+                    
+                    for entry in levelData:
+                        struc[entry["Fund"] + code] = {}
+                        temp = entry.copy()
+                        temp["rowKey"] = entry["Fund"] + code
+                        totalDataLow.append(temp)
+                        if entry["dateTime"] not in totalEntriesLow:
+                            totalEntriesLow[entry["dateTime"]] = copy.deepcopy(entryTemplate)
+                            totalEntriesLow[entry["dateTime"]]["rowKey"] =name + code
+                            for label in dataOptions:
+                                totalEntriesLow[entry["dateTime"]][label] = entry[label]
+                            if levelName not in ("Investor","Family Branch"):
+                                totalEntriesLow[entry["dateTime"]][levelName] = entry[levelName] if entry[levelName] != "Cash" or levelName != "assetClass" else "Cash "
+                                if levelName == "subAssetClass":
+                                    totalEntriesLow[entry["dateTime"]]["assetClass"] = entry["assetClass"] if entry["assetClass"] != "Cash" else "Cash "
+                        for header in headerOptions:
+                            if header != "Ownership":
+                                totalEntriesLow[entry["dateTime"]][header] += float(entry[header])
+                    for month in totalEntriesLow.keys():
+                        totalEntriesLow[month]["Return"] = totalEntriesLow[month]["Gain"] / totalEntriesLow[month]["MDdenominator"] * 100 if totalEntriesLow[month]["MDdenominator"] != 0 else 0
+                        newEntriesLow.append(totalEntriesLow[month])
+                totalDataLow.extend(newEntriesLow)
+                return struc, newEntriesLow, totalDataLow
+
+        sortHierarchy = self.sortHierarchy.checkedItems()
+        if len(sortHierarchy) < 1:
+            sortHierarchy = ["assetClass"] #default option
+        levelIdx = 0
+        tableStructure, highestEntries, newEntries = buildLevel(sortHierarchy[levelIdx],levelIdx,tableStructure,data, [])
+        trueTotalEntries = {}
+        for total in highestEntries:
+            if total["dateTime"] not in trueTotalEntries.keys():
+                trueTotalEntries[total["dateTime"]] = {"dateTime" : None, "Calculation Type" : "Total", "Pool" : None, "Fund" : None ,
+                                            "assetClass" : None, "subAssetClass" : None, "Investor" : None,
+                                            "Return" : None , 
+                                            "Ownership" : None}
+                trueTotalEntries[total["dateTime"]]["rowKey"] = "Total" + buildCode([])
+                for header in headerOptions:
+                    if header != "Ownership":
+                        trueTotalEntries[total["dateTime"]][header] = 0
+                for label in dataOptions:
+                    trueTotalEntries[total["dateTime"]][label] = total[label]
+            for header in headerOptions:
+                if header != "Ownership":
+                    trueTotalEntries[total["dateTime"]][header] += float(total[header])
+        for month in trueTotalEntries.keys():
+            newEntries.append(trueTotalEntries[month])
+        #data.extend(newEntries)
+        return tableStructure,newEntries
                     
     def filterUpdate(self, filterText, level):
         def resetOptions(key,options):
@@ -848,6 +878,8 @@ class returnsApp(QWidget):
             self.filterDict[nameHier["Family Branch"]["local"]].addItems(familyBranches)
         else:
             self.allInvestors = []
+            self.fullLevelOptions["Investor"] = self.allInvestors
+            self.fullLevelOptions["Family Branch"] = self.allFamilyBranches
     def pullLevelNames(self):
         assets = []
         subAssets = []
@@ -899,6 +931,7 @@ class returnsApp(QWidget):
         self.fullLevelOptions = {"Fund" : funds, "Pool" : pools, "subAssetClass" : subAssets, "assetClass" : assets}
         self.filterDict["Classification"].addItems(classifications)
         self.filterDict["Classification"].setCheckedItem("HFC")
+        self.pullInvestorNames()
 
 
     def check_api_key(self):
@@ -965,7 +998,7 @@ class returnsApp(QWidget):
                     gui_queue.put(lambda: openWindow())
                     #-------------
                     diffCount = 0
-                    differences = []
+                    differences2 = []
                     seen = set()
                     for rec in previous:
                         value = rec['Value' if "position" in table else "CashFlow"]
@@ -990,19 +1023,19 @@ class returnsApp(QWidget):
                         if key in seen:
                             continue
                         diffCount += 1
-                        differences.append(rec)
-                        differences.append({"Source name" : key[0],"Target name" : key[1],"Value" : key[2],"Date" : key[3]})
+                        differences2.append(rec)
+                        differences2.append({"Source name" : key[0],"Target name" : key[1],"Value" : key[2],"Date" : key[3]})
                         # parse the date for comparison
                         dt = datetime.strptime(rec['Date'], "%Y-%m-%dT%H:%M:%S")
                         if earliest is None or dt < earliest:
                             earliest = dt
                     if diffCount > 0:
                         newTable = table + "_reversed"
-                        def openWindow():
-                            windowR = tableWindow(parentSource=self,all_rows=differences,table=newTable)
-                            self.tableWindows[newTable] = windowR
+                        def openWindow2(table):
+                            windowR = tableWindow(parentSource=self,all_rows=differences2,table=table)
+                            self.tableWindows[table] = windowR
                             windowR.show()
-                        gui_queue.put(lambda: openWindow())
+                        gui_queue.put(lambda table = newTable: openWindow2(table))
             except Exception as e:
                 print(f"Error searching old data: {e}")
         try:
@@ -1014,7 +1047,7 @@ class returnsApp(QWidget):
             endDate = datetime.strftime(datetime.now(), "%Y-%m-%dT00:00:00.000Z")
             self.pullInvestorNames()
             apiData = {
-                "tranCols": "Investment in, Investing Entity, Transaction Type, Effective date, Cash flow change, Asset Class (E), Sub-asset class (E), HF Classification, Remaining commitment change",
+                "tranCols": "Investment in, Investing Entity, Transaction Type, Effective date, Cash flow change, Asset Class (E), Sub-asset class (E), HF Classification, Remaining commitment change, Amount, Trade date/time",
                 "tranName": "InvestmentTransaction",
                 "tranSort": "Effective date:desc",
                 "accountCols": "As of Date, Balance Type, Asset Class, Sub-asset class, Value of Investments, Investing entity, Investment in, HF Classification, Parent investor",
@@ -1044,36 +1077,84 @@ class returnsApp(QWidget):
                     if i == 0: #transaction
                         if j == 0:
                             payload = {
-                            "advf": {
-                                "e": [
-                                    {
-                                        "_name": "InvestmentTransaction",
-                                        "rule": [
+                                    "advf": {
+                                        "e": [
                                             {
-                                                "_op": "not_null",
-                                                "_prop": "Cash flow change"
-                                            },
-                                            {
-                                                "_op": "all",
-                                                "_prop": f"{investmentLevel}",
-                                                "values": [
-                                                    "pool, llc"
+                                                "_name": "InvestmentTransaction",
+                                                "rule": [
+                                                    {
+                                                        "_op": "not_null",
+                                                        "_prop": "Cash flow change"
+                                                    },
+                                                    {
+                                                        "_op": "all",
+                                                        "_prop": "Investing entity",
+                                                        "values": [
+                                                            "pool, llc"
+                                                        ]
+                                                    },
+                                                    {
+                                                        "_op": "between_date",
+                                                        "_prop": "Effective date",
+                                                        "values": [
+                                                            f"{startDate}",
+                                                            f"{endDate}"
+                                                        ]
+                                                    }
                                                 ]
                                             },
                                             {
-                                                "_op": "between_date",
-                                                "_prop": "Effective date",
-                                                "values": [
-                                                    f"{startDate}",
-                                                    f"{endDate}"
+                                                "_name": "InvestmentTransaction",
+                                                "rule": [
+                                                    {
+                                                        "_op": "any_item",
+                                                        "_prop": "Transaction type",
+                                                        "values": [
+                                                            [
+                                                                {
+                                                                    "id": "5327639c-8160-4d85-9b23-8c6bf60c5406",
+                                                                    "es": "L_TransactionType",
+                                                                    "name": "Commitment"
+                                                                },
+                                                                {
+                                                                    "id": "37339e7c-1c24-4d13-9d17-86d0efe079b3",
+                                                                    "es": "L_TransactionType",
+                                                                    "name": "Transfer of commitment"
+                                                                },
+                                                                {
+                                                                    "id": "0f8f8671-8579-49d7-b604-05300b6a3990",
+                                                                    "es": "L_TransactionType",
+                                                                    "name": "Transfer of commitment (out)"
+                                                                },
+                                                                {
+                                                                    "id": "5e098d83-70b0-4135-a629-aff19048fb1c",
+                                                                    "es": "L_TransactionType",
+                                                                    "name": "Secondary - Original commitment (by secondary seller)"
+                                                                }
+                                                            ]
+                                                        ]
+                                                    },
+                                                    {
+                                                        "_op": "all",
+                                                        "_prop": "Investing entity",
+                                                        "values": [
+                                                            "pool, llc"
+                                                        ]
+                                                    },
+                                                    {
+                                                        "_op": "between_date",
+                                                        "_prop": "Effective date",
+                                                        "values": [
+                                                            f"{startDate}",
+                                                            f"{endDate}"
+                                                        ]
+                                                    }
                                                 ]
                                             }
                                         ]
-                                    }
-                                ]
-                            },
-                            "mode": "compact"
-                        }
+                                    },
+                                    "mode": "compact"
+                                }
                         else:
                             payload = {
                             "advf": {
@@ -1194,6 +1275,9 @@ class returnsApp(QWidget):
                         if j == 0:
                             if skipCalculations:
                                 checkNewestData('positions_low',rows)
+                            for row in rows:
+                                row[nameHier["Unfunded"]["local"]] = 0
+                                row[nameHier["Commitment"]["local"]] = 0
                             gui_queue.put(lambda: self.save_to_db('positions_low', rows))
                         else:
                             #positions_high is not checked for new data, as the calculations overwrite Dynamo's calculations
@@ -1227,13 +1311,15 @@ class returnsApp(QWidget):
         if not testDataMode:
             gui_queue.put(lambda: self.importButton.setEnabled(True))
         gui_queue.put(lambda: self.apiLoadingBarBox.setVisible(False))
-
+    def openTableWindow(self, rows, name = "Table"):
+        window = tableWindow(parentSource=self,all_rows=rows,table=name)
+        self.tableWindows[name] = window
+        window.show()
     def calculateReturn(self):
         try:
             gui_queue.put(lambda: self.importButton.setEnabled(False))
             gui_queue.put(lambda: self.calculationLoadingBox.setVisible(True))
             self.updateMonths()
-            gui_queue.put(lambda: self.pullInvestorNames())
             gui_queue.put(lambda: self.pullLevelNames())
             gui_queue.put(lambda : self.stack.setCurrentIndex(2))
             print("Calculating return....")
@@ -1329,12 +1415,22 @@ class returnsApp(QWidget):
                         startEntry = self.load_from_db("positions_low", f"WHERE [Source name] = ? AND [Target name] = ? AND [Date] = ?",(pool, fund,month["accountStart"]))
                         endEntry = self.load_from_db("positions_low", f"WHERE [Source name] = ? AND [Target name] = ? AND [Date] = ?",(pool, fund,month["endDay"]))
                         createFinalValue = False
+                        noStartValue = False
                         if len(startEntry) < 1:
                             startEntry = [{"Value" : 0}]
+                            noStartValue = True
+                            commitment = 0
+                            unfunded = 0
                         else:
                             assetClass = startEntry[0]["ExposureAssetClass"]
                             subAssetClass = startEntry[0]["ExposureAssetClassSub-assetClass(E)"]
                             fundClassification = startEntry[0]["Target nameExposureHFClassificationLevel2"]
+                            if nameHier["Commitment"]["local"] in startEntry[0].keys() and nameHier["Unfunded"]["local"] in startEntry[0].keys():
+                                commitment = float(startEntry[0][nameHier["Commitment"]["local"]])
+                                unfunded = float(startEntry[0][nameHier["Unfunded"]["local"]])
+                            else:
+                                commitment = 0
+                                unfunded = 0
                         if len(startEntry) > 1: #combines the values for fund sub classes
                             for entry in startEntry[1:]:
                                 startEntry[0]["Value"] = str(float(startEntry[0]["Value"]) + float(entry["Value"])) #adds values to the first index
@@ -1360,8 +1456,15 @@ class returnsApp(QWidget):
                                 subAssetClass = transaction["SysProp_FundTargetNameSub-assetClass(E)"]
                             if fundClassification is None or fundClassification == "None":
                                 fundClassification = transaction["Target nameExposureHFClassificationLevel2"]
-                            cashFlowSum -= float(transaction["CashFlow"])
-                            weightedCashFlow -= float(transaction["CashFlow"])  *  (totalDays -int(datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S").day))/totalDays
+                            if transaction["TransactionType"] not in commitmentChangeTransactionTypes and transaction["CashFlow"] is not None and transaction["CashFlow"] != "None":
+                                cashFlowSum -= float(transaction["CashFlow"])
+                                backDate = self.calculateBackdate(transaction, noStartValue)
+                                weightedCashFlow -= float(transaction["CashFlow"])  *  (totalDays -int(datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S").day) + backDate)/totalDays
+                                if transaction.get(nameHier["Unfunded"]["dynLow"]) not in (None,"None"):
+                                    unfunded += float(transaction[nameHier["Unfunded"]["dynLow"]])
+                            elif transaction["TransactionType"] in commitmentChangeTransactionTypes:
+                                commitment += float(transaction[nameHier["Commitment"]["dynLow"]])
+                                unfunded += float(transaction[nameHier["Commitment"]["dynLow"]])
                         try:
                             if startEntry["Value"] is None or startEntry["Value"] == "None":
                                 startEntry["Value"] = 0
@@ -1374,13 +1477,18 @@ class returnsApp(QWidget):
                             fundMDdenominator = float(startEntry["Value"]) + weightedCashFlow
                             fundNAV = float(endEntry["Value"])
                             fundReturn = fundGain/fundMDdenominator * 100 if fundMDdenominator != 0 else 0
-                            if fundNAV == 0 and fundMDdenominator == 0:
+                            if fundNAV == 0 and fundMDdenominator == 0 and unfunded == 0:
                                 #skip if there is no value and no change in value
                                 continue
                             elif createFinalValue:
                                 fundEOMentry = {"Date" : month["endDay"], "Source name" : pool, "Target name" : fund , "Value" : endEntry["Value"],
-                                                    "Balancetype" : "Calculated_R", "ExposureAssetClass" : assetClass, "ExposureAssetClassSub-assetClass(E)" : subAssetClass}
+                                                    "Balancetype" : "Calculated_R", "ExposureAssetClass" : assetClass, "ExposureAssetClassSub-assetClass(E)" : subAssetClass,
+                                                    nameHier["Commitment"]["local"] : commitment, nameHier["Unfunded"]["local"] : unfunded}
                                 self.save_to_db("positions_low",fundEOMentry, action="add")
+                            else:
+                                query = f"UPDATE positions_low SET [{nameHier['Commitment']["local"]}] = ? , [{nameHier['Unfunded']["local"]}] = ? WHERE [Source name] = ? AND [Target name] = ? AND [Date] = ?"
+                                inputs = (commitment,unfunded,pool,fund,month["endDay"])
+                                self.save_to_db("positions_low",None, action = "replace", query=query, inputs = inputs)
                             poolGainSum += fundGain
                             poolMDdenominator += fundMDdenominator
                             poolNAV += fundNAV
@@ -1388,7 +1496,10 @@ class returnsApp(QWidget):
                             monthFundEntry = {"dateTime" : month["dateTime"], "Investor" : "Total Fund", "Pool" : pool, "Fund" : fund ,
                                             "assetClass" : assetClass, "subAssetClass" : subAssetClass,
                                             "NAV" : fundNAV, "Gain" : fundGain, "Return" : fundReturn , 
-                                            "MDdenominator" : fundMDdenominator, "Ownership" : "", "Classification" : fundClassification}
+                                            "MDdenominator" : fundMDdenominator, "Ownership" : "", "Classification" : fundClassification,
+                                            "Calculation Type" : "Total Fund",
+                                            nameHier["Commitment"]["local"] : commitment,
+                                            nameHier["Unfunded"]["local"] : unfunded}
                             calculations.append(monthFundEntry)
                             fundEntryList.append(monthFundEntry)
 
@@ -1403,7 +1514,7 @@ class returnsApp(QWidget):
                     monthPoolEntry = {"dateTime" : month["dateTime"], "Investor" : "Total Pool", "Pool" : pool, "Fund" : None ,
                                       "assetClass" : poolDict["assetClass"], "subAssetClass" : poolDict["subAssetClass"] ,
                                       "NAV" : poolNAV, "Gain" : poolGainSum, "Return" : poolReturn , "MDdenominator" : poolMDdenominator,
-                                        "Ownership" : None}
+                                        "Ownership" : None, "Calculation Type" : "Total Fund"}
                     investorMDdenominatorSum = 0
                     tempInvestorDicts = {}
                     poolOwnershipSum = 0
@@ -1419,9 +1530,11 @@ class returnsApp(QWidget):
                             tempInvestorDict["Active"] = False
                             continue
                         investorTransactions = self.load_from_db("transactions_high",f"WHERE [Source name] = ? AND [Target name] = ? AND [Date] BETWEEN ? AND ?", (investor,pool,month["tranStart"],month["endDay"]))
+                        
                         for transaction in investorTransactions:
                             investorCashFlowSum -= float(transaction["CashFlow"])
-                            investorWeightedCashFlow -= float(transaction["CashFlow"])  *  (totalDays -int(datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S").day))/totalDays
+                            backDate = self.calculateBackdate(transaction)
+                            investorWeightedCashFlow -= float(transaction["CashFlow"])  *  (totalDays -int(datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S").day) + backDate)/totalDays
                         investorMDdenominator = float(startEntry["Value"]) + investorWeightedCashFlow
                         tempInvestorDict["MDden"] = investorMDdenominator
                         tempInvestorDict["cashFlow"] = investorCashFlowSum
@@ -1478,11 +1591,15 @@ class returnsApp(QWidget):
                             fundInvestorMDdenominator = investorEntry["MDdenominator"] / monthPoolEntry["MDdenominator"] * fundEntry["MDdenominator"] if monthPoolEntry["MDdenominator"] != 0 else 0
                             fundInvestorReturn = fundInvestorGain / fundInvestorMDdenominator if fundInvestorMDdenominator != 0 else 0
                             fundInvestorOwnership = fundInvestorNAV /  fundEntry["NAV"] if fundEntry["NAV"] != 0 else 0
+                            fundInvestorCommitment = fundEntry[nameHier["Commitment"]["local"]] * fundInvestorOwnership
+                            fundInvestorUnfunded = fundEntry[nameHier["Unfunded"]["local"]] * fundInvestorOwnership
                             monthFundInvestorEntry = {"dateTime" : month["dateTime"], "Investor" : investorEntry["Investor"], "Pool" : pool, "Fund" : fundEntry["Fund"] ,
                                             "assetClass" : fundEntry["assetClass"], "subAssetClass" : fundEntry["subAssetClass"],
                                             "NAV" : fundInvestorNAV, "Gain" : fundInvestorGain , "Return" :  fundInvestorReturn * 100, 
                                             "MDdenominator" : fundInvestorMDdenominator, "Ownership" : fundInvestorOwnership * 100,
-                                            "Classification" : fundEntry["Classification"], nameHier["Family Branch"]["local"] : investorEntry[nameHier["Family Branch"]["local"]]}
+                                            "Classification" : fundEntry["Classification"], nameHier["Family Branch"]["local"] : investorEntry[nameHier["Family Branch"]["local"]],
+                                            nameHier["Commitment"]["local"] : fundInvestorCommitment, nameHier["Unfunded"]["local"] : fundInvestorUnfunded, 
+                                            "Calculation Type" : "Total Fund"}
                             calculations.append(monthFundInvestorEntry)
                     #End of pools loop
                 #end of months loop
@@ -1504,10 +1621,21 @@ class returnsApp(QWidget):
             print(f"Error occured running calculations: {e}")
             print("e.args:", e.args)
             # maybe also:
-            import traceback
             print(traceback.format_exc())
         
-
+    def calculateBackdate(self,transaction,noStartValue = False):
+        if transaction.get(nameHier["Transaction Time"]["dynLow"]) not in (None,"None"):
+            time = datetime.strptime(transaction.get(nameHier["Transaction Time"]["dynLow"]), "%Y-%m-%dT%H:%M:%S")
+            if time.hour == 23 and time.minute == 59:
+                #don't backdate if transaction was at the end of the day
+                backDate = 0
+            else:
+                backDate = 1 #backdate if beginning of day
+        elif datetime.strptime(transaction.get("Date"), "%Y-%m-%dT%H:%M:%S").day == 1 and noStartValue:
+            backDate = 1
+        else:
+            backDate = 0
+        return backDate
     def save_to_db(self, table, rows, action = "", query = "",inputs = None, keys = None):
         conn = sqlite3.connect(DATABASE_PATH)
         cur = conn.cursor()
@@ -1526,7 +1654,6 @@ class returnsApp(QWidget):
                 print(f"Error inserting row into database: {e}")
                 print("e.args:", e.args)
                 # maybe also:
-                import traceback
                 print(traceback.format_exc())
         elif action == "calculationUpdate":
             try:
@@ -1574,94 +1701,99 @@ class returnsApp(QWidget):
             self.returnsTable.setRowCount(0)
             self.returnsTable.setColumnCount(0)
             return
+
+        # 0) Deep-copy & filter as before
         rows = copy.deepcopy(origRows)
-        #prevents alteration of orignal data
-        for filter in self.filterOptions:
-            #removes the rows that the user has selected not to see
-            if filter["key"] not in self.filterBtnExclusions:
-                if not self.filterRadioBtnDict[filter["key"]].isChecked():
-                    keys = rows.keys()
-                    deleteKeys = []
-                    for key in keys:
-                        if rows[key]["dataType"] == filter["dataType"]:
-                            deleteKeys.append(key)
-                    for deleteKey in deleteKeys:
-                        rows.pop(deleteKey)
-        # 1) Determine the full set of columns
-        cleanedRows = copy.deepcopy(rows)
-        keys = rows.keys()
-        for key in keys:
-            try:
-                cleanedRows[key].pop("dataType")
-            except Exception as e:
-                print(f"Error occured: {e} from the following row: '{key}' :{cleanedRows[key]}")
+        for f in self.filterOptions:
+            if f["key"] not in self.filterBtnExclusions and not self.filterRadioBtnDict[f["key"]].isChecked():
+                to_delete = [k for k,v in rows.items() if v["dataType"] == f["dataType"]]
+                for k in to_delete:
+                    rows.pop(k)
+
+        # 1) Build a flat list of row-entries:
+        #    each entry = (fund_label, unique_code, row_dict)
+        row_entries = []
+        for fund_label, row_dict in rows.items():
+            row_label = re.sub(r'##\(.*\)##', '', fund_label, flags=re.DOTALL)
+            code   = re.search(r'##\(.*\)##', fund_label, flags=re.DOTALL)
+            row_entries.append((row_label, code, row_dict))
+
+        # 2) Determine columns exactly as before, using cleanedRows for header order
+        cleaned = {fund: d.copy() for fund, _, d in row_entries}
+        for d in cleaned.values():
+            d.pop("dataType", None)
+
         col_keys = set()
-        for row_dict in cleanedRows.values():
-            col_keys.update(row_dict.keys())
+        for d in cleaned.values():
+            col_keys |= set(d.keys())
         col_keys = list(col_keys)
-        if self.tableBtnGroup.checkedButton().text() == "Monthly Table":
-            for idx in range(len(col_keys)):
-                col_keys[idx] = datetime.strptime(col_keys[idx],"%B %Y")
-            col_keys = sorted(col_keys)
-            for idx in range(len(col_keys)):
-                col_keys[idx] = datetime.strftime(col_keys[idx],"%B %Y")
-        elif self.tableBtnGroup.checkedButton().text() == "Complex Table":
-            newColKeys = []
-            headerOrder = ["NAV","Gain", "Ownership (%)","MTD","QTD","YTD"]
-            for i in (1,3,5,7,10,12,15,20):
-                headerOrder.append(f"{i}YR")
-            for header in headerOrder:
-                if header in col_keys:
-                    newColKeys.append(header)
-            for header in col_keys:
-                #in case changes result in extra headers not listed, they will still appear
-                if header not in headerOrder:
-                    newColKeys.append(header)
-            col_keys = newColKeys
-        # 2) Configure table size and headers
-        self.returnsTable.setRowCount(len(rows))
+
+        mode = self.tableBtnGroup.checkedButton().text()
+        if mode == "Monthly Table":
+            dates = [datetime.strptime(k, "%B %Y") for k in col_keys]
+            dates.sort()
+            col_keys = [d.strftime("%B %Y") for d in dates]
+        elif mode == "Complex Table":
+            newOrder = ["NAV","Gain","Ownership (%)","MTD","QTD","YTD"] + [f"{y}YR" for y in yearOptions] + ["ITD"]
+            ordered = [h for h in newOrder if h in col_keys]
+            ordered += [h for h in col_keys if h not in newOrder]
+            col_keys = ordered
+
+        # 3) Resize & set horizontal headers (we no longer call setVerticalHeaderLabels)
+        self.returnsTable.setRowCount(len(row_entries))
         self.returnsTable.setColumnCount(len(col_keys))
-        self.returnsTable.setVerticalHeaderLabels(list(cleanedRows.keys()))
         self.returnsTable.setHorizontalHeaderLabels(col_keys)
 
-        # 3) Populate each cell
-        for r, (row_label, row_dict) in enumerate(rows.items()):
-            if "dataType" in row_dict.keys():
-                dataType = row_dict["dataType"]
-                row_dict.pop("dataType")
-            else:
-                dataType = ""
-        # decide if this row should be grey
-            if dataType == "Total Portfolio" or dataType == "Total":
-                row_color = QColor(Qt.darkGray)
+        # Which columns should show as percents?
+        percent_cols = {
+            ci for ci in range(len(col_keys))
+            if col_keys[ci] in percent_headers
+        }
+
+        # 4) Populate each row
+        for r, (fund_label, code, row_dict) in enumerate(row_entries):
+            # pull & remove dataType for coloring
+            dataType = row_dict.pop("dataType", "")
+
+            if dataType in ("Total Portfolio", "Total"):
+                bg = QColor(Qt.darkGray)
             elif dataType == "Total Pool":
-                row_color = QColor(Qt.lightGray)
+                bg = QColor(Qt.lightGray)
             elif dataType == "Total Fund":
-                row_color = QColor(213, 236, 193)
-            elif dataType == "Total Asset":
-                row_color = QColor(181, 135, 235)
-            elif dataType == "Total subAsset":
-                row_color = QColor(213, 193, 236)
+                bg = QColor(213, 236, 193)
+            elif dataType == "Total assetClass":
+                bg = QColor(181, 135, 235)
+            elif dataType == "Total subAssetClass":
+                bg = QColor(213, 193, 236)
             else:
-                row_color = None
+                bg = None
 
-            # 1) create (or override) the vertical header item for this row
-            header_item = QTableWidgetItem(row_label)
-            if row_color is not None:
-                header_item.setBackground(QBrush(row_color))
-            self.returnsTable.setVerticalHeaderItem(r, header_item)
+            # — vertical header: only show the fund, stash the code —
+            hdr = QTableWidgetItem(fund_label)
+            hdr.setData(Qt.UserRole, code)
+            if bg:
+                hdr.setBackground(QBrush(bg))
+            self.returnsTable.setVerticalHeaderItem(r, hdr)
 
-            # 2) fill in the row’s cells
+            # — fill cells —
             for c, col in enumerate(col_keys):
-                val = row_dict.get(col, "")
-                val = round(float(val), 2) if val is not None and val != "" and val != "None" else ""
-                if val != "":
-                    val = f"{val:,.2f}"
-                item = QTableWidgetItem(val)
-                if val != "":
-                    item.setData(Qt.UserRole,val)
-                if row_color is not None:
-                    item.setBackground(QBrush(row_color))
+                raw = row_dict.get(col, "")
+                if raw not in (None, "", "None"):
+                    v = round(float(raw), 2)
+                    if c in percent_cols or (mode == "Monthly Table" and self.returnOutputType.currentText() == "Return"):
+                        text = f"{v:.2f}%"
+                    else:
+                        text = f"{v:,.2f}"
+                else:
+                    text = ""
+
+                item = QTableWidgetItem(text)
+                if text:
+                    # store raw number for sorting or later retrieval
+                    item.setData(Qt.UserRole, v)
+                if bg:
+                    item.setBackground(QBrush(bg))
+                item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 self.returnsTable.setItem(r, c, item)
     def populate(self, table, rows, keys = None):
         if not rows:
@@ -1882,6 +2014,7 @@ class tableWindow(QWidget):
         # Layout and table
         layout = QVBoxLayout(self)
         self.table = QTableWidget(self)
+        self.table.setSortingEnabled(True)
         layout.addWidget(self.table)
 
         
@@ -1923,7 +2056,7 @@ class PopupPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4,4,4,4)
         # ClearFilter button
-        self.clear_btn = QPushButton("ClearFilter", self)
+        self.clear_btn = QPushButton("Clear", self)
         layout.addWidget(self.clear_btn)
         # scrollable checkbox area
         self.scroll = QScrollArea(self)
@@ -1950,6 +2083,8 @@ class MultiSelectBox(QWidget):
         self.line_edit.setReadOnly(True)
         self.line_edit.setPlaceholderText("Click to select…")
         self.line_edit.clicked.connect(self._togglePopup)
+        self.hierarchy = False
+        self.currentItems = []
 
         # ——— pop-up panel ———
         self.popup = PopupPanel(self)
@@ -1965,7 +2100,8 @@ class MultiSelectBox(QWidget):
         main.addWidget(self.line_edit)
         main.setContentsMargins(0,0,0,0)
         self.setLayout(main)
-
+    def hierarchyMode(self):
+        self.hierarchy = True
     def _togglePopup(self):
         if self.popup.isVisible():
             self.popup.hide()
@@ -2007,7 +2143,10 @@ class MultiSelectBox(QWidget):
         self._updateLine()
 
     def checkedItems(self):
-        return [t for t, cb in self._checkboxes.items() if cb.isChecked()]
+        if self.hierarchy:
+            return self.currentItems
+        else:
+            return [t for t, cb in self._checkboxes.items() if cb.isChecked()]
 
     def clearSelection(self):
         for cb in self._checkboxes.values():
@@ -2015,8 +2154,25 @@ class MultiSelectBox(QWidget):
         self._updateLine()
 
     def _updateLine(self):
+        temp = self.hierarchy
+        self.hierarchy = False
         sel = self.checkedItems()
-        self.line_edit.setText(", ".join(sel))
+        self.hierarchy = temp
+        if self.hierarchy:
+            for idx, item in enumerate(self.currentItems): #check if item is removed.
+                if item not in sel:
+                    self.currentItems.pop(idx)
+                    break
+            for idx, item in enumerate(sel): #check if item is added
+                if item not in self.currentItems:
+                    self.currentItems.append(item)
+                    break
+            lines = [f"{i+1}: {text}" for i, text in enumerate(self.currentItems)]
+            display = "\n".join(lines)
+        else:
+            # the old single-line, comma-separated format
+            display = ", ".join(sel)
+        self.line_edit.setText(display)
 
 if __name__ == '__main__':
     key = os.environ.get('Dynamo_API')
