@@ -67,7 +67,7 @@ nameHier = {
                 "Unfunded" : {"api" : "Remaining commitment change", "dynLow" : "RemainingCommitmentChange", "local" : "Unfunded", "value" : "CashFlowSys"},
                 "Commitment" : {"api" : "Amount" , "dynLow" : "ValueInSystemCurrency", "local" : "Commitment"},
                 "Transaction Time" : {"dynLow" : "TradeDate"},
-                "sleeve" : {"sleeve" : "ExposureAssetClassCategory", "fund" : "Name", "local" : "subAssetSleeve"},
+                "sleeve" : {"sleeve" : "sleeve", "fund" : "Name", "local" : "subAssetSleeve"},
                 "CashFlow" : {"dynLow" : "CashFlowSys", "dynHigh" : "CashFlowSys"}, 
                 "Value" : {"local" : "NAV", "api" : "Value in system currency", "dynLow" : "ValueInSystemCurrency", "dynHigh" : "Value"},
             }
@@ -75,7 +75,7 @@ nameHier = {
 commitmentChangeTransactionTypes = ["Commitment", "Transfer of commitment", "Transfer of commitment (out)", "Secondary - Original commitment (by secondary seller)"]
 headerOptions = ["Return","NAV", "Gain", "Ownership" , "MDdenominator", "Commitment", "Unfunded"]
 dataOptions = ["Investor","Family Branch","Classification", "dateTime"]
-yearOptions = (1,3,5,7,10,12,15,20)
+yearOptions = (1,2,3,5,7,10,12,15,20)
 
 options = ["MTD","QTD","YTD", "Ownership", "Return", "ITD"] + [f"{y}YR" for y in yearOptions]
 percent_headers = {option for option in options}
@@ -240,6 +240,13 @@ class returnsApp(QWidget):
         self.sortHierarchy.hierarchyMode()
         self.sortHierarchy.popup.closed.connect(self.buildReturnTable)
         tableSelectorLayout.addWidget(self.sortHierarchy)
+        self.consolidateFundsBtn = QRadioButton("Consolidate Funds")
+        self.consolidateFundsBtn.setChecked(True)
+        self.consolidateFundsBtn.clicked.connect(self.buildReturnTable)
+        tableSelectorLayout.addWidget(self.consolidateFundsBtn)
+        self.benchmarkSelection = MultiSelectBox()
+        self.benchmarkSelection.popup.closed.connect(self.buildReturnTable)
+        tableSelectorLayout.addWidget(self.benchmarkSelection)
         tableSelectorBox.setLayout(tableSelectorLayout)
         filterLayout.addWidget(tableSelectorBox)
 
@@ -319,11 +326,12 @@ class returnsApp(QWidget):
             lastImport = datetime.strptime(lastImportString, "%B %d, %Y @ %I:%M %p")  
             self.lastImportLabel.setText(f"Last Data Import: {lastImportString}")
             now = datetime.now()
-            if lastImport.month != now.month or now > lastImport + relativedelta(days=5):
+            if lastImport.month != now.month or now > lastImport + relativedelta(days=1):
                 #pull data if in a new month or 5 days have elapsed
                 executor.submit(self.pullData)
             else:
                 calculations = self.load_from_db("calculations")
+                self.findConsolidatedFunds()
                 if calculations != []:
                     self.populate(self.calculationTable,calculations)
                     self.buildReturnTable()
@@ -473,6 +481,22 @@ class returnsApp(QWidget):
                 gui_queue.put(lambda: QMessageBox.information(self, "Saved", f"Excel saved to:\n{path}"))
                 gui_queue.put(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(path)))
         executor.submit(processExport)
+    def findConsolidatedFunds(self):
+        funds = self.load_from_db("funds")
+        if funds != []:
+            consolidatorFunds = {}
+            for row in funds: #find sleeve values and consolidated funds
+                if row.get("Fundpipelinestatus") is not None and "Z - Placeholder" in row.get("Fundpipelinestatus"):
+                    consolidatorFunds[row["Name"]] = {"cFund" : row["Name"], "assetClass" : assetClass, "subAssetClass" : subAssetClass, "sleeve" : sleeve}
+                assetClass = row["assetClass"]
+                subAssetClass = row["subAssetClass"]
+                sleeve = row["sleeve"]
+            self.consolidatedFunds = {}
+            for row in funds: #assign funds to their consolidators
+                if row.get("Parentfund") in consolidatorFunds:
+                    self.consolidatedFunds[row["Name"]] = consolidatorFunds.get(row.get("Parentfund"))
+        else:
+            self.consolidatedFunds = {}
     def filterBtnUpdate(self, button, checked):
         if not self.filterCallLock:
             self.buildTableLoadingBox.setVisible(True)
@@ -565,6 +589,8 @@ class returnsApp(QWidget):
                     return
                 data = self.load_from_db("calculations",condStatement, tuple(parameters))
                 output = {"Total##()##" : {}}
+                if self.benchmarkSelection.checkedItems() != []:
+                    output = self.applyBenchmarks(output)
                 output , data = self.calculateUpperLevels(output,data)
                 gui_queue.put(lambda: self.buildTableLoadingBar.setValue(4))
                 if cancelEvent.is_set(): #exit if new table build request is made
@@ -602,7 +628,7 @@ class returnsApp(QWidget):
                             for option in headerOptions:
                                 if option != "Ownership":
                                     complexOutput[level][option] += float(entry[option] if entry[option] is not None and entry[option] != '' else 0)
-                        if self.filterDict["Investor"].checkedItems() != []:
+                        if self.filterDict["Investor"].checkedItems() != [] or self.filterDict["Family Branch"].checkedItems() != []:
                             if "Ownership (%)" not in complexOutput[level].keys():
                                 complexOutput[level]["Ownership (%)"] = entry["Ownership"]
                             else:
@@ -627,6 +653,7 @@ class returnsApp(QWidget):
             except Exception as e:
                 tracebackMsg = traceback.format_exc()
                 gui_queue.put(lambda error = e: QMessageBox.warning(self, "Error building returns table", f"Error: {error}. {error.args}. Data entry: \n  \n Traceback:  \n {tracebackMsg}"))
+                gui_queue.put(lambda: self.buildTableLoadingBox.setVisible(False))
         if self.buildTableCancel:
             self.buildTableCancel.set()
         if self.buildTableFuture and not self.buildTableFuture.done():
@@ -666,26 +693,29 @@ class returnsApp(QWidget):
                         complexOutput[level][headerKey] *= (1 + float(monthOutput[level][month]) / 100 )
                     complexOutput[level][headerKey] = ((complexOutput[level][headerKey] ** (1/int(yearKey)) ) - 1 ) * 100 if complexOutput[level][headerKey] > 0 else -1 * ((abs(complexOutput[level][headerKey]) ** (1/int(yearKey)) ) - 1)* 100
             try:
-                monthCount = 0
-                if MTDtime in monthOutput[level].keys():
-                    #only runs ITD if it is a current fund (MTD month exists)
-                    ITDmonths = list(monthOutput[level].keys())
-                    ITDmonths = [m for m in ITDmonths if m != "dataType"]
-                    ITDmonths = sorted([datetime.strptime(date,"%B %Y") for date in ITDmonths])
-                    
-                    ITDmonths = [datetime.strftime(date,"%B %Y") for date in ITDmonths]
-                    if len(ITDmonths) >= 2:
-                        #only calculates if more than previous month
-                        #ITDmonths = ITDmonths[1:] #remove first month?? 
-                        complexOutput[level]["ITD"] = 1
-                        for month in ITDmonths:
-                            if month != "dataType" and datetime.strptime(month,"%B %Y") <= datetime.strptime(self.dataEndSelect.currentText(),"%B %Y"):
-                                monthCount += 1
-                                complexOutput[level]["ITD"] *= (1 + float(monthOutput[level][month]) / 100 )
-                        complexOutput[level]["ITD"] = ((complexOutput[level]["ITD"] ** (12/int(monthCount)) ) - 1 ) * 100 if complexOutput[level]["ITD"] > 0 else -1 * ((abs(complexOutput[level]["ITD"]) ** (1/int(monthCount)) ) - 1)* 100
-                    else:
-                        #ITD is just the previous month if no more months are found
-                        complexOutput[level]["ITD"] = monthOutput[level][MTDtime]
+                if monthOutput[level].get("dataType","") != "benchmark":
+                    monthCount = 0
+                    if MTDtime in monthOutput[level].keys():
+                        #only runs ITD if it is a current fund (MTD month exists)
+                        ITDmonths = list(monthOutput[level].keys())
+                        ITDmonths = [m for m in ITDmonths if m != "dataType"]
+                        ITDmonths = sorted([datetime.strptime(date,"%B %Y") for date in ITDmonths])
+                        
+                        ITDmonths = [datetime.strftime(date,"%B %Y") for date in ITDmonths]
+                        if len(ITDmonths) >= 2:
+                            #only calculates if more than previous month
+                            #ITDmonths = ITDmonths[1:] #remove first month?? 
+                            complexOutput[level]["ITD"] = 1
+                            for month in ITDmonths:
+                                if month != "dataType" and datetime.strptime(month,"%B %Y") <= datetime.strptime(self.dataEndSelect.currentText(),"%B %Y"):
+                                    monthCount += 1
+                                    complexOutput[level]["ITD"] *= (1 + float(monthOutput[level][month]) / 100 )
+                            complexOutput[level]["ITD"] = ((complexOutput[level]["ITD"] ** (12/int(monthCount)) ) - 1 ) * 100 if complexOutput[level]["ITD"] > 0 else -1 * ((abs(complexOutput[level]["ITD"]) ** (1/int(monthCount)) ) - 1)* 100
+                        else:
+                            #ITD is just the previous month if no more months are found
+                            complexOutput[level]["ITD"] = monthOutput[level][MTDtime]
+                else:
+                    complexOutput[level]["ITD"] = monthOutput[level]["ITD"]
             except Exception as e:
                 pass
         # for level in monthOutput.keys():
@@ -697,11 +727,40 @@ class returnsApp(QWidget):
 
 
         return complexOutput
-
-    def calculateUpperLevels(self, tableStructure,data):
-        def buildCode(path):
+    def applyBenchmarks(self, output):
+        benchmarkChoices = self.benchmarkSelection.checkedItems()
+        code = self.buildCode([])
+        placeholders = ','.join('?' for _ in benchmarkChoices)
+        benchmarks = self.load_from_db("benchmarks",f"WHERE [Index] IN ({placeholders})",tuple(benchmarkChoices))
+        for idx, bench in enumerate(benchmarks):
+            name = bench["Index"] + code
+            if datetime.strptime(bench["Asofdate"], "%Y-%m-%dT%H:%M:%S") < datetime.strptime(self.dataStartSelect.currentText(), "%B %Y"):
+                continue #skip if before start time
+            date = datetime.strftime(datetime.strptime(bench["Asofdate"], "%Y-%m-%dT%H:%M:%S"), "%B %Y")
+            if output.get(name) is None:
+                output[name] =  {}
+            if self.tableBtnGroup.checkedButton().text() != "Complex Table" and self.returnOutputType.currentText() == "Return": #show monthly return benchmarks
+                output[name][date] = float(bench.get("MTDnet",0) if bench.get("MTDnet",0) !=  "None" else 0) * 100
+                if output[name].get("dataType") is None:
+                    output[name]["dataType"] = "benchmark"
+            elif self.tableBtnGroup.checkedButton().text() == "Complex Table" and date == self.dataEndSelect.currentText():
+                #populate the complex fields
+                if output[name].get("dataType") is None:
+                    output[name]["dataType"] = "benchmark"
+                for time in ("MTD","QTD","YTD"):
+                    if bench.get(f"{time}net", "None") != "None":
+                        output[name][time] = float(bench.get(f"{time}net")) * 100
+                if bench.get("ITDTWR","None") != "None":
+                    output[name]["ITD"] = float(bench.get("ITDTWR")) * 100
+                for year in yearOptions:
+                    if bench.get(f"Last{year}yrnet","None") not in ("None",None):
+                        output[name][f"{year}YR"] = float(bench.get(f"Last{year}yrnet")) * 100
+        return output
+    def buildCode(self, path):
             code = f"##({"::".join(path)})##"
             return code
+    def calculateUpperLevels(self, tableStructure,data):
+        
         def buildLevel(levelName,levelIdx, struc,data,path : list):
             levelIdx += 1
             entryTemplate = {"dateTime" : None, "Calculation Type" : "Total " + levelName, "Pool" : None, "Fund" : None ,
@@ -727,7 +786,7 @@ class returnsApp(QWidget):
                     
                     highEntries = {}
                     name = option if levelName != "assetClass" or option != "Cash" else "Cash "
-                    code = buildCode(tempPath)
+                    code = self.buildCode(tempPath)
                     struc[name + code] = {} #place table space for that level selection
                     levelData = []
                     for entry in data: #separates out only relevant data
@@ -764,17 +823,18 @@ class returnsApp(QWidget):
                     tempPath.append(option)
                     totalEntriesLow = {}
                     name = option if levelName != "assetClass" or option != "Cash" else "Cash "
-                    code = buildCode(tempPath)
+                    code = self.buildCode(tempPath)
                     struc[name + code] =  {}
                     levelData = []
                     for entry in data: #separates out only relevant data
                         if entry[levelName] == option:
                             levelData.append(entry)
-                    
+                    nameList = []
                     for entry in levelData:
-                        struc[entry["Fund"] + code] = {}
+                        fundName = entry["Fund"] if not self.consolidateFundsBtn.isChecked() or entry["Fund"] not in self.consolidatedFunds or entry["Fund"] in self.filterDict["Fund"].checkedItems() else self.consolidatedFunds.get(entry["Fund"]).get("cFund")
+                        nameList.append(fundName + code)
                         temp = entry.copy()
-                        temp["rowKey"] = entry["Fund"] + code
+                        temp["rowKey"] = fundName + code
                         totalDataLow.append(temp)
                         if entry["dateTime"] not in totalEntriesLow:
                             totalEntriesLow[entry["dateTime"]] = copy.deepcopy(entryTemplate)
@@ -788,6 +848,8 @@ class returnsApp(QWidget):
                         for header in headerOptions:
                             if header != "Ownership":
                                 totalEntriesLow[entry["dateTime"]][header] += float(entry[header])
+                    for name in sorted(nameList):
+                        struc[name] = {}
                     for month in totalEntriesLow.keys():
                         totalEntriesLow[month]["Return"] = totalEntriesLow[month]["Gain"] / totalEntriesLow[month]["MDdenominator"] * 100 if totalEntriesLow[month]["MDdenominator"] != 0 else 0
                         newEntriesLow.append(totalEntriesLow[month])
@@ -806,7 +868,7 @@ class returnsApp(QWidget):
                                             "assetClass" : None, "subAssetClass" : None, "Investor" : None,
                                             "Return" : None , nameHier["sleeve"]["local"] : None,
                                             "Ownership" : None}
-                trueTotalEntries[total["dateTime"]]["rowKey"] = "Total" + buildCode([])
+                trueTotalEntries[total["dateTime"]]["rowKey"] = "Total" + self.buildCode([])
                 for header in headerOptions:
                     if header != "Ownership":
                         trueTotalEntries[total["dateTime"]][header] = 0
@@ -971,8 +1033,15 @@ class returnsApp(QWidget):
                 self.fullLevelOptions[filter["key"]] = allOptions[filter["key"]]
         self.filterDict["Classification"].setCheckedItem("HFC")
         self.pullInvestorNames()
+        self.pullBenchmarks()
 
-
+    def pullBenchmarks(self):
+        benchmarks = self.load_from_db("benchmarks")
+        benchNames = []
+        for bench in benchmarks:
+            if bench["Index"] not in benchNames:
+                benchNames.append(bench["Index"])
+        self.benchmarkSelection.addItems(benchNames)
     def check_api_key(self):
         key = self.api_input.text().strip()
         if key:
@@ -1068,6 +1137,8 @@ class returnsApp(QWidget):
                 "accountName": "InvestmentPosition",
                 "accountSort": "As of Date:desc",
                 "fundCols" : "Fund Name, Asset class category, Parent fund, Fund Pipeline Status",
+                "benchCols" : (f"Index, As of date, MTD %, QTD %, YTD %, ITD cumulative %, ITD TWRR %, "
+                               f"{', '.join(f'Last {y} yr %' for y in yearOptions)}"), 
             }
             calculationsTest = self.load_from_db("calculations")
             if calculationsTest != []:
@@ -1086,7 +1157,7 @@ class returnsApp(QWidget):
                     "x-sort": apiData[sort_key]
                 }
                 for j in range(2): #0: fund level, 1: pool to high investor level
-                    gui_queue.put(lambda: self.apiLoadingBar.setValue(int((loadingIdx)/5 * 100)))
+                    gui_queue.put(lambda val = loadingIdx: self.apiLoadingBar.setValue(int((val)/6 * 100)))
                     loadingIdx += 1
                     investmentLevel = "Investing entity" if j == 0 else "Investment in"
                     if i == 0: #transaction
@@ -1260,32 +1331,35 @@ class returnsApp(QWidget):
                                         },
                                         "mode": "compact"
                                     }
-                    response = requests.post(f"{mainURL}/Search", headers=headers, data=json.dumps(payload))
-                    if response.status_code == 200:
-                        try:
-                            data = response.json()
-                        except ValueError:
-                            continue
-                        if isinstance(data, dict):
-                            rows = data.get('data', data.get('rows', []))
-                        elif isinstance(data, list):
-                            rows = data
+                    rows = []
+                    idx = 0
+                    while rows in ([],None) and idx < 3: #if call fails, tries again
+                        idx += 1
+                        response = requests.post(f"{mainURL}/Search", headers=headers, data=json.dumps(payload))
+                        if response.status_code == 200:
+                            try:
+                                data = response.json()
+                            except ValueError:
+                                continue
+                            if isinstance(data, dict):
+                                rows = data.get('data', data.get('rows', []))
+                            elif isinstance(data, list):
+                                rows = data
+                            else:
+                                rows = []
+
+                            keys_to_remove = {'_id', '_es'}
+                            rows = [
+                                {k: v for k, v in row.items() if k not in keys_to_remove}
+                                for row in rows
+                            ]
                         else:
-                            rows = []
-
-                        keys_to_remove = {'_id', '_es'}
-                        rows = [
-                            {k: v for k, v in row.items() if k not in keys_to_remove}
-                            for row in rows
-                        ]
-
-                    else:
-                        print(f"Error in API call. Code: {response.status_code}. {response}")
-                        try:
-                            print(f"Error: {response.json()}")
-                            print(f"Headers used:  \n {headers}, \n payload used: \n {payload}")
-                        except:
-                            pass
+                            print(f"Error in API call. Code: {response.status_code}. {response}")
+                            try:
+                                print(f"Error: {response.json()}")
+                                print(f"Headers used:  \n {headers}, \n payload used: \n {payload}")
+                            except:
+                                pass
                     if i == 1:
                         if j == 0:
                             if skipCalculations:
@@ -1322,6 +1396,7 @@ class returnsApp(QWidget):
                     "Content-Type": "application/json",
                     "x-columns": apiData["fundCols"],
                 }
+            gui_queue.put(lambda: self.apiLoadingBar.setValue(int((4)/6 * 100)))
             response = requests.post(f"{mainURL}/Search", headers=fundHeaders, data=json.dumps(fundPayload))
             if response.status_code == 200:
                 try:
@@ -1334,20 +1409,75 @@ class returnsApp(QWidget):
                         rows = []
                     keys_to_remove = {'_id', '_es'}
                     rows = [{k: v for k, v in row.items() if k not in keys_to_remove} for row in rows]
-                    for idx, row in enumerate(rows):
+                    consolidatorFunds = {}
+                    for idx, row in enumerate(rows): #find sleeve values and consolidated funds
                         assetCat = row["ExposureAssetClassCategory"]
                         if assetCat is not None and assetCat.count(" > ") == 3:
+                            assetClass = assetCat.split(" > ")[1]
+                            subAssetClass = assetCat.split(" > ")[2]
                             sleeve = assetCat.split(" > ")[3]
-                        else:
+                        elif assetCat is not None and assetCat.count(" > ") == 2:
+                            assetClass = assetCat.split(" > ")[1]
+                            subAssetClass = assetCat.split(" > ")[2]
                             sleeve = None
-                        rows[idx]["ExposureAssetClassCategory"] =  sleeve
-
-                    self.save_to_db("funds",rows)
+                        elif assetCat is not None and assetCat.count(" > ") == 1:
+                            assetClass = assetCat.split(" > ")[1]
+                            subAssetClass = None
+                            sleeve = None
+                        else:
+                            assetClass = None
+                            subAssetClass = None
+                            sleeve = None
+                        if row.get("Fundpipelinestatus") is not None and "Z - Placeholder" in row.get("Fundpipelinestatus"):
+                            consolidatorFunds[row["Name"]] = {"cFund" : row["Name"], "assetClass" : assetClass, "subAssetClass" : subAssetClass, "sleeve" : sleeve}
+                        rows[idx][nameHier["sleeve"]["sleeve"]] =  sleeve
+                        rows[idx]["assetClass"] = assetClass
+                        rows[idx]["subAssetClass"] = subAssetClass
+                    self.consolidatedFunds = {}
+                    for row in rows: #assign funds to their consolidators
+                        if row.get("Parentfund") in consolidatorFunds:
+                            self.consolidatedFunds[row["Name"]] = consolidatorFunds.get(row.get("Parentfund"))
+                    if rows != []:
+                        self.save_to_db("funds",rows)
                 except Exception as e:
-                    print(f"Error proccessing fund API data : {e} {e.args}")
+                    print(f"Error proccessing fund API data : {e} {e.args}.  {traceback.format_exc()}")
                 
             else:
-                print(f"Error in API call for fund. Code: {response.status_code}. {response}")
+                print(f"Error in API call for fund. Code: {response.status_code}. {response}. {traceback.format_exc()}")
+            benchmarkPayload = {
+                                    "advf": {
+                                        "e": [
+                                            {
+                                                "_name": "IndexPerformance"
+                                            }
+                                        ]
+                                    },
+                                    "mode": "compact"
+                                }
+            benchmarkHeaders = {
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                    "x-columns": apiData["benchCols"],
+                }
+            gui_queue.put(lambda: self.apiLoadingBar.setValue(int((5)/6 * 100)))
+            response = requests.post(f"{mainURL}/Search", headers=benchmarkHeaders, data=json.dumps(benchmarkPayload))
+            if response.status_code == 200:
+                try:
+                    data = response.json()
+                    if isinstance(data, dict):
+                        rows = data.get('data', data.get('rows', []))
+                    elif isinstance(data, list):
+                        rows = data
+                    else:
+                        rows = []
+                    keys_to_remove = {'_id', '_es'}
+                    rows = [{k: v for k, v in row.items() if k not in keys_to_remove} for row in rows]
+                    self.save_to_db("benchmarks",rows)
+                except Exception as e:
+                    print(f"Error proccessing benchmark API data : {e} {e.args}.  {traceback.format_exc()}")
+                
+            else:
+                print(f"Error in API call for benchmarks. Code: {response.status_code}. {response}. {traceback.format_exc()}")
             if skipCalculations:
                 print("Earliest change: ", self.earliestChangeDate)
             gui_queue.put(lambda: self.apiLoadingBar.setValue(100))
