@@ -10,7 +10,7 @@ import time
 import copy
 import re
 from openpyxl import Workbook
-from openpyxl.styles import PatternFill, Alignment
+from openpyxl.styles import PatternFill, Alignment, Font
 from openpyxl.utils import get_column_letter
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
@@ -22,11 +22,13 @@ from PyQt5.QtWidgets import (
     QLabel, QLineEdit, QPushButton, QFormLayout,
     QRadioButton, QButtonGroup, QComboBox, QHBoxLayout,
     QTableWidget, QTableWidgetItem, QProgressBar, QTableView, QCheckBox, QMessageBox,
-    QScrollArea, QFileDialog
+    QScrollArea, QFileDialog, QListWidgetItem, QListWidget, QDialog, QSizePolicy, QGridLayout,
+    QFrame, QTextEdit, QHeaderView
 )
 from PyQt5.QtGui import QBrush, QColor, QDesktopServices
 from PyQt5.QtCore import Qt, QTimer, QAbstractTableModel, QModelIndex, pyqtSignal, QPoint, QUrl
 
+currentVersion = "1.0.1"
 testDataMode = False
 demoMode = False
 
@@ -73,7 +75,7 @@ nameHier = {
             }
 
 commitmentChangeTransactionTypes = ["Commitment", "Transfer of commitment", "Transfer of commitment (out)", "Secondary - Original commitment (by secondary seller)"]
-headerOptions = ["Return","NAV", "Gain", "Ownership" , "MDdenominator", "Commitment", "Unfunded"]
+headerOptions = ["Return","NAV", "Monthly Gain", "Ownership" , "MDdenominator", "Commitment", "Unfunded"]
 dataOptions = ["Investor","Family Branch","Classification", "dateTime"]
 yearOptions = (1,2,3,5,7,10,12,15,20)
 
@@ -98,8 +100,66 @@ class returnsApp(QWidget):
         self.fullLevelOptions = {}
         self.buildTableCancel = None
         self.buildTableFuture = None
+        self.cFundsCalculated = False
+
         # main stack
         self.main_layout = QVBoxLayout()
+        appStyle = ("""
+                        QWidget#borderFrame {
+                            border: 2px solid #3E85E9;
+                            border-radius: 4px;
+                            padding: 4px;
+                        }
+                        QWidget#titleBox {
+                            border: 4px solid #0665EA;
+                            border-radius: 5px;
+                            padding: 4px;
+                        }
+                        QWidget#mainPage, QMessageBox, QDialog {
+                            background-color: #383838
+                        }
+                        QPushButton {
+                            background-color: #3E85E9;
+                            border: 2px solid transparent;
+                            border-radius: 12px;
+                            padding: 4px
+                        }
+                        QPushButton:hover {
+                                background-color: #1771EE;
+                        }
+                        QPushButton#exportBtn {
+                            background-color: #51AE2B;
+                        }
+                        QPushButton#exportBtn:hover {
+                                background-color: #429321;
+                        }
+                        QLabel, QRadioButton, QCheckBox, QProgressBar {
+                            color: white
+                        }
+                        QTableWidget, QWidget#subPanel, QHeaderView::corner, QTableCornerButton::section {
+                        background-color : #514F4F
+                        }
+                        QHeaderView::section {
+                            background-color: #A8A2A2;
+                        }
+                        QListWidget {
+                            background-color : #514F4F;
+                            color: white
+                        }
+                        QLineEdit{
+                            border: 2px solid transparent;
+                            border-radius: 12px;
+                            background-color: #514F4F;
+                            color : white;
+                        }
+                        QComboBox {
+                            background-color: #514F4F;
+                            color : white;
+                        }
+                    """)
+        self.setStyleSheet(appStyle)
+        self.setObjectName("mainPage")
+        self.checkVersion()
         self.stack = QStackedWidget()
         self.init_global_widgets()
 
@@ -111,8 +171,14 @@ class returnsApp(QWidget):
         self.main_layout.addWidget(self.stack)
         self.setLayout(self.main_layout)
     def init_global_widgets(self):
+        headerBox = QWidget()
+        headerLayout = QHBoxLayout()
         self.lastImportLabel = QLabel("Last Data Import: ")
-        self.main_layout.addWidget(self.lastImportLabel)
+        headerLayout.addWidget(self.lastImportLabel)
+        headerLayout.addStretch()
+        headerLayout.addWidget(QLabel(f"Version: {currentVersion}"))
+        headerBox.setLayout(headerLayout)
+        self.main_layout.addWidget(headerBox)
         self.apiLoadingBarBox = QWidget()
         t2 = QVBoxLayout()
         t2.addWidget(QLabel("Pulling transaction and account data from server..."))
@@ -170,9 +236,9 @@ class returnsApp(QWidget):
         self.stack.addWidget(page)
 
     def init_returns_page(self):
+        
         page = QWidget()
         layout = QVBoxLayout()
-
         controlsBox = QWidget()
         controlsLayout = QHBoxLayout()
         self.importButton = QPushButton('Reimport Data')
@@ -189,74 +255,98 @@ class returnsApp(QWidget):
         controlsLayout.addWidget(btn_to_results)
         self.exportBtn = QPushButton("Export Current Table to Excel")
         self.exportBtn.clicked.connect(self.exportCurrentTable)
-        self.exportBtn.setStyleSheet("""
-                            QPushButton {
-                                background-color: #51AE2B;
-                                color: white;
-                                border: 1px solid #33721B;
-                                border-radius: 6px;
-                                padding: 4px 12px;
-                            }
-                            QPushButton:hover {
-                                background-color: #429321;
-                            }
-                            QPushButton:pressed {
-                                background-color: #33721B;
-                            }
-                        """)
+        self.exportBtn.setObjectName("exportBtn")
         controlsLayout.addWidget(self.exportBtn)
         controlsBox.setLayout(controlsLayout)
         layout.addWidget(controlsBox)
 
-        fullFilterBox = QWidget()
-        filterLayout = QHBoxLayout()
-
-        tableSelectorBox = QWidget()
-        tableSelectorLayout = QVBoxLayout()
+        mainButtonBox = QWidget()
+        mainButtonLayout = QVBoxLayout()
+        optionsBox = QWidget()
+        optionsBox.setObjectName("borderFrame")
+        optionsLayout = QHBoxLayout()
+        optionsTitle = QLabel("Options")
+        optionsTitle.setObjectName("titleBox")
+        optionsLayout.addWidget(optionsTitle)
         self.tableBtnGroup = QButtonGroup()
         self.complexTableBtn = QRadioButton("Complex Table")
         self.monthlyTableBtn = QRadioButton("Monthly Table")
+        buttonBox = QWidget()
+        buttonLayout = QVBoxLayout()
         for rb in (self.complexTableBtn,self.monthlyTableBtn):
             self.tableBtnGroup.addButton(rb)
             #rb.toggled.connect(self.updateTableType)
-            tableSelectorLayout.addWidget(rb)
-        self.tableBtnGroup.buttonClicked.connect(self.buildReturnTable)
-        self.complexTableBtn.setChecked(True)
+            buttonLayout.addWidget(rb)
         self.returnOutputType = QComboBox()
         self.returnOutputType.addItems(headerOptions)
         self.returnOutputType.currentTextChanged.connect(self.buildReturnTable)
-        tableSelectorLayout.addWidget(self.returnOutputType)
+        self.dataTypeBox = QWidget()
+        dataTypeLayout = QHBoxLayout()
+        dataTypeLayout.addWidget(QLabel("Data type:"))
+        dataTypeLayout.addWidget(self.returnOutputType)
+        self.dataTypeBox.setLayout(dataTypeLayout)
+        buttonLayout.addWidget(self.dataTypeBox)
+        buttonBox.setLayout(buttonLayout)
+        optionsLayout.addWidget(buttonBox)
+        self.tableBtnGroup.buttonClicked.connect(self.buildReturnTable)
+        self.complexTableBtn.setChecked(True)
+        
         self.dataStartSelect = QComboBox()
         self.dataEndSelect = QComboBox()
+        dateBox = QWidget()
+        dateLayout = QVBoxLayout()
         for text, CB in (["Start: ", self.dataStartSelect], ["End: ", self.dataEndSelect]):
             lineBox = QWidget()
             lineLay = QHBoxLayout()
             lineLay.addWidget(QLabel(text))
             lineLay.addWidget(CB)
             lineBox.setLayout(lineLay)
-            tableSelectorLayout.addWidget(lineBox)
-        tableSelectorLayout.addWidget(QLabel("Sort by: "))
+            dateLayout.addWidget(lineBox)
+        dateBox.setLayout(dateLayout)
+        optionsLayout.addWidget(dateBox)
+        benchBox = QWidget()
+        benchLayout = QVBoxLayout()
+        benchLayout.addWidget(QLabel("Benchmarks:"))
+        self.benchmarkSelection = MultiSelectBox()
+        self.benchmarkSelection.popup.closed.connect(self.buildReturnTable)
+        benchLayout.addWidget(self.benchmarkSelection)
+        benchBox.setLayout(benchLayout)
+        optionsLayout.addWidget(benchBox)
+        sortBox = QWidget()
+        sortLayout = QVBoxLayout()
+        sortLayout.addWidget(QLabel("Sort by: "))
         self.sortHierarchy = MultiSelectBox()
         self.sortHierarchy.hierarchyMode()
         self.sortHierarchy.popup.closed.connect(self.buildReturnTable)
-        tableSelectorLayout.addWidget(self.sortHierarchy)
+        sortLayout.addWidget(self.sortHierarchy)
+        sortBox.setLayout(sortLayout)
+        optionsLayout.addWidget(sortBox)
         self.consolidateFundsBtn = QRadioButton("Consolidate Funds")
         self.consolidateFundsBtn.setChecked(True)
         self.consolidateFundsBtn.clicked.connect(self.buildReturnTable)
-        tableSelectorLayout.addWidget(self.consolidateFundsBtn)
-        self.benchmarkSelection = MultiSelectBox()
-        self.benchmarkSelection.popup.closed.connect(self.buildReturnTable)
-        tableSelectorLayout.addWidget(self.benchmarkSelection)
-        tableSelectorBox.setLayout(tableSelectorLayout)
-        filterLayout.addWidget(tableSelectorBox)
+        optionsLayout.addWidget(self.consolidateFundsBtn)
+        self.headerSort = SortButtonWidget()
+        self.headerSort.popup.popup_closed.connect(self.headerSortClosed)
+        optionsLayout.addWidget(self.headerSort)
+        optionsBox.setLayout(optionsLayout)
+        mainButtonLayout.addWidget(optionsBox)
+        mainButtonBox.setLayout(mainButtonLayout)
+        layout.addWidget(mainButtonBox)
+
+        mainFilterBox = QWidget()
+        mainFilterBox.setObjectName("borderFrame")
+        mainFilterLayout = QGridLayout()
+        filterTitle = QLabel("Filters")
+        filterTitle.setObjectName("titleBox")
+        mainFilterLayout.addWidget(filterTitle,0,0,2,1)
 
         self.filterOptions = [
                             {"key": "Classification", "name": "HF Classification", "dataType" : None, "dynNameLow" : "Target nameExposureHFClassificationLevel2"},
                             {"key" : nameHier["Family Branch"]["local"], "name" : nameHier["Family Branch"]["local"], "dataType" : None, "dynNameLow" : None, "dynNameHigh" : nameHier["Family Branch"]["dynHigh"]},
-                            {"key": "Investor",       "name": "Investor", "dataType" : "Investor", "dynNameLow" : None},
-                            {"key": "assetClass",     "name": "Asset Class", "dataType" : "Total Asset", "dynNameLow" : "ExposureAssetClass", "dynNameHigh" : "ExposureAssetClass"},
-                            {"key": "subAssetClass",  "name": "Sub-Asset Class", "dataType" : "Total subAsset", "dynNameLow" : "ExposureAssetClassSub-assetClass(E)", "dynNameHigh" : "ExposureAssetClassSub-assetClass(E)"},
-                            {"key" : nameHier["sleeve"]["local"], "name" : "Sub-Asset Class Sleeve", "dataType" : "Total sleeve", "dynNameLow" : nameHier["sleeve"]["local"]},
+                            {"key": "Investor",       "name": "Investor", "dataType" : "Investor", "dynNameLow" : None, "dynNameHigh" : "Source name"},
+                            {"key": "assetClass",     "name": "Asset Level 1", "dataType" : "Total Asset", "dynNameLow" : "ExposureAssetClass", "dynNameHigh" : "ExposureAssetClass"},
+                            {"key": "subAssetClass",  "name": "Asset Level 2", "dataType" : "Total subAsset", "dynNameLow" : "ExposureAssetClassSub-assetClass(E)", "dynNameHigh" : "ExposureAssetClassSub-assetClass(E)"},
+                            {"key" : nameHier["sleeve"]["local"], "name" : "Asset Level 3", "dataType" : "Total sleeve", "dynNameLow" : nameHier["sleeve"]["local"]},
                             {"key": "Pool",           "name": "Pool", "dataType" : "Total Pool" , "dynNameLow" : "Source name", "dynNameHigh" : "Target name"},
                             {"key": "Fund",           "name": "Fund/Investment", "dataType" : "Total Fund" , "dynNameLow" : "Target name"},
                             
@@ -267,28 +357,24 @@ class returnsApp(QWidget):
         self.filterRadioBtnDict = {}
         self.filterBtnGroup = QButtonGroup()
         self.filterBtnGroup.setExclusive(False)
-        for filter in self.filterOptions:
-            filterBox = QWidget()
-            filterBoxLayout = QVBoxLayout()
+        for col, filter in enumerate(self.filterOptions, start=1):
             if filter["key"] not in self.filterBtnExclusions:
                 #investor level is not filterable. It is total portfolio or shows the investors data
                 self.filterRadioBtnDict[filter["key"]] = QCheckBox(f"{filter["name"]}:")
                 self.filterRadioBtnDict[filter["key"]].setChecked(True)
                 self.filterBtnGroup.addButton(self.filterRadioBtnDict[filter["key"]])
-                filterBoxLayout.addWidget(self.filterRadioBtnDict[filter["key"]])
+                mainFilterLayout.addWidget(self.filterRadioBtnDict[filter["key"]],0, col)
             else:
-                filterBoxLayout.addWidget(QLabel(f"{filter["name"]}:"))
+                mainFilterLayout.addWidget(QLabel(f"{filter["name"]}:"), 0, col)
             if filter["key"] != "Fund":
                 self.sortHierarchy.addItem(filter["key"])
             self.filterDict[filter["key"]] = MultiSelectBox()
             self.filterDict[filter["key"]].popup.closed.connect(lambda: self.filterUpdate())
             
-            filterBoxLayout.addWidget(self.filterDict[filter["key"]])
-            filterBox.setLayout(filterBoxLayout)
-            filterLayout.addWidget(filterBox)
+            mainFilterLayout.addWidget(self.filterDict[filter["key"]],1,col)
         self.filterBtnGroup.buttonToggled.connect(self.filterBtnUpdate)
-        fullFilterBox.setLayout(filterLayout)
-        layout.addWidget(fullFilterBox)
+        mainFilterBox.setLayout(mainFilterLayout)
+        layout.addWidget(mainFilterBox)
         t1 = QVBoxLayout() #build table loading bar
         self.buildTableLoadingBox = QWidget()
         t1.addWidget(QLabel("Building returns table..."))
@@ -298,7 +384,9 @@ class returnsApp(QWidget):
         self.buildTableLoadingBox.setLayout(t1)
         self.buildTableLoadingBox.setVisible(False)
         layout.addWidget(self.buildTableLoadingBox)
-        self.returnsTable = QTableWidget() #table
+        self.returnsTable = SmartStretchTable() #table
+        self.returnsTable.setSelectionMode(QTableWidget.ContiguousSelection)  # Required
+        self.returnsTable.setSelectionBehavior(QTableWidget.SelectItems)
         layout.addWidget(self.returnsTable)
         self.viewUnderlyingDataBtn = QPushButton("View Underlying Data")
         self.viewUnderlyingDataBtn.clicked.connect(self.viewUnderlyingData)
@@ -326,8 +414,8 @@ class returnsApp(QWidget):
             lastImport = datetime.strptime(lastImportString, "%B %d, %Y @ %I:%M %p")  
             self.lastImportLabel.setText(f"Last Data Import: {lastImportString}")
             now = datetime.now()
-            if lastImport.month != now.month or now > lastImport + relativedelta(days=1):
-                #pull data if in a new month or 5 days have elapsed
+            if lastImport.month != now.month or now > lastImport + relativedelta(hours=2):
+                #pull data if in a new month or 1 days have elapsed
                 executor.submit(self.pullData)
             else:
                 calculations = self.load_from_db("calculations")
@@ -385,104 +473,116 @@ class returnsApp(QWidget):
             path += ".xlsx"
 
         def processExport():
-            data = self.currentTableData  # dict of dicts
-
-            # 2) determine hierarchy levels present
-            all_types = {row.get("dataType") for row in data.values()}
-            if self.sortHierarchy.checkedItems() != []:
-                full_hierarchy = ["Total"] + ["Total " + level for level in self.sortHierarchy.checkedItems()] + ["Total Fund"]
-            else:
-                full_hierarchy = ["Total", "Total assetClass", "Total Fund"]
-            hierarchy_levels = [lvl for lvl in full_hierarchy if lvl in all_types]
-            num_hier = len(hierarchy_levels)
-
-            # 3) dynamic data columns minus "dataType"
-            all_cols = {
-                k for row in data.values() for k in row.keys()
-                if k != "dataType"
-            }
-
-            sorted_cols = self.orderColumns(all_cols)
-
-            # 4) create workbook
-            wb = Workbook()
-            ws = wb.active
-
-            appliedFilters = {}
-            for filter in self.filterOptions:
-                if self.filterDict[filter["key"]].checkedItems() != []:
-                    appliedFilters[filter["key"]] = self.filterDict[filter["key"]].checkedItems()
-
-            rowStart = 3
-            # 5) header row
-            for idx, lvl in enumerate(hierarchy_levels, start=1):
-                ws.cell(row=rowStart, column=idx, value=lvl)
-            for idx, colname in enumerate(sorted_cols, start=num_hier+1):
-                ws.cell(row=rowStart, column=idx, value=colname)
-
-            split_cell = f"{get_column_letter(num_hier+1)}4"
-            ws.freeze_panes = split_cell
-
-            # 7) populate rows
-            for r, (row_name, row_dict) in enumerate(data.items(), start=rowStart + 1):
-                row_name, code = self.separateRowCode(row_name)
-                dtype = row_dict.get("dataType")
-                level = hierarchy_levels.index(dtype) if dtype in hierarchy_levels else 0
-
-                # fills
-                data_color = "FFFFFF"
-                if dtype != "Total Fund":
-                    depth      = code.count("::") if dtype != "Total" else code.count("::") - 1
-                    maxDepth   = max(len(self.sortHierarchy.checkedItems()),1) + 1
-                    data_color = darken_color(data_color,depth/maxDepth/3 + 2/3)
-
-                if r % 2 == 1:
-                    data_color = darken_color(data_color,0.93)
-                header_color = darken_color(data_color, 0.9)
-                data_fill   = PatternFill("solid", data_color, data_color)
-                header_fill = PatternFill("solid", header_color, header_color)
-
-                # spread header fill across hierarchy cols
-                data_start = num_hier + 1
-                for col in range(level+1, data_start):
-                    cell = ws.cell(row=r, column=col, value=row_name if col==level+1 else None)
-                    cell.fill = header_fill
-                    if col == level+1:
-                        cell.alignment = Alignment(indent=level)
-
-                # data cells with proper formatting
-                for c, colname in enumerate(sorted_cols, start=data_start):
-                    val = row_dict.get(colname, None)
-                    cell = ws.cell(row=r, column=c, value=val)
-                    cell.fill = data_fill
-                    if isinstance(val, (int, float)):
-                        if colname not in percent_headers:
-                            # show with commas, two decimals
-                            cell.number_format = "#,##0.00"
-                        else:
-                            # interpret val as percentage (e.g. 10.5 → 10.5%)
-                            cell.value = val / 100.0
-                            cell.number_format = "0.00%"
-
-            # 8) autofit column widths
-            for idx, col_cells in enumerate(ws.columns, start=1):
-                max_len = 0
-                for cell in col_cells:
-                    if cell.value is not None:
-                        text = str(cell.value)
-                        max_len = max(max_len, len(text))
-                ws.column_dimensions[get_column_letter(idx)].width = max_len + 2
-
-            # 9) save and notify
             try:
+                data = self.currentTableData  # dict of dicts
+
+                # 2) determine hierarchy levels present
+                all_types = {row.get("dataType") for row in data.values()}
+                if self.sortHierarchy.checkedItems() != []:
+                    full_hierarchy = ["Total"] + ["Total " + level for level in self.sortHierarchy.checkedItems()] + ["Total Fund"]
+                else:
+                    full_hierarchy = ["Total", "Total assetClass", "Total Fund"]
+                hierarchy_levels = [lvl for lvl in full_hierarchy if lvl in all_types]
+                num_hier = len(hierarchy_levels)
+
+                # 3) dynamic data columns minus "dataType"
+                all_cols = {
+                    k for row in data.values() for k in row.keys()
+                    if k != "dataType"
+                }
+
+                sorted_cols = self.orderColumns(all_cols)
+
+                # 4) create workbook
+                wb = Workbook()
+                ws = wb.active
+
+                rowStart = 4
+                # 5) header row
+                for idx, lvl in enumerate(hierarchy_levels, start=1):
+                    ws.cell(row=rowStart, column=idx, value=lvl)
+                for idx, colname in enumerate(sorted_cols, start=num_hier+1):
+                    ws.cell(row=rowStart, column=idx, value=colname)
+
+                split_cell = f"{get_column_letter(num_hier+1)}4"
+                ws.freeze_panes = split_cell
+
+                # 7) populate rows
+                for r, (row_name, row_dict) in enumerate(data.items(), start=rowStart + 1):
+                    row_name, code = self.separateRowCode(row_name)
+                    dtype = row_dict.get("dataType")
+                    level = hierarchy_levels.index(dtype) if dtype in hierarchy_levels else 0
+
+                    # fills
+                    data_color = "FFFFFF"
+                    if dtype != "Total Fund":
+                        depth      = code.count("::") if dtype != "Total" else code.count("::") - 1
+                        maxDepth   = max(len(self.sortHierarchy.checkedItems()),1) + 1
+                        data_color = darken_color(data_color,depth/maxDepth/3 + 2/3)
+
+                    if r % 2 == 1:
+                        data_color = darken_color(data_color,0.93)
+                    header_color = darken_color(data_color, 0.9)
+                    data_fill   = PatternFill("solid", data_color, data_color)
+                    header_fill = PatternFill("solid", header_color, header_color)
+
+                    # spread header fill across hierarchy cols
+                    data_start = num_hier + 1
+                    for col in range(level+1, data_start):
+                        cell = ws.cell(row=r, column=col, value=row_name if col==level+1 else None)
+                        cell.fill = header_fill
+                        if col == level+1:
+                            cell.alignment = Alignment(indent=level)
+
+                    # data cells with proper formatting
+                    for c, colname in enumerate(sorted_cols, start=data_start):
+                        val = row_dict.get(colname, None)
+                        cell = ws.cell(row=r, column=c, value=val)
+                        cell.fill = data_fill
+                        if isinstance(val, (int, float)):
+                            if colname not in percent_headers:
+                                # show with commas, two decimals
+                                cell.number_format = "#,##0.00"
+                            else:
+                                # interpret val as percentage (e.g. 10.5 → 10.5%)
+                                cell.value = val / 100.0
+                                cell.number_format = "0.00%"
+
+                # 8) autofit column widths
+                for idx, col_cells in enumerate(ws.columns, start=1):
+                    max_len = 0
+                    for cell in col_cells:
+                        if cell.value is not None:
+                            text = str(cell.value)
+                            max_len = max(max_len, len(text))
+                    ws.column_dimensions[get_column_letter(idx)].width = max_len + 2
+
+                appliedFilters = {}
+                for filter in self.filterOptions:
+                    if self.filterDict[filter["key"]].checkedItems() != []:
+                        appliedFilters[filter["key"]] = self.filterDict[filter["key"]].checkedItems()
+                filterStart = num_hier
+                if self.filterDict[filter["key"]].checkedItems() != []: #only write if there are filters applied
+                    cell= ws.cell(row=1, column=filterStart, value="Filter:")
+                    cell.font = Font(bold=True)
+                    cell = ws.cell(row=2, column=filterStart, value="Selections:")
+                    cell.font = Font(bold=True)
+                    for idx, key in enumerate(appliedFilters, start=filterStart + 1):
+                        cell = ws.cell(row=1, column=idx, value=key)
+                        cell.alignment = Alignment(wrap_text=True)
+                        cell = ws.cell(row=2, column=idx, value=", ".join(appliedFilters[key]))
+                        cell.alignment = Alignment(wrap_text=True)
+
+            
                 wb.save(path)
             except Exception as e:
-                gui_queue.put(lambda: QMessageBox.critical(self, "Save error", str(e)))
+                gui_queue.put(lambda error=e, trace = traceback.format_exc(): QMessageBox.critical(self, "Save error", trace))
             else:
                 gui_queue.put(lambda: QMessageBox.information(self, "Saved", f"Excel saved to:\n{path}"))
                 gui_queue.put(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(path)))
         executor.submit(processExport)
     def findConsolidatedFunds(self):
+        self.cFundsCalculated = True
         self.sleeveFundLinks = {}
         self.cFundToFundLinks = {}
         funds = self.load_from_db("funds")
@@ -518,9 +618,9 @@ class returnsApp(QWidget):
                         if self.filterDict[filter["key"]].checkedItems() != []:
                             reloadRequired = True #rebuild the table only if filter selections are being removed
                         self.filterDict[filter["key"]].clearSelection()
-                        self.filterDict[filter["key"]].setVisible(False)
+                        self.filterDict[filter["key"]].setEnabled(False)
                     else:
-                        self.filterDict[filter["key"]].setVisible(True)
+                        self.filterDict[filter["key"]].setEnabled(True)
             self.filterCallLock = False
             if reloadRequired or self.currentTableData is None:
                 self.buildReturnTable()
@@ -550,6 +650,8 @@ class returnsApp(QWidget):
     def buildReturnTable(self):
         self.buildTableLoadingBox.setVisible(True)
         self.buildTableLoadingBar.setValue(2)
+        if not self.cFundsCalculated:
+            self.findConsolidatedFunds()
         def buildTable(cancelEvent):
             try:
                 print("Building return table...")
@@ -557,9 +659,9 @@ class returnsApp(QWidget):
                 
                 if self.tableBtnGroup.checkedButton().text() == "Complex Table":
                     gui_queue.put(lambda: self.returnOutputType.setCurrentText("Return"))
-                    gui_queue.put(lambda: self.returnOutputType.setVisible(False))
+                    gui_queue.put(lambda: self.dataTypeBox.setVisible(False))
                 else:
-                    gui_queue.put(lambda: self.returnOutputType.setVisible(True))
+                    gui_queue.put(lambda: self.dataTypeBox.setVisible(True))
                 if self.filterDict["Investor"].checkedItems() == [] and self.filterDict[nameHier["Family Branch"]["local"]].checkedItems() == []:
                     #if no investor level selections,show full portfolio information
                     parameters = ["Total Fund"]
@@ -817,7 +919,7 @@ class returnsApp(QWidget):
                             if header != "Ownership":
                                 highEntries[total["dateTime"]][header] += float(total[header])
                     for month in highEntries.keys():
-                        highEntries[month]["Return"] = highEntries[month]["Gain"] / highEntries[month]["MDdenominator"] * 100 if highEntries[month]["MDdenominator"] != 0 else 0
+                        highEntries[month]["Return"] = highEntries[month]["Monthly Gain"] / highEntries[month]["MDdenominator"] * 100 if highEntries[month]["MDdenominator"] != 0 else 0
                         highTotals.append(highEntries[month])
                 newTotalEntries.extend(highTotals)       
                 #high totals: all totals for the exact level
@@ -859,7 +961,7 @@ class returnsApp(QWidget):
                     for name in sorted(nameList):
                         struc[name] = {}
                     for month in totalEntriesLow.keys():
-                        totalEntriesLow[month]["Return"] = totalEntriesLow[month]["Gain"] / totalEntriesLow[month]["MDdenominator"] * 100 if totalEntriesLow[month]["MDdenominator"] != 0 else 0
+                        totalEntriesLow[month]["Return"] = totalEntriesLow[month]["Monthly Gain"] / totalEntriesLow[month]["MDdenominator"] * 100 if totalEntriesLow[month]["MDdenominator"] != 0 else 0
                         newEntriesLow.append(totalEntriesLow[month])
                 totalDataLow.extend(newEntriesLow)
                 return struc, newEntriesLow, totalDataLow
@@ -884,7 +986,7 @@ class returnsApp(QWidget):
                 if header != "Ownership":
                     trueTotalEntries[total["dateTime"]][header] += float(total[header])
         for month in trueTotalEntries.keys():
-            trueTotalEntries[month]["Return"] = trueTotalEntries[month]["Gain"] / trueTotalEntries[month]["MDdenominator"] * 100 if trueTotalEntries[month]["MDdenominator"] != 0 else 0
+            trueTotalEntries[month]["Return"] = trueTotalEntries[month]["Monthly Gain"] / trueTotalEntries[month]["MDdenominator"] * 100 if trueTotalEntries[month]["MDdenominator"] != 0 else 0
             newEntries.append(trueTotalEntries[month])
         #data.extend(newEntries)
         return tableStructure,newEntries
@@ -1499,7 +1601,7 @@ class returnsApp(QWidget):
 
             self.save_to_db("history",None,action="reset") #clears history then updates most recent import
             currentTime = datetime.now().strftime("%B %d, %Y @ %I:%M %p")
-            self.save_to_db("history",[{"lastImport" : currentTime}])
+            self.save_to_db("history",[{"lastImport" : currentTime, "currentVersion": currentVersion}])
             self.lastImportLabel.setText(f"Last Data Import: {currentTime}")
             gui_queue.put(lambda: self.apiLoadingBarBox.setVisible(False))
             self.calculateReturn()
@@ -1519,7 +1621,6 @@ class returnsApp(QWidget):
             gui_queue.put(lambda: self.calculationLoadingBox.setVisible(True))
             self.updateMonths()
             gui_queue.put(lambda: self.pullLevelNames())
-            gui_queue.put(lambda : self.stack.setCurrentIndex(2))
             print("Calculating return....")
             fundListDB = self.load_from_db("funds")
             fundList = {}
@@ -1715,7 +1816,7 @@ class returnsApp(QWidget):
                             poolWeightedCashFlow += weightedCashFlow
                             monthFundEntry = {"dateTime" : month["dateTime"], "Investor" : "Total Fund", "Pool" : pool, "Fund" : fund ,
                                             "assetClass" : assetClass, "subAssetClass" : subAssetClass,
-                                            "NAV" : fundNAV, "Gain" : fundGain, "Return" : fundReturn , 
+                                            "NAV" : fundNAV, "Monthly Gain" : fundGain, "Return" : fundReturn , 
                                             "MDdenominator" : fundMDdenominator, "Ownership" : "", "Classification" : fundClassification,
                                             "Calculation Type" : "Total Fund",
                                             nameHier["sleeve"]["local"] : fundList.get(fund),
@@ -1736,7 +1837,7 @@ class returnsApp(QWidget):
                     poolReturn = poolGainSum/poolMDdenominator * 100 if poolMDdenominator != 0 else 0
                     monthPoolEntry = {"dateTime" : month["dateTime"], "Investor" : "Total Pool", "Pool" : pool, "Fund" : None ,
                                       "assetClass" : poolDict["assetClass"], "subAssetClass" : poolDict["subAssetClass"] ,
-                                      "NAV" : poolNAV, "Gain" : poolGainSum, "Return" : poolReturn , "MDdenominator" : poolMDdenominator,
+                                      "NAV" : poolNAV, "Monthly Gain" : poolGainSum, "Return" : poolReturn , "MDdenominator" : poolMDdenominator,
                                         "Ownership" : None, "Calculation Type" : "Total Fund"}
                     investorMDdenominatorSum = 0
                     tempInvestorDicts = {}
@@ -1786,7 +1887,7 @@ class returnsApp(QWidget):
                             monthPoolEntryInvestor["Investor"] = investor
                             monthPoolEntryInvestor[nameHier["Family Branch"]["local"]] = tempInvestorDicts[investor][nameHier["Family Branch"]["local"]]
                             monthPoolEntryInvestor["NAV"] = investorEOM
-                            monthPoolEntryInvestor["Gain"] = investorGain
+                            monthPoolEntryInvestor["Monthly Gain"] = investorGain
                             monthPoolEntryInvestor["Return"] = investorReturn * 100
                             monthPoolEntryInvestor["MDdenominator"] = investorMDdenominator
                             ownershipPerc = investorEOM/poolNAV * 100 if poolNAV != 0 else 0
@@ -1810,7 +1911,7 @@ class returnsApp(QWidget):
                     for investorEntry in monthPoolEntryInvestorList:
                         for fundEntry in fundEntryList:
                             fundInvestorNAV = investorEntry["Ownership"] / 100 * fundEntry["NAV"]
-                            fundInvestorGain = fundEntry["Gain"] / monthPoolEntry["Gain"] * investorEntry["Gain"] if monthPoolEntry["Gain"] != 0 else 0
+                            fundInvestorGain = fundEntry["Monthly Gain"] / monthPoolEntry["Monthly Gain"] * investorEntry["Monthly Gain"] if monthPoolEntry["Monthly Gain"] != 0 else 0
                             fundInvestorMDdenominator = investorEntry["MDdenominator"] / monthPoolEntry["MDdenominator"] * fundEntry["MDdenominator"] if monthPoolEntry["MDdenominator"] != 0 else 0
                             fundInvestorReturn = fundInvestorGain / fundInvestorMDdenominator if fundInvestorMDdenominator != 0 else 0
                             fundInvestorOwnership = fundInvestorNAV /  fundEntry["NAV"] if fundEntry["NAV"] != 0 else 0
@@ -1818,7 +1919,7 @@ class returnsApp(QWidget):
                             fundInvestorUnfunded = fundEntry[nameHier["Unfunded"]["local"]] * fundInvestorOwnership
                             monthFundInvestorEntry = {"dateTime" : month["dateTime"], "Investor" : investorEntry["Investor"], "Pool" : pool, "Fund" : fundEntry["Fund"] ,
                                             "assetClass" : fundEntry["assetClass"], "subAssetClass" : fundEntry["subAssetClass"],
-                                            "NAV" : fundInvestorNAV, "Gain" : fundInvestorGain , "Return" :  fundInvestorReturn * 100, 
+                                            "NAV" : fundInvestorNAV, "Monthly Gain" : fundInvestorGain , "Return" :  fundInvestorReturn * 100, 
                                             "MDdenominator" : fundInvestorMDdenominator, "Ownership" : fundInvestorOwnership * 100,
                                             "Classification" : fundEntry["Classification"], nameHier["Family Branch"]["local"] : investorEntry[nameHier["Family Branch"]["local"]],
                                             nameHier["Commitment"]["local"] : fundInvestorCommitment, nameHier["Unfunded"]["local"] : fundInvestorUnfunded, 
@@ -1861,6 +1962,19 @@ class returnsApp(QWidget):
         else:
             backDate = 0
         return backDate
+    def checkVersion(self):
+        self.currentVersionAccess = False
+        try:
+            row = self.load_from_db("history")[0]
+            if row["currentVersion"] == currentVersion:
+                self.currentVersionAccess = True
+            else:
+                QMessageBox.warning(self,"Outdated Version", f"Your current version ({currentVersion}) is outdated. The current version is {row["currentVersion"]}. \n" + 
+                                    " Please request the newer version. \n Your version will run, but cannot access the shared data. This will be signifigantly slower and may have bugs/errors.")
+        except:
+            QMessageBox.warning(self,"Error checking version", f"An error occured checking that your version is up to date. This session has been granted limited access. \n "+
+                                "Your session will run, but cannot access the shared data. This will be signifigantly slower and may have bugs/errors. \n \n Try restarting the app." +
+                                " If this error persists, contact an admin.")
     def save_to_db(self, table, rows, action = "", query = "",inputs = None, keys = None):
         conn = sqlite3.connect(DATABASE_PATH)
         cur = conn.cursor()
@@ -1923,6 +2037,8 @@ class returnsApp(QWidget):
         header = re.sub(r'##\(.*\)##', '', label, flags=re.DOTALL)
         code = re.findall(r'##\(.*\)##', label, flags=re.DOTALL)[0]
         return header, code
+    def headerSortClosed(self):
+        self.populateReturnsTable(self.currentTableData)
     def orderColumns(self,keys):
         mode = self.tableBtnGroup.checkedButton().text()
         if mode == "Monthly Table":
@@ -1930,7 +2046,7 @@ class returnsApp(QWidget):
             dates = sorted(dates, reverse=True)
             keys = [d.strftime("%B %Y") for d in dates]
         elif mode == "Complex Table":
-            newOrder = ["NAV","Gain","Ownership (%)","MTD","QTD","YTD"] + [f"{y}YR" for y in yearOptions] + ["ITD"]
+            newOrder = ["NAV","Monthly Gain","Ownership (%)","MTD","QTD","YTD"] + [f"{y}YR" for y in yearOptions] + ["ITD"]
             ordered = [h for h in newOrder if h in keys]
             ordered += [h for h in keys if h not in newOrder]
             keys = ordered
@@ -1949,7 +2065,7 @@ class returnsApp(QWidget):
         rows = copy.deepcopy(origRows) #prevents alteration of self.returnsTableData
         for f in self.filterOptions:
             if f["key"] not in self.filterBtnExclusions and not self.filterRadioBtnDict[f["key"]].isChecked():
-                to_delete = [k for k,v in rows.items() if v["dataType"] == f["dataType"]]
+                to_delete = [k for k,v in rows.items() if v["dataType"] == "Total " + f["key"]]
                 for k in to_delete:
                     rows.pop(k)
         
@@ -1967,12 +2083,17 @@ class returnsApp(QWidget):
         for d in cleaned.values():
             d.pop("dataType", None)
 
-        col_keys = set()
-        for d in cleaned.values():
-            col_keys |= set(d.keys())
-        col_keys = list(col_keys)
+        if not self.headerSort.active or self.tableBtnGroup.checkedButton().text() == "Monthly Table":
+            col_keys = set()
+            for d in cleaned.values():
+                col_keys |= set(d.keys())
+            col_keys = list(col_keys)
 
-        col_keys = self.orderColumns(col_keys)
+            col_keys = self.orderColumns(col_keys)
+            exceptions = ("Return", "Ownership", "MDdenominator")
+            self.headerSort.set_items(col_keys,[item for item in col_keys if item not in exceptions])
+        else:
+            col_keys = self.headerSort.popup.get_checked_sorted_items()
 
         # 3) Resize & set horizontal headers (we no longer call setVerticalHeaderLabels)
         self.returnsTable.setRowCount(len(row_entries))
@@ -2156,9 +2277,85 @@ class underlyingDataWindow(QWidget):
 
         # Layout and table
         layout = QVBoxLayout(self)
+        buttonBox = QWidget()
+        buttonLayout = QHBoxLayout()
+        exportBtn = QPushButton("Export Data to Excel")
+        exportBtn.clicked.connect(self.exportTable)
+        buttonLayout.addWidget(exportBtn)
+        self.headerOptions = SortButtonWidget()
+        self.headerOptions.popup.popup_closed.connect(self.buildTable)
+        buttonLayout.addWidget(self.headerOptions)
+        buttonBox.setLayout(buttonLayout)
+        layout.addWidget(buttonBox)
         self.table = QTableWidget(self)
         layout.addWidget(self.table)
         self.success = False
+        self.headerOrder = ["Date", "TradeDate", "_source","Source name","Target name", "CashFlowSys", "ValueInSystemCurrency","Balancetype","TransactionType"]
+        self.buildTable()
+
+    def exportTable(self):
+        # 1) prompt user
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save as…", "", "Excel Files (*.xlsx)"
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".xlsx"):
+            path += ".xlsx"
+
+        def processExport():
+            try:
+                data = self.allData  # list of dicts
+
+                all_cols = self.allCols
+
+
+                # 4) create workbook
+                wb = Workbook()
+                ws = wb.active
+
+                rowStart = 1
+                for idx, colname in enumerate(all_cols, start=1):
+                    ws.cell(row=rowStart, column=idx, value=colname)
+
+
+                # 7) populate rows
+                for r, row_dict in enumerate(data, start=rowStart + 1):
+
+
+        
+                    # data cells with proper formatting
+                    for c, colname in enumerate(all_cols, start=1):
+                        val = row_dict.get(colname, None)
+                        cell = ws.cell(row=r, column=c, value=val)
+                        if isinstance(val, (int, float)):
+                            if colname not in percent_headers:
+                                # show with commas, two decimals
+                                cell.number_format = "#,##0.00"
+                            else:
+                                # interpret val as percentage (e.g. 10.5 → 10.5%)
+                                cell.value = val / 100.0
+                                cell.number_format = "0.00%"
+
+                # 8) autofit column widths
+                for idx, col_cells in enumerate(ws.columns, start=1):
+                    max_len = 0
+                    for cell in col_cells:
+                        if cell.value is not None:
+                            text = str(cell.value)
+                            max_len = max(max_len, len(text))
+                    ws.column_dimensions[get_column_letter(idx)].width = max_len + 2
+            except Exception as e:
+                gui_queue.put(lambda error = e, trace = traceback.format_exc(): QMessageBox.critical(self, "Processing error", f"{error} \n {trace}"))
+            try:
+                wb.save(path)
+            except Exception as e:
+                gui_queue.put(lambda error = e: QMessageBox.critical(self, "Save error", str(error)))
+            else:
+                gui_queue.put(lambda: QMessageBox.information(self, "Saved", f"Excel saved to:\n{path}"))
+                gui_queue.put(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(path)))
+        executor.submit(processExport)    
+    def buildTable(self):
         if self.parent.tableBtnGroup.checkedButton().text() == "Monthly Table":
             selectedMonth = datetime.strptime(self.parent.selectedCell["month"], "%B %Y")
             tranStart = selectedMonth.replace(day = 1)
@@ -2207,16 +2404,6 @@ class underlyingDataWindow(QWidget):
             for idx, table in enumerate(highTables.keys()):
                 query = "WHERE"
                 inputs = []
-                if self.parent.filterDict["Investor"].checkedItems() != []:
-                    checked = self.parent.filterDict["Investor"].checkedItems()
-                    placeholders = ','.join('?' for _ in checked) 
-                    inputs.extend(checked)
-                    query += f" [Source name] in ({placeholders}) AND"
-                if self.parent.filterDict["Family Branch"].checkedItems() != []:
-                    checked = self.parent.filterDict["Family Branch"].checkedItems()
-                    placeholders = ','.join('?' for _ in checked) 
-                    inputs.extend(checked)
-                    query += f" [Source name] in ({placeholders}) AND"
                 for hierIdx, tier in enumerate(hier):
                     for filter in self.parent.filterOptions:
                         dynName = filter.get("dynNameHigh")
@@ -2233,7 +2420,7 @@ class underlyingDataWindow(QWidget):
                     inputs.append(self.parent.fundPoolLinks.get(header))
                 for filter in self.parent.filterOptions:
                     filterSelections = self.parent.filterDict[filter["key"]].checkedItems()
-                    dynName = filter.get("dynNameLow")
+                    dynName = filter.get("dynNameHigh")
                     if filter["key"] not in ("Classification") and filterSelections != [] and dynName is not None:
                         if filter["key"] == "assetClass" and idx == 1:
                             dynName = "SysProp_FundTargetNameAssetClass(E)"
@@ -2260,7 +2447,7 @@ class underlyingDataWindow(QWidget):
                 for row in rows or []:
                     row['_source'] = table
                     all_rows.append(row)
-        
+        self.allData = all_rows
         for idx, table in enumerate(lowTables.keys()):
             query = "WHERE"
             inputs = []
@@ -2328,19 +2515,25 @@ class underlyingDataWindow(QWidget):
         all_rows.sort(key=lambda r: parse_dt(r.get('Date', '')))
 
         # 4) Collect the union of all column keys
-        all_cols = set()
-        for row in all_rows:
-            all_cols.update(row.keys())
-        all_cols = list(all_cols)
+        if not self.headerOptions.active:
+            all_cols = self.headerOrder
+            for row in all_rows:
+                for key in row.keys():
+                    if key not in all_cols:
+                        all_cols.append(key)
+            self.allCols = all_cols
+            self.headerOptions.set_items(all_cols)
+        else:
+            self.allCols = self.headerOptions.popup.get_checked_sorted_items()
 
         # 5) Configure the table widget
         self.table.setRowCount(len(all_rows))
-        self.table.setColumnCount(len(all_cols))
-        self.table.setHorizontalHeaderLabels(all_cols)
+        self.table.setColumnCount(len(self.allCols))
+        self.table.setHorizontalHeaderLabels(self.allCols)
 
         # 6) Populate each cell
         for r, row in enumerate(all_rows):
-            for c, key in enumerate(all_cols):
+            for c, key in enumerate(self.allCols):
                 raw = row.get(key,"")
                 try:
                     num = float(raw)
@@ -2415,15 +2608,20 @@ class PopupPanel(QWidget):
         layout.addWidget(self.clear_btn)
         self.all_btn = QPushButton("Select All", self)
         layout.addWidget(self.all_btn)
+        self.searchBar = QLineEdit()
+        self.searchBar.setPlaceholderText("Search")
+        self.searchBar.textChanged.connect(self.parent.updateOptionVisibility)
+        layout.addWidget(self.searchBar)
         # scrollable checkbox area
         self.scroll = QScrollArea(self)
         self.scroll.setWidgetResizable(True)
         container = QWidget()
+        container.setObjectName("subPanel")
         self.box_layout = QVBoxLayout(container)
         self.box_layout.addStretch()
         container.setLayout(self.box_layout)
         self.scroll.setWidget(container)
-        self.scroll.setFixedHeight(150)
+        #self.scroll.setFixedHeight(150)
         layout.addWidget(self.scroll)
 
     def hideEvent(self, event):
@@ -2446,6 +2644,7 @@ class MultiSelectBox(QWidget):
 
         # ——— pop-up panel ———
         self.popup = PopupPanel(self)
+        self.popup.setObjectName("mainPage")
         # wire up clear button
         self.popup.clear_btn.clicked.connect(self.clearSelection)
         self.popup.all_btn.clicked.connect(self.selectAll)
@@ -2459,18 +2658,40 @@ class MultiSelectBox(QWidget):
         main.addWidget(self.line_edit)
         main.setContentsMargins(0,0,0,0)
         self.setLayout(main)
+    def updateOptionVisibility(self):
+        for cbKey in self._checkboxes.keys():
+            self._checkboxes[cbKey].setVisible(self.popup.searchBar.text().lower() in self._checkboxes[cbKey].text().lower())
     def hierarchyMode(self):
         self.hierarchy = True
     def _togglePopup(self):
         if self.popup.isVisible():
             self.popup.hide()
         else:
-            p = self.line_edit.mapToGlobal(QPoint(0, self.line_edit.height()))
-            self.popup.move(p)
-            self.popup.resize(self.line_edit.width(),
-                              self.popup.sizeHint().height())
-            self.popup.show()
             self.choiceChange = False
+            self.popup.adjustSize()
+
+            # 1. Get global position under the line edit
+            pos = self.line_edit.mapToGlobal(QPoint(0, self.line_edit.height()))
+            popup_size = self.popup.sizeHint()
+
+            # 2. Get screen geometry
+            screen_geom = QApplication.desktop().availableGeometry(self)
+
+            # 3. Clamp the right edge
+            if pos.x() + popup_size.width() > screen_geom.right():
+                pos.setX(screen_geom.right() - popup_size.width())
+
+            # 4. Clamp the bottom edge
+            if pos.y() + popup_size.height() > screen_geom.bottom():
+                pos.setY(screen_geom.bottom() - popup_size.height())
+
+            # 5. Prevent left/top overflow
+            pos.setX(max(screen_geom.left(), pos.x()))
+            pos.setY(max(screen_geom.top(), pos.y()))
+
+            # 6. Apply
+            self.popup.move(pos)
+            self.popup.show()
     def addItems(self,items):
         for item in items:
             self.addItem(item)
@@ -2514,6 +2735,7 @@ class MultiSelectBox(QWidget):
     def clearSelection(self):
         for cb in self._checkboxes.values():
             cb.setChecked(False)
+        self.popup.searchBar.setText("")
         self._updateLine()
     def selectAll(self):
         for cb in self._checkboxes.values():
@@ -2541,6 +2763,171 @@ class MultiSelectBox(QWidget):
             # the old single-line, comma-separated format
             display = ", ".join(sel)
         self.line_edit.setText(display)
+
+class SortPopup(QDialog):
+    popup_closed = pyqtSignal()
+
+    def __init__(self, items=None, checked_set=None, parent=None):
+        super().__init__(parent, Qt.Popup)
+        self.setWindowTitle("Sort Items")
+        self.setMinimumSize(200, 300)
+
+        self.list_widget = QListWidget(self)
+        self.list_widget.setDragDropMode(QListWidget.InternalMove)
+        self.list_widget.setDefaultDropAction(Qt.MoveAction)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Select and Sort Headers:"))
+        layout.addWidget(self.list_widget)
+
+        self.set_items(items or [], checked_set or set())
+
+        self.list_widget.itemChanged.connect(self.on_item_toggled)
+
+    def set_items(self, items, checked_set):
+        self.list_widget.blockSignals(True)
+        self.list_widget.clear()
+        for item in items:
+            list_item = QListWidgetItem(item)
+            list_item.setFlags(list_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsDragEnabled)
+            list_item.setCheckState(Qt.Checked if item in checked_set else Qt.Unchecked)
+            self.list_widget.addItem(list_item)
+        self.list_widget.blockSignals(False)
+
+    def on_item_toggled(self, item: QListWidgetItem):
+        # Remove the item from current position
+        row = self.list_widget.row(item)
+        self.list_widget.takeItem(row)
+
+        if item.checkState() == Qt.Unchecked:
+            # Add to end of list
+            self.list_widget.addItem(item)
+        else:
+            # Insert before first unchecked item
+            insert_index = self.list_widget.count()
+            for i in range(self.list_widget.count()):
+                if self.list_widget.item(i).checkState() == Qt.Unchecked:
+                    insert_index = i
+                    break
+            self.list_widget.insertItem(insert_index, item)
+
+        # Reselect the item for visual consistency (optional)
+        self.list_widget.setCurrentItem(item)
+
+    def get_checked_sorted_items(self):
+        return [
+            self.list_widget.item(i).text()
+            for i in range(self.list_widget.count())
+            if self.list_widget.item(i).checkState() == Qt.Checked
+        ]
+
+    def get_all_items(self):
+        return [self.list_widget.item(i).text() for i in range(self.list_widget.count())]
+
+    def get_checked_items_set(self):
+        return {
+            self.list_widget.item(i).text()
+            for i in range(self.list_widget.count())
+            if self.list_widget.item(i).checkState() == Qt.Checked
+        }
+
+    def closeEvent(self, event):
+        self.popup_closed.emit()
+        super().closeEvent(event)
+
+
+class SortButtonWidget(QWidget):
+    popup_closed = pyqtSignal(list)  # emits checked, sorted items
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.items = []
+        self.checked_items = set()
+        self.active = False
+
+        self.button = QPushButton("Header Options", self)
+        self.button.clicked.connect(self.show_popup)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.button)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.popup = SortPopup(self.items, self.checked_items, self)
+
+    def add_item(self, item, checked=True):
+        self.items.append(item)
+        if checked:
+            self.checked_items.add(item)
+        self.popup.set_items(self.items,self.checked_items)
+        self.active = True
+
+    def set_items(self, items, checked_items=None):
+        self.items = list(items)
+        self.checked_items = set(checked_items or items)
+        self.popup.set_items(self.items,self.checked_items)
+        self.active = True
+
+    def show_popup(self):
+        if self.popup.isVisible():
+            self.popup.hide()
+        else:
+            self.popup.popup_closed.connect(self.on_popup_closed)
+
+            button_pos = self.button.mapToGlobal(QPoint(0, self.button.height()))
+            self.popup.move(button_pos)
+            self.popup.show()
+
+    def on_popup_closed(self):
+        if self.popup:
+            self.items = self.popup.get_all_items()
+            self.checked_items = self.popup.get_checked_items_set()
+            #self.popup_closed.emit(self.popup.get_checked_sorted_items())
+            self.popup.hide()
+
+class SmartStretchTable(QTableWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        # Use interactive resizing by default
+        self.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+
+        # Watch for resize events to re-evaluate
+        self.viewport().installEventFilter(self)
+
+        # Optional: Smooth scrolling
+        self.setHorizontalScrollMode(self.ScrollPerPixel)
+
+    def eventFilter(self, obj, event):
+        if obj == self.viewport():
+            QTimer.singleShot(0, self._maybeStretchColumns)
+        return super().eventFilter(obj, event)
+
+    def _maybeStretchColumns(self):
+        col_count = self.columnCount()
+        if col_count == 0:
+            return
+
+        total_width = sum(self.columnWidth(i) for i in range(col_count))
+        available = self.viewport().width()
+
+        if total_width < available:
+            stretch_width = available // col_count
+            for i in range(col_count):
+                self.setColumnWidth(i, stretch_width)
+
+    def updateData(self, data):
+        # Example dynamic population method
+        row_count = len(data)
+        col_count = len(data[0]) if row_count else 0
+
+        self.setRowCount(row_count)
+        self.setColumnCount(col_count)
+
+        for r in range(row_count):
+            for c in range(col_count):
+                self.setItem(r, c, QTableWidgetItem(str(data[r][c])))
+
+        QTimer.singleShot(0, self._maybeStretchColumns)
 
 if __name__ == '__main__':
     key = os.environ.get(dynamoAPIenvName)
