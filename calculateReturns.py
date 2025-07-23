@@ -131,7 +131,10 @@ class returnsApp(QWidget):
                             background-color: #51AE2B;
                         }
                         QPushButton#exportBtn:hover {
-                                background-color: #429321;
+                            background-color: #429321;
+                        }
+                        QPushButton#cancelBtn {
+                            background-color: #D63131;
                         }
                         QLabel, QRadioButton, QCheckBox, QProgressBar {
                             color: white
@@ -163,9 +166,9 @@ class returnsApp(QWidget):
         self.stack = QStackedWidget()
         self.init_global_widgets()
 
-        self.init_api_key_page() #1
-        self.init_returns_page() #2
-        self.init_calculation_page() #3
+        self.init_api_key_page() #0
+        self.init_returns_page() #1
+        self.init_calculation_page() #2
 
         self.stack.setCurrentIndex(start_index)
         self.main_layout.addWidget(self.stack)
@@ -193,6 +196,7 @@ class returnsApp(QWidget):
         self.calculationLoadingBar.setRange(0,100)
         self.calculationLabel = QLabel()
         self.cancelCalcBtn = QPushButton("Cancel Calculations")
+        self.cancelCalcBtn.setObjectName("cancelBtn")
         self.cancelCalcBtn.clicked.connect(self.cancelCalc)
         loadLay.addWidget(self.calculationLabel)
         loadLay.addWidget(self.calculationLoadingBar)
@@ -405,18 +409,22 @@ class returnsApp(QWidget):
         self.dataStartSelect.currentTextChanged.connect(self.buildReturnTable)
     def init_data_processing(self):
         self.calcSubmitted = False
-        lastImport = self.load_from_db("history") if len(self.load_from_db("history")) == 1 else None
-        if not testDataMode and lastImport is None:
+        lastImportDB = self.load_from_db("history") if len(self.load_from_db("history")) == 1 else None
+        if not testDataMode and lastImportDB is None:
             #pull data is there is no data pulled yet
             executor.submit(lambda: self.pullData())
         elif not testDataMode:
-            lastImportString = lastImport[0]["lastImport"]
+            lastImportString = lastImportDB[0]["lastImport"]
             lastImport = datetime.strptime(lastImportString, "%B %d, %Y @ %I:%M %p")  
             self.lastImportLabel.setText(f"Last Data Import: {lastImportString}")
             now = datetime.now()
             if lastImport.month != now.month or now > lastImport + relativedelta(hours=2):
                 #pull data if in a new month or 1 days have elapsed
                 executor.submit(self.pullData)
+            elif lastImportDB[0]["lastImport"] != lastImportDB[0].get("lastCalculation", "None"):
+                self.earliestChangeDate = datetime.strptime(lastImportDB[0].get("changeDate"), "%B %d, %Y @ %I:%M %p")
+                self.findConsolidatedFunds()
+                executor.submit(self.calculateReturn)
             else:
                 calculations = self.load_from_db("calculations")
                 self.findConsolidatedFunds()
@@ -1274,77 +1282,166 @@ class returnsApp(QWidget):
                     if i == 0: #transaction
                         if j == 0: #fund level
                             payload = {
+                                        "advf": {
+                                            "e": [
+                                                {
+                                                    "_name": "InvestmentTransaction",
+                                                    "e": [
+                                                        {
+                                                            "_name": "InvestorAccount",
+                                                            "_not": True
+                                                        },
+                                                        {
+                                                            "_name": "Fund",
+                                                            "rule": [
+                                                                {
+                                                                    "_op": "is",
+                                                                    "_prop": "Fund Pipeline Status",
+                                                                    "values": [
+                                                                        {
+                                                                            "id": "d33af081-c4c8-431b-a98b-de9eaf576324",
+                                                                            "es": "L_FundPipelineStatus",
+                                                                            "name": "I - Internal"
+                                                                        }
+                                                                    ]
+                                                                }
+                                                            ]
+                                                        }
+                                                    ],
+                                                    "rule": [
+                                                        {
+                                                            "_op": "not_null",
+                                                            "_prop": "Cash flow change (USD)"
+                                                        },
+                                                        {
+                                                            "_op": "not_null",
+                                                            "_prop": "Investing entity"
+                                                        }
+                                                    ]
+                                                },
+                                                {
+                                                    "_name": "InvestmentTransaction",
+                                                    "e": [
+                                                        {
+                                                            "_name": "InvestorAccount",
+                                                            "_not": True
+                                                        },
+                                                        {
+                                                            "_name": "Fund",
+                                                            "rule": [
+                                                                {
+                                                                    "_op": "is",
+                                                                    "_prop": "Fund Pipeline Status",
+                                                                    "values": [
+                                                                        {
+                                                                            "id": "d33af081-c4c8-431b-a98b-de9eaf576324",
+                                                                            "es": "L_FundPipelineStatus",
+                                                                            "name": "I - Internal"
+                                                                        }
+                                                                    ]
+                                                                }
+                                                            ]
+                                                        }
+                                                    ],
+                                                    "rule": [
+                                                        {
+                                                            "_op": "not_null",
+                                                            "_prop": "Investing entity"
+                                                        },
+                                                        {
+                                                            "_op": "any_item",
+                                                            "_prop": "Transaction type",
+                                                            "values": [
+                                                                [
+                                                                    {
+                                                                        "id": "5327639c-8160-4d85-9b23-8c6bf60c5406",
+                                                                        "es": "L_TransactionType",
+                                                                        "name": "Commitment"
+                                                                    },
+                                                                    {
+                                                                        "id": "37339e7c-1c24-4d13-9d17-86d0efe079b3",
+                                                                        "es": "L_TransactionType",
+                                                                        "name": "Transfer of commitment"
+                                                                    },
+                                                                    {
+                                                                        "id": "0f8f8671-8579-49d7-b604-05300b6a3990",
+                                                                        "es": "L_TransactionType",
+                                                                        "name": "Transfer of commitment (out)"
+                                                                    },
+                                                                    {
+                                                                        "id": "5e098d83-70b0-4135-a629-aff19048fb1c",
+                                                                        "es": "L_TransactionType",
+                                                                        "name": "Secondary - Original commitment (by secondary seller)"
+                                                                    }
+                                                                ]
+                                                            ]
+                                                        }
+                                                    ]
+                                                }
+                                            ]
+                                        },
+                                        "mode": "compact"
+                                    }
+                        else: #investor level
+                            payload = {
+                                        "advf": {
+                                            "e": [
+                                                {
+                                                    "_name": "InvestmentTransaction",
+                                                    "e": [
+                                                        {
+                                                            "_name": "InvestorAccount"
+                                                        }
+                                                    ],
+                                                    "rule": [
+                                                        {
+                                                            "_op": "not_null",
+                                                            "_prop": "Cash flow change (USD)"
+                                                        },
+                                                        {
+                                                            "_op": "not_null",
+                                                            "_prop": "Investing entity"
+                                                        }
+                                                    ]
+                                                }
+                                            ]
+                                        },
+                                        "mode": "compact"
+                                    }
+                        
+                    else: #account (position)
+                        if j == 0: #fund level
+                            payload = {
                                     "advf": {
                                         "e": [
                                             {
-                                                "_name": "InvestmentTransaction",
+                                                "_name": "InvestmentPosition",
+                                                "e": [
+                                                    {
+                                                        "_name": "Fund",
+                                                        "rule": [
+                                                            {
+                                                                "_op": "is",
+                                                                "_prop": "Fund Pipeline Status",
+                                                                "values": [
+                                                                    {
+                                                                        "id": "d33af081-c4c8-431b-a98b-de9eaf576324",
+                                                                        "es": "L_FundPipelineStatus",
+                                                                        "name": "I - Internal"
+                                                                    }
+                                                                ]
+                                                            }
+                                                        ]
+                                                    },
+                                                    {
+                                                        "_name": "InvestorAccount",
+                                                        "_not": True
+                                                    }
+                                                ],
                                                 "rule": [
                                                     {
                                                         "_op": "not_null",
-                                                        "_prop": "Cash flow change"
-                                                    },
-                                                    {
-                                                        "_op": "all",
-                                                        "_prop": "Investing entity",
-                                                        "values": [
-                                                            "pool, llc"
-                                                        ]
-                                                    },
-                                                    {
-                                                        "_op": "between_date",
-                                                        "_prop": "Effective date",
-                                                        "values": [
-                                                            f"{startDate}",
-                                                            f"{endDate}"
-                                                        ]
-                                                    }
-                                                ]
-                                            },
-                                            {
-                                                "_name": "InvestmentTransaction",
-                                                "rule": [
-                                                    {
-                                                        "_op": "any_item",
-                                                        "_prop": "Transaction type",
-                                                        "values": [
-                                                            [
-                                                                {
-                                                                    "id": "5327639c-8160-4d85-9b23-8c6bf60c5406",
-                                                                    "es": "L_TransactionType",
-                                                                    "name": "Commitment"
-                                                                },
-                                                                {
-                                                                    "id": "37339e7c-1c24-4d13-9d17-86d0efe079b3",
-                                                                    "es": "L_TransactionType",
-                                                                    "name": "Transfer of commitment"
-                                                                },
-                                                                {
-                                                                    "id": "0f8f8671-8579-49d7-b604-05300b6a3990",
-                                                                    "es": "L_TransactionType",
-                                                                    "name": "Transfer of commitment (out)"
-                                                                },
-                                                                {
-                                                                    "id": "5e098d83-70b0-4135-a629-aff19048fb1c",
-                                                                    "es": "L_TransactionType",
-                                                                    "name": "Secondary - Original commitment (by secondary seller)"
-                                                                }
-                                                            ]
-                                                        ]
-                                                    },
-                                                    {
-                                                        "_op": "all",
-                                                        "_prop": "Investing entity",
-                                                        "values": [
-                                                            "pool, llc"
-                                                        ]
-                                                    },
-                                                    {
-                                                        "_op": "between_date",
-                                                        "_prop": "Effective date",
-                                                        "values": [
-                                                            f"{startDate}",
-                                                            f"{endDate}"
-                                                        ]
+                                                        "_prop": "Investing entity"
                                                     }
                                                 ]
                                             }
@@ -1352,96 +1449,28 @@ class returnsApp(QWidget):
                                     },
                                     "mode": "compact"
                                 }
-                        else:
+                        else: #investor level
                             payload = {
-                            "advf": {
-                                "e": [
-                                    {
-                                        "_name": "InvestmentTransaction",
-                                        "rule": [
-                                            {
-                                                "_op": "not_null",
-                                                "_prop": "Cash flow change"
-                                            },
-                                            {
-                                                "_op": "all",
-                                                "_prop": f"{investmentLevel}",
-                                                "values": [
-                                                    "pool, llc"
+                                            "advf": {
+                                                "e": [
+                                                    {
+                                                        "_name": "InvestmentPosition",
+                                                        "e": [
+                                                            {
+                                                                "_name": "InvestorAccount"
+                                                            }
+                                                        ],
+                                                        "rule": [
+                                                            {
+                                                                "_op": "not_null",
+                                                                "_prop": "Investing entity"
+                                                            }
+                                                        ]
+                                                    }
                                                 ]
                                             },
-                                            {
-                                                "_op": "between_date",
-                                                "_prop": "Effective date",
-                                                "values": [
-                                                    f"{startDate}",
-                                                    f"{endDate}"
-                                                ]
-                                            }
-                                        ]
-                                    }
-                                ]
-                            },
-                            "mode": "compact"
-                        }
-                        
-                    else: #account (position)
-                        if j == 0: #fund level
-                            payload = {
-                                        "advf": {
-                                            "e": [
-                                                {
-                                                    "_name": "InvestmentPosition",
-                                                    "rule": [
-                                                        {
-                                                            "_op": "all",
-                                                            "_prop": f"{investmentLevel}",
-                                                            "values": [
-                                                                "pool, llc"
-                                                            ]
-                                                        },
-                                                        {
-                                                            "_op": "between_date",
-                                                            "_prop": "As of date",
-                                                            "values": [
-                                                                f"{startDate}",
-                                                                f"{endDate}"
-                                                            ]
-                                                        }
-                                                    ]
-                                                }
-                                            ]
-                                        },
-                                        "mode": "compact"
-                                    }
-                        else:
-                            payload = {
-                                        "advf": {
-                                            "e": [
-                                                {
-                                                    "_name": "InvestmentPosition",
-                                                    "rule": [
-                                                        {
-                                                            "_op": "all",
-                                                            "_prop": "Investment in",
-                                                            "values": [
-                                                                "pool, llc"
-                                                            ]
-                                                        },
-                                                        {
-                                                            "_op": "between_date",
-                                                            "_prop": "As of date",
-                                                            "values": [
-                                                                f"{startDate}",
-                                                                f"{endDate}"
-                                                            ]
-                                                        }
-                                                    ]
-                                                }
-                                            ]
-                                        },
-                                        "mode": "compact"
-                                    }
+                                            "mode": "compact"
+                                        }
                     rows = []
                     idx = 0
                     while rows in ([],None) and idx < 3: #if call fails, tries again
@@ -1592,16 +1621,15 @@ class returnsApp(QWidget):
             if skipCalculations:
                 print("Earliest change: ", self.earliestChangeDate)
             gui_queue.put(lambda: self.apiLoadingBar.setValue(100))
-            gui_queue.put(lambda: self.stack.setCurrentIndex(2))
             
             while not gui_queue.empty(): #wait to assure database has been updated in main thread before continuing
                 time.sleep(0.2)
             
 
 
-            self.save_to_db("history",None,action="reset") #clears history then updates most recent import
             currentTime = datetime.now().strftime("%B %d, %Y @ %I:%M %p")
-            self.save_to_db("history",[{"lastImport" : currentTime, "currentVersion": currentVersion}])
+            changeData = datetime.strftime(self.earliestChangeDate, "%B %d, %Y @ %I:%M %p")
+            self.save_to_db(None,None,query="UPDATE history SET [lastImport] = ?, [changeDate] = ?", inputs=(currentTime,changeData), action="replace")
             self.lastImportLabel.setText(f"Last Data Import: {currentTime}")
             gui_queue.put(lambda: self.apiLoadingBarBox.setVisible(False))
             self.calculateReturn()
@@ -1935,6 +1963,11 @@ class returnsApp(QWidget):
                     if key not in keys:
                         keys.append(key)
             self.save_to_db("calculations",calculations, keys=keys)
+            try:
+                apiPullTime = self.load_from_db("history")[0]["lastImport"]
+                self.save_to_db(None,None,query="UPDATE history SET [lastCalculation] = ?", inputs=(apiPullTime,), action="replace")
+            except:
+                print("failed to update last calculation time")
             gui_queue.put( lambda: self.populate(self.calculationTable,calculations,keys = keys))
             gui_queue.put( lambda: self.buildReturnTable())
             gui_queue.put(lambda: self.calculationLoadingBox.setVisible(False))
@@ -1964,8 +1997,10 @@ class returnsApp(QWidget):
         return backDate
     def checkVersion(self):
         self.currentVersionAccess = False
+        self.globalVersion = None
         try:
             row = self.load_from_db("history")[0]
+            self.globalVersion = row["currentVersion"]
             if row["currentVersion"] == currentVersion:
                 self.currentVersionAccess = True
             else:
