@@ -1731,7 +1731,7 @@ class returnsApp(QWidget):
             try:
                 conn = sqlite3.connect(DATABASE_PATH)
                 c = conn.cursor()
-                c.execute("FROM progress SELECT status,pool")
+                c.execute("SELECT status,pool FROM progress")
                 statusLines = c.fetchall()
                 failed = []
                 working = []
@@ -1741,10 +1741,10 @@ class returnsApp(QWidget):
                     elif line["status"] == "Working":
                         working.append(line)
                 if len(failed) > 0:
-                    print(f"Halting progress watch due to worker '{failed.get("pool","Bad Pull")}' failure.")
+                    print(f"Halting progress watch due to worker '{failed[0].get("pool","Bad Pull")}' failure.")
                     self.queue.append(-86) #will halt the queue
                     return
-                elif len(working) == 0:
+                elif len(working) == 0 and len(statusLines) == len(self.pools):
                     print("All workers have declared complete.")
                     self.queue.append(100) #backup in case the numbers below fail
                 c.execute("SELECT SUM(completed), SUM(total) FROM progress")
@@ -1756,7 +1756,8 @@ class returnsApp(QWidget):
                     self.queue.append(percent)
                     if complete >= total:
                         return
-            except Exception:
+            except Exception as e:
+                print(f"Error watching database: {e}")
                 pass
             time.sleep(3)
     def update_from_queue(self):
@@ -1768,7 +1769,10 @@ class returnsApp(QWidget):
                 self.calcCompletion()
             elif val == -86:
                 self.timer.stop()
-                QMessageBox.warning(self,"Calculation Failure", "A worker thread has failed. Calculations will not be properly completed. Restart app.")
+                QMessageBox.warning(self,"Calculation Failure", "A worker thread has failed. Calculations will not be properly completed.")
+                self.pool.terminate()
+                self.pool.join()
+                
     def calcCompletion(self):
         try:
             print("Checking worker completion...")
@@ -1777,7 +1781,7 @@ class returnsApp(QWidget):
             calculations = []
             for fut in self.futures:
                 try:
-                    calculations.append(fut.get())
+                    calculations.extend(fut.get())
                 except Exception as e:
                     print(f"Error appending calculations: {e}")
             keys = []
@@ -1956,7 +1960,9 @@ class returnsApp(QWidget):
 
         calcTableModel = DictListModel(rows,headers, self)
         table.setModel(calcTableModel)
-def save_to_db(table, rows, action = "", query = "",inputs = None, keys = None, connection = None):
+def save_to_db(table, rows, action = "", query = "",inputs = None, keys = None, connection = None, lock = None):
+    if lock is not None:
+        lock.acquire()
     if connection is None:
         conn = sqlite3.connect(DATABASE_PATH)
         cur = conn.cursor()
@@ -2021,7 +2027,11 @@ def save_to_db(table, rows, action = "", query = "",inputs = None, keys = None, 
         conn.close()
     else:
         cur.close()
-def load_from_db(table, condStatement = "",parameters = None, cursor = None):
+    if lock is not None:
+        lock.release()
+def load_from_db(table, condStatement = "",parameters = None, cursor = None, lock = None):
+    if lock is not None:
+        lock.acquire()
     # Transactions
     if os.path.exists(DATABASE_PATH):
         if cursor is None:
@@ -2040,6 +2050,8 @@ def load_from_db(table, condStatement = "",parameters = None, cursor = None):
             rows = [dict(zip(cols, row)) for row in cur.fetchall()]
             if cursor is None:
                 conn.close()
+            if lock is not None:
+                lock.release()
             return rows
         except Exception as e:
             try:
@@ -2053,8 +2065,12 @@ def load_from_db(table, condStatement = "",parameters = None, cursor = None):
                     conn.close()
             except:
                 pass
+            if lock is not None:
+                lock.release()
             return []
     else:
+        if lock is not None:
+            lock.release()
         return []
 def updateStatus(pool,totalLoops, lock, status = "Working", connection = None):
     failure = False
@@ -2067,12 +2083,12 @@ def updateStatus(pool,totalLoops, lock, status = "Working", connection = None):
             conn = connection
         c = conn.cursor()
 
-        c.execute("FROM progress SELECT status WHERE status = ?",("Failed",))
+        c.execute("SELECT status FROM progress WHERE status = ?",("Failed",))
         failed = c.fetchall()
         if len(failed) > 0:
             failure = True
         # Update or insert progress for this worker
-        if status != "Working":
+        if status == "Working":
             c.execute("""
                 INSERT INTO progress (pool, completed, total,status)
                 VALUES (?, 1, ?,?)
@@ -2109,13 +2125,13 @@ def processPool(poolData : dict,selfData : dict, lock):
             placeholders = ", ".join("?" for _ in oldTimePulls)
             inputs = oldTimePulls
             inputs.append(pool)
-            calculations = load_from_db("calculations",f"WHERE [dateTime] IN ({placeholders}) AND [Pool] = ?", tuple(inputs), cursor=calcCursor)
+            calculations = load_from_db("calculations",f"WHERE [dateTime] IN ({placeholders}) AND [Pool] = ?", tuple(inputs), cursor=calcCursor, lock=lock)
 
         else:
             newMonths = months
         for month in newMonths:
             totalDays = int(datetime.strptime(month["endDay"], "%Y-%m-%dT%H:%M:%S").day  - datetime.strptime(month["tranStart"], "%Y-%m-%dT%H:%M:%S").day) + 1
-            poolFunds = load_from_db("positions_low", f"WHERE [Source name] = ? AND [Date] BETWEEN ? AND ?",(pool,month["accountStart"],month["endDay"]), cursor=calcCursor)
+            poolFunds = load_from_db("positions_low", f"WHERE [Source name] = ? AND [Date] BETWEEN ? AND ?",(pool,month["accountStart"],month["endDay"]), cursor=calcCursor, lock=lock)
             #find MD denominator for each investor
             #find total gain per pool
             funds = []
@@ -2137,7 +2153,7 @@ def processPool(poolData : dict,selfData : dict, lock):
                     else:
                         endEntries[account["Target name"]].append(account)
 
-            hiddenFunds = load_from_db("transactions_low", f"WHERE [Source name] = ? AND [Date] BETWEEN ? AND ?",(pool,month["accountStart"],month["endDay"]), cursor=calcCursor)
+            hiddenFunds = load_from_db("transactions_low", f"WHERE [Source name] = ? AND [Date] BETWEEN ? AND ?",(pool,month["accountStart"],month["endDay"]), cursor=calcCursor, lock=lock)
             #funds that do not have account positions. Just transactions that should not appear as a fund (ex: deferred liabilities)
             allPoolTransactions = {}
             for transaction in hiddenFunds:
@@ -2232,11 +2248,11 @@ def processPool(poolData : dict,selfData : dict, lock):
                                             "Balancetype" : "Calculated_R", "ExposureAssetClass" : assetClass, "ExposureAssetClassSub-assetClass(E)" : subAssetClass,
                                             nameHier["Commitment"]["local"] : commitment, nameHier["Unfunded"]["local"] : unfunded,
                                             nameHier["sleeve"]["local"] : fundList[fund]}
-                        save_to_db("positions_low",fundEOMentry, action="add", connection=calcConnection)
+                        save_to_db("positions_low",fundEOMentry, action="add", connection=calcConnection, lock=lock)
                     else:
                         query = f"UPDATE positions_low SET [{nameHier['Commitment']["local"]}] = ? , [{nameHier['Unfunded']["local"]}] = ?, [{nameHier["sleeve"]["local"]}] = ? WHERE [Source name] = ? AND [Target name] = ? AND [Date] = ?"
                         inputs = (commitment,unfunded,fundList.get(fund),pool,fund,month["endDay"])
-                        save_to_db("positions_low",None, action = "replace", query=query, inputs = inputs, connection=calcConnection)
+                        save_to_db("positions_low",None, action = "replace", query=query, inputs = inputs, connection=calcConnection, lock=lock)
                     poolGainSum += fundGain
                     poolMDdenominator += fundMDdenominator
                     poolNAV += fundNAV
@@ -2269,7 +2285,7 @@ def processPool(poolData : dict,selfData : dict, lock):
             
             investorStartEntries = {}
             investorEndEntries = {}
-            investorPositions = load_from_db("positions_high", f"WHERE [Target name] = ? AND [Date] BETWEEN ? AND ?",(pool,month["accountStart"],month["endDay"]), cursor=calcCursor)
+            investorPositions = load_from_db("positions_high", f"WHERE [Target name] = ? AND [Date] BETWEEN ? AND ?",(pool,month["accountStart"],month["endDay"]), cursor=calcCursor, lock=lock)
             for pos in investorPositions:
                 investor = pos["Source name"]
                 if pos["Date"] == month["accountStart"]:
@@ -2284,7 +2300,7 @@ def processPool(poolData : dict,selfData : dict, lock):
                         investorEndEntries[investor].append(pos)
 
             allInvestorTransactions = {}
-            transactions = load_from_db("transactions_high",f"WHERE [Target name] = ? AND [Date] BETWEEN ? AND ?", (pool,month["tranStart"],month["endDay"]), cursor=calcCursor)
+            transactions = load_from_db("transactions_high",f"WHERE [Target name] = ? AND [Date] BETWEEN ? AND ?", (pool,month["tranStart"],month["endDay"]), cursor=calcCursor, lock=lock)
             for tran in transactions:
                 investor = pos["Source name"]
                 if investor not in allInvestorTransactions:
@@ -2355,10 +2371,10 @@ def processPool(poolData : dict,selfData : dict, lock):
                                     "Balancetype" : "Calculated_R", "ExposureAssetClass" : tempInvestorDicts[investor]["ExposureAssetClass"],
                                     "ExposureAssetClassSub-assetClass(E)" : tempInvestorDicts[investor]["ExposureAssetClassSub-assetClass(E)"],
                                     nameHier["Family Branch"]["dynHigh"] : tempInvestorDicts[investor][nameHier["Family Branch"]["local"]]}
-                        save_to_db("positions_high",EOMentry, action="add", connection=calcConnection)
+                        save_to_db("positions_high",EOMentry, action="add", connection=calcConnection, lock=lock)
                     else:
                         query = "UPDATE positions_high SET Value = ? WHERE [Source name] = ? AND [Target name] = ? AND [Date] = ?"
-                        save_to_db("positions_high",None, action = "replace", query=query, inputs = inputs, connection=calcConnection)
+                        save_to_db("positions_high",None, action = "replace", query=query, inputs = inputs, connection=calcConnection, lock=lock)
             monthPoolEntry["Ownership"] = poolOwnershipSum
             for investorEntry in monthPoolEntryInvestorList:
                 for fundEntry in fundEntryList:
@@ -3134,6 +3150,7 @@ class SmartStretchTable(QTableWidget):
         QTimer.singleShot(0, self._maybeStretchColumns)
 
 if __name__ == '__main__':
+    freeze_support()
     key = os.environ.get(dynamoAPIenvName)
     ok = key
     app = QApplication(sys.argv)
