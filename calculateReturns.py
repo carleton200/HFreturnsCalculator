@@ -57,7 +57,7 @@ ASSETS_DIR = os.path.join(BASE_DIR, 'assets')
 if testDataMode:
     DATABASE_PATH = os.path.join(ASSETS_DIR, 'Acc_Tran_Test.db')
 else:
-    DATABASE_PATH = os.path.join(ASSETS_DIR, 'Acc_Tran_calcTest.db')
+    DATABASE_PATH = os.path.join(ASSETS_DIR, 'Acc_Tran_calcTest2.db')
 
 if not os.path.exists(BASE_DIR):
     os.makedirs(BASE_DIR)
@@ -82,6 +82,8 @@ yearOptions = (1,2,3,5,7,10,12,15,20)
 
 timeOptions = ["MTD","QTD","YTD", "Ownership", "Return", "ITD"] + [f"{y}YR" for y in yearOptions]
 percent_headers = {option for option in timeOptions}
+
+calculationPingTime = 8
 
 class returnsApp(QWidget):
     def __init__(self, start_index=0):
@@ -416,6 +418,7 @@ class returnsApp(QWidget):
         self.calcSubmitted = False
         lastImportDB = load_from_db("history") if len(load_from_db("history")) == 1 else None
         if not testDataMode and lastImportDB is None:
+            print("No previous import found")
             #pull data is there is no data pulled yet
             executor.submit(lambda: self.pullData())
         elif not testDataMode:
@@ -423,7 +426,8 @@ class returnsApp(QWidget):
             lastImport = datetime.strptime(lastImportString, "%B %d, %Y @ %I:%M %p")  
             self.lastImportLabel.setText(f"Last Data Import: {lastImportString}")
             now = datetime.now()
-            if lastImport.month != now.month or now > lastImport + relativedelta(hours=2):
+            if lastImport.month != now.month or now > (lastImport + relativedelta(hours=2)):
+                print(f"Reimporting due to two hour data gap. \n     Last import: {lastImport}\n    Current time: {now}")
                 #pull data if in a new month or 1 days have elapsed
                 executor.submit(self.pullData)
             elif lastImportDB[0]["lastImport"] != lastImportDB[0].get("lastCalculation", "None"):
@@ -446,6 +450,8 @@ class returnsApp(QWidget):
             else:
                 executor.submit(self.calculateReturn)
     def cancelCalc(self):
+        if self.pool:
+            self.pool.terminate()
         self.cancel = True
     def viewUnderlyingData(self):
         row = self.returnsTable.currentRow()
@@ -1687,6 +1693,7 @@ class returnsApp(QWidget):
                 return
             
             # proces pool section----------------------------------------------------------------
+            save_to_db("progress",None,action="reset")
             self.init_db()
 
             self.manager = Manager()
@@ -1699,12 +1706,14 @@ class returnsApp(QWidget):
             commonData = {"earliestChangeDate" : self.earliestChangeDate, "noCalculations" : noCalculations,
                             "months" : months, "fundList" : fundList
                             }
+            
+            self.calcStartTime = datetime.now()
             for pool in self.pools:
                 res = self.pool.apply_async(processPool, args=(pool, commonData, self.lock))
                 self.futures.append(res)
             self.pool.close()
 
-            self.timer.start(5000)
+            self.timer.start(int(calculationPingTime / 0.75) * 1000) #check at 0.75 the ping time to prevent queue buildup
             #-----------------^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^-----------------------------------
         except Exception as e:
             gui_queue.put(lambda: self.calculationLoadingBox.setVisible(False))
@@ -1718,7 +1727,7 @@ class returnsApp(QWidget):
         c = conn.cursor()
         c.execute("""
             CREATE TABLE IF NOT EXISTS progress (
-                pool INTEGER PRIMARY KEY,
+                pool STRING PRIMARY KEY,
                 completed INTEGER NOT NULL,
                 total INTEGER NOT NULL,
                 status STRING NOT NULL
@@ -1729,12 +1738,16 @@ class returnsApp(QWidget):
     def watch_db(self):
         while True:
             try:
+                self.lock.acquire()
                 conn = sqlite3.connect(DATABASE_PATH)
                 c = conn.cursor()
-                c.execute("SELECT status,pool FROM progress")
-                statusLines = c.fetchall()
+                c.execute("SELECT * FROM progress")
+                cols = [d[0] for d in c.description]
+                statusLines = [dict(zip(cols, row)) for row in c.fetchall()]
                 failed = []
                 working = []
+                print("Status lines:")
+                print(statusLines)
                 for line in statusLines:
                     if line["status"] == "Failed":
                         failed.append(line)
@@ -1756,14 +1769,30 @@ class returnsApp(QWidget):
                     self.queue.append(percent)
                     if complete >= total:
                         return
+                self.lock.release()
             except Exception as e:
+                self.lock.release()
                 print(f"Error watching database: {e}")
+                print(traceback.format_exc())
                 pass
-            time.sleep(3)
+            if self.cancel:
+                break
+            time.sleep(calculationPingTime)
     def update_from_queue(self):
         if self.queue:
             val = self.queue.pop(0)
             self.calculationLoadingBar.setValue(val)
+            timeElapsed = datetime.now() - self.calcStartTime
+            secsElapsed = timeElapsed.total_seconds()
+            loadingFraction = float(val) / 100 #decimal format percentage
+            if loadingFraction > 0:
+                est_total_secs = secsElapsed / loadingFraction
+                secs_remaining = est_total_secs - secsElapsed
+            else:
+                secs_remaining = 0
+            mins, secs = divmod(int(secs_remaining), 60)
+            time_str = f"{mins}m {secs}s" # format as “Xm Ys” or “MM:SS”
+            self.calculationLabel.setText(f"Estimated time remaining: {time_str}")
             if val >= 100:
                 self.timer.stop()
                 self.calcCompletion()
@@ -1961,117 +1990,136 @@ class returnsApp(QWidget):
         calcTableModel = DictListModel(rows,headers, self)
         table.setModel(calcTableModel)
 def save_to_db(table, rows, action = "", query = "",inputs = None, keys = None, connection = None, lock = None):
-    if lock is not None:
-        lock.acquire()
-    if connection is None:
-        conn = sqlite3.connect(DATABASE_PATH)
-        cur = conn.cursor()
-    else:
-        conn = connection
-        cur = connection.cursor()
-    if action == "reset":
-        cur.execute(f"DROP TABLE IF EXISTS {table}")
-    elif action == "add":
-        try:
-            cols = list(rows.keys())
-            quoted_cols = ','.join(f'"{c}"' for c in cols)
-            placeholders = ','.join('?' for _ in cols)
-            sql = f'INSERT INTO "{table}" ({quoted_cols}) VALUES ({placeholders})'
-            vals = tuple(str(rows.get(c, '')) for c in cols)
-            cur.execute(sql,vals)
-            conn.commit()
-        except Exception as e:
-            print(f"Error inserting row into database: {e}")
-            print("e.args:", e.args)
-            # maybe also:
-            print(traceback.format_exc())
-    elif action == "calculationUpdate":
-        try:
-            cur.execute("DELETE FROM calculations WHERE [dateTime] = ?", inputs) #inputs input should be the date for deletion
-            for row in rows:
-                cols = list(row.keys())
-                quoted_cols = ','.join(f'"{c}"' for c in cols)
-                placeholders = ','.join('?' for _ in cols)
-                sql = (f"INSERT INTO calculations ({quoted_cols}) VALUES ({placeholders})")
-                vals = tuple(str(row.get(c, '')) for c in cols)
-                cur.execute(sql,vals)
-            conn.commit()
-        except Exception as e:
-            print(f"Error updating calculations in database: {e}")
-            print("e.args:", e.args)
-            # maybe also:
-            import traceback
-            print(traceback.format_exc())
-    elif action == "replace":
-        cur.execute(query,inputs)
-        conn.commit()
-    elif rows:
-        if keys is None:
-            cols = list(rows[0].keys())
-        else:
-            cols = list(keys)
-        quoted_cols = ','.join(f'"{c}"' for c in cols)
-        col_defs = ','.join(f'"{c}" TEXT' for c in cols)
-        if True:
-            cur.execute(f'DROP TABLE IF EXISTS "{table}";')
-        cur.execute(f'CREATE TABLE IF NOT EXISTS "{table}" ({col_defs})')
-        cur.execute(f'DELETE FROM "{table}"')
-        placeholders = ','.join('?' for _ in cols)
-        sql = f'INSERT INTO "{table}" ({quoted_cols}) VALUES ({placeholders})'
-        vals = [tuple(str(row.get(c, '')) for c in cols) for row in rows]
-        cur.executemany(sql, vals)
-        conn.commit()
-    else:
-        print(f"No rows found for data input to '{table}'")
-    if connection is None:
-        conn.close()
-    else:
-        cur.close()
-    if lock is not None:
-        lock.release()
-def load_from_db(table, condStatement = "",parameters = None, cursor = None, lock = None):
-    if lock is not None:
-        lock.acquire()
-    # Transactions
-    if os.path.exists(DATABASE_PATH):
-        if cursor is None:
+    try:
+        if lock is not None:
+            lock.acquire()
+        if connection is None:
             conn = sqlite3.connect(DATABASE_PATH)
             cur = conn.cursor()
         else:
-            cur = cursor
-        try:
-            if condStatement != "" and parameters is not None:
-                cur.execute(f'SELECT * FROM {table} {condStatement}',parameters)
-            elif condStatement != "" and parameters is None:
-                cur.execute(f'SELECT * FROM {table} {condStatement}')
+            conn = connection
+            cur = connection.cursor()
+        if action == "reset":
+            cur.execute(f"DROP TABLE IF EXISTS {table}")
+        elif action == "add":
+            try:
+                cols = list(rows.keys())
+                quoted_cols = ','.join(f'"{c}"' for c in cols)
+                placeholders = ','.join('?' for _ in cols)
+                sql = f'INSERT INTO "{table}" ({quoted_cols}) VALUES ({placeholders})'
+                vals = tuple(str(rows.get(c, '')) for c in cols)
+                cur.execute(sql,vals)
+                conn.commit()
+            except Exception as e:
+                print(f"Error inserting row into database: {e}")
+                print("e.args:", e.args)
+                # maybe also:
+                print(traceback.format_exc())
+        elif action == "calculationUpdate":
+            try:
+                cur.execute("DELETE FROM calculations WHERE [dateTime] = ?", inputs) #inputs input should be the date for deletion
+                for row in rows:
+                    cols = list(row.keys())
+                    quoted_cols = ','.join(f'"{c}"' for c in cols)
+                    placeholders = ','.join('?' for _ in cols)
+                    sql = (f"INSERT INTO calculations ({quoted_cols}) VALUES ({placeholders})")
+                    vals = tuple(str(row.get(c, '')) for c in cols)
+                    cur.execute(sql,vals)
+                conn.commit()
+            except Exception as e:
+                print(f"Error updating calculations in database: {e}")
+                print("e.args:", e.args)
+                # maybe also:
+                import traceback
+                print(traceback.format_exc())
+        elif action == "replace":
+            cur.execute(query,inputs)
+            conn.commit()
+        elif rows:
+            if keys is None:
+                cols = list(rows[0].keys())
             else:
-                cur.execute(f'SELECT * FROM {table}')
-            cols = [d[0] for d in cur.description]
-            rows = [dict(zip(cols, row)) for row in cur.fetchall()]
-            if cursor is None:
-                conn.close()
+                cols = list(keys)
+            quoted_cols = ','.join(f'"{c}"' for c in cols)
+            col_defs = ','.join(f'"{c}" TEXT' for c in cols)
+            if True:
+                cur.execute(f'DROP TABLE IF EXISTS "{table}";')
+            cur.execute(f'CREATE TABLE IF NOT EXISTS "{table}" ({col_defs})')
+            cur.execute(f'DELETE FROM "{table}"')
+            placeholders = ','.join('?' for _ in cols)
+            sql = f'INSERT INTO "{table}" ({quoted_cols}) VALUES ({placeholders})'
+            vals = [tuple(str(row.get(c, '')) for c in cols) for row in rows]
+            cur.executemany(sql, vals)
+            conn.commit()
+        else:
+            print(f"No rows found for data input to '{table}'")
+        if connection is None:
+            conn.close()
+        else:
+            cur.close()
+        if lock is not None:
+            lock.release()
+    except:
+        print("DB save failed. closing connections")
+        try:
             if lock is not None:
                 lock.release()
-            return rows
-        except Exception as e:
+            cur.close()
+        except:
+            pass
+def load_from_db(table, condStatement = "",parameters = None, cursor = None, lock = None):
+    try:
+        if lock is not None:
+            lock.acquire()
+        # Transactions
+        if os.path.exists(DATABASE_PATH):
+            if cursor is None:
+                conn = sqlite3.connect(DATABASE_PATH)
+                cur = conn.cursor()
+            else:
+                cur = cursor
             try:
-                if parameters is not None and table != "calculations":
-                    print(f"Error loading from database: {e}, table: {table} condStatment: {condStatement}, parameters: {parameters}")
-                elif table != "calculations":
-                    print(f"Error loading from database: {e}, table: {table} condStatment: {condStatement}")
+                if condStatement != "" and parameters is not None:
+                    cur.execute(f'SELECT * FROM {table} {condStatement}',parameters)
+                elif condStatement != "" and parameters is None:
+                    cur.execute(f'SELECT * FROM {table} {condStatement}')
                 else:
-                    print(f"Info: {e}, {e.args}")
+                    cur.execute(f'SELECT * FROM {table}')
+                cols = [d[0] for d in cur.description]
+                rows = [dict(zip(cols, row)) for row in cur.fetchall()]
                 if cursor is None:
                     conn.close()
-            except:
-                pass
+                if lock is not None:
+                    lock.release()
+                return rows
+            except Exception as e:
+                try:
+                    if parameters is not None and table != "calculations":
+                        print(f"Error loading from database: {e}, table: {table} condStatment: {condStatement}, parameters: {parameters}")
+                    elif table != "calculations":
+                        print(f"Error loading from database: {e}, table: {table} condStatment: {condStatement}")
+                    else:
+                        print(f"Info: {e}, {e.args}")
+                    if cursor is None:
+                        conn.close()
+                except:
+                    pass
+                if lock is not None:
+                    lock.release()
+                return []
+        else:
             if lock is not None:
                 lock.release()
             return []
-    else:
-        if lock is not None:
-            lock.release()
-        return []
+    except:
+        print("DB load failed. closing connections")
+        try:
+            if lock is not None:
+                lock.release()
+            if cursor is None:
+                cur.close()
+        except:
+            pass
 def updateStatus(pool,totalLoops, lock, status = "Working", connection = None):
     failure = False
     try:
@@ -2091,15 +2139,19 @@ def updateStatus(pool,totalLoops, lock, status = "Working", connection = None):
         if status == "Working":
             c.execute("""
                 INSERT INTO progress (pool, completed, total,status)
-                VALUES (?, 1, ?,?)
+                VALUES (?, 0, ?,?)
                 ON CONFLICT(pool) DO UPDATE SET completed = completed + 1
             """, (pool, totalLoops,status))
+        elif status == "Completed":
+            c.execute("UPDATE progress SET completed = completed + 1, status = ? WHERE pool = ?", (status,pool))
         else:
             c.execute("UPDATE progress SET status = ? WHERE pool = ?", (status,pool))
 
         conn.commit()
         if connection is None:
             conn.close()
+    except Exception as e:
+        print(f"Error updating status: {e}")
     finally:
         lock.release()
     return failure
@@ -2130,6 +2182,10 @@ def processPool(poolData : dict,selfData : dict, lock):
         else:
             newMonths = months
         for month in newMonths:
+            failed = updateStatus(pool,len(newMonths),lock,connection=calcConnection) #iterate progress up once after each completed month
+            if failed: #if other workers failed, halt the process
+                print(f"Exiting worker {pool} due to other failure...")
+                return []
             totalDays = int(datetime.strptime(month["endDay"], "%Y-%m-%dT%H:%M:%S").day  - datetime.strptime(month["tranStart"], "%Y-%m-%dT%H:%M:%S").day) + 1
             poolFunds = load_from_db("positions_low", f"WHERE [Source name] = ? AND [Date] BETWEEN ? AND ?",(pool,month["accountStart"],month["endDay"]), cursor=calcCursor, lock=lock)
             #find MD denominator for each investor
@@ -2282,7 +2338,6 @@ def processPool(poolData : dict,selfData : dict, lock):
                             "assetClass" : poolData.get("assetClass"), "subAssetClass" : poolData.get("subAssetClass") ,
                             "NAV" : poolNAV, "Monthly Gain" : poolGainSum, "Return" : poolReturn , "MDdenominator" : poolMDdenominator,
                                 "Ownership" : None, "Calculation Type" : "Total Fund"}
-            
             investorStartEntries = {}
             investorEndEntries = {}
             investorPositions = load_from_db("positions_high", f"WHERE [Target name] = ? AND [Date] BETWEEN ? AND ?",(pool,month["accountStart"],month["endDay"]), cursor=calcCursor, lock=lock)
@@ -2395,10 +2450,6 @@ def processPool(poolData : dict,selfData : dict, lock):
                                     nameHier["sleeve"]["local"] : fundList.get(fundEntry["Fund"])
                                     }
                     calculations.append(monthFundInvestorEntry)
-            failed = updateStatus(pool,len(newMonths),lock,connection=calcConnection) #iterate progress up once after each completed month
-            if failed: #if other workers failed, halt the process
-                print(f"Exiting worker {pool} due to other failure...")
-                return []
             #end of months loop
         failed = updateStatus(pool,len(newMonths),lock,connection=calcConnection, status="Completed")
         return calculations
