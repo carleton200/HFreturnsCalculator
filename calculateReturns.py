@@ -1696,6 +1696,31 @@ class returnsApp(QWidget):
             save_to_db("progress",None,action="reset")
             self.init_db()
 
+            # ------------------- build data cache ----------------------
+            tables = ["positions_low", "transactions_low", "positions_high", "transactions_high", "calculations"]
+            table_rows = {t: load_from_db(t) for t in tables}
+            cache = {}
+            for table, rows in table_rows.items():
+                for row in rows:
+                    if table in ("positions_low", "transactions_low"):
+                        poolKey = row.get("Source name")
+                    elif table in ("positions_high", "transactions_high"):
+                        poolKey = row.get("Target name")
+                    else:
+                        poolKey = row.get("Pool")
+                    if poolKey is None:
+                        continue
+                    for m in months:
+                        if table == "calculations":
+                            if row.get("dateTime") != m["dateTime"]:
+                                continue
+                        else:
+                            start = m["accountStart"] if table in ("positions_low", "positions_high") else m["tranStart"]
+                            date = row.get("Date")
+                            if not (start <= date <= m["endDay"]):
+                                continue
+                        cache.setdefault(poolKey, {}).setdefault(table, {}).setdefault(m["dateTime"], []).append(row)
+
             self.manager = Manager()
             self.lock = self.manager.Lock()
 
@@ -1709,11 +1734,12 @@ class returnsApp(QWidget):
             
             self.calcStartTime = datetime.now()
             for pool in self.pools:
+                pool["cache"] = cache.get(pool.get("poolName"))
                 res = self.pool.apply_async(processPool, args=(pool, commonData, self.lock))
                 self.futures.append(res)
             self.pool.close()
 
-            self.timer.start(int(calculationPingTime / 0.75) * 1000) #check at 0.75 the ping time to prevent queue buildup
+            self.timer.start(int(calculationPingTime * 0.75) * 1000) #check at 0.75 the ping time to prevent queue buildup
             #-----------------^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^-----------------------------------
         except Exception as e:
             gui_queue.put(lambda: self.calculationLoadingBox.setVisible(False))
@@ -1746,8 +1772,6 @@ class returnsApp(QWidget):
                 statusLines = [dict(zip(cols, row)) for row in c.fetchall()]
                 failed = []
                 working = []
-                print("Status lines:")
-                print(statusLines)
                 for line in statusLines:
                     if line["status"] == "Failed":
                         failed.append(line)
@@ -2163,22 +2187,20 @@ def processPool(poolData : dict,selfData : dict, lock):
         fundList = selfData.get("fundList")
         calculations = []
         pool = poolData.get("poolName")
+        cache = poolData.get("cache")
         calcConnection = sqlite3.connect(DATABASE_PATH)
         calcCursor = calcConnection.cursor()
         newMonths = []
-        oldTimePulls = []
+        insert_low = []
+        update_low = []
+
         if not noCalculations: #if there are calculations, find all months before the data pull, and then pull those calculations
             for month in months:
                 #if the calculations for the month have already been complete, pull the old data
                 if earliestChangeDate > datetime.strptime(month["endDay"], "%Y-%m-%dT%H:%M:%S"):
-                    oldTimePulls.append(month["dateTime"])
+                    calculations.extend(cache.get("calculations", {}).get(month["dateTime"], []))
                 else:
                     newMonths.append(month)
-            placeholders = ", ".join("?" for _ in oldTimePulls)
-            inputs = oldTimePulls
-            inputs.append(pool)
-            calculations = load_from_db("calculations",f"WHERE [dateTime] IN ({placeholders}) AND [Pool] = ?", tuple(inputs), cursor=calcCursor, lock=lock)
-
         else:
             newMonths = months
         for month in newMonths:
@@ -2187,7 +2209,7 @@ def processPool(poolData : dict,selfData : dict, lock):
                 print(f"Exiting worker {pool} due to other failure...")
                 return []
             totalDays = int(datetime.strptime(month["endDay"], "%Y-%m-%dT%H:%M:%S").day  - datetime.strptime(month["tranStart"], "%Y-%m-%dT%H:%M:%S").day) + 1
-            poolFunds = load_from_db("positions_low", f"WHERE [Source name] = ? AND [Date] BETWEEN ? AND ?",(pool,month["accountStart"],month["endDay"]), cursor=calcCursor, lock=lock)
+            poolFunds = cache.get("positions_low", {}).get(month["dateTime"], [])
             #find MD denominator for each investor
             #find total gain per pool
             funds = []
@@ -2209,7 +2231,7 @@ def processPool(poolData : dict,selfData : dict, lock):
                     else:
                         endEntries[account["Target name"]].append(account)
 
-            hiddenFunds = load_from_db("transactions_low", f"WHERE [Source name] = ? AND [Date] BETWEEN ? AND ?",(pool,month["accountStart"],month["endDay"]), cursor=calcCursor, lock=lock)
+            hiddenFunds = cache.get("transactions_low", {}).get(month["dateTime"], [])
             #funds that do not have account positions. Just transactions that should not appear as a fund (ex: deferred liabilities)
             allPoolTransactions = {}
             for transaction in hiddenFunds:
@@ -2304,11 +2326,24 @@ def processPool(poolData : dict,selfData : dict, lock):
                                             "Balancetype" : "Calculated_R", "ExposureAssetClass" : assetClass, "ExposureAssetClassSub-assetClass(E)" : subAssetClass,
                                             nameHier["Commitment"]["local"] : commitment, nameHier["Unfunded"]["local"] : unfunded,
                                             nameHier["sleeve"]["local"] : fundList[fund]}
-                        save_to_db("positions_low",fundEOMentry, action="add", connection=calcConnection, lock=lock)
+                        insert_low.append(fundEOMentry)
+                        # update cache for subsequent months
+                        for m in months:
+                            if m["accountStart"] <= month["endDay"] <= m["endDay"]:
+                                cache.setdefault("positions_low", {}).setdefault(m["dateTime"], []).append(fundEOMentry)
+                                break
                     else:
                         query = f"UPDATE positions_low SET [{nameHier['Commitment']["local"]}] = ? , [{nameHier['Unfunded']["local"]}] = ?, [{nameHier["sleeve"]["local"]}] = ? WHERE [Source name] = ? AND [Target name] = ? AND [Date] = ?"
                         inputs = (commitment,unfunded,fundList.get(fund),pool,fund,month["endDay"])
-                        save_to_db("positions_low",None, action = "replace", query=query, inputs = inputs, connection=calcConnection, lock=lock)
+                        update_low.append(inputs)
+                        # update cache for all months referencing this date
+                        for m in months:
+                            if m["accountStart"] <= month["endDay"] <= m["endDay"]:
+                                for lst in cache.get("positions_low", {}).get(m["dateTime"], []):
+                                    if lst["Target name"] == fund and lst["Date"] == month["endDay"]:
+                                        lst[nameHier["Commitment"]["local"]] = commitment
+                                        lst[nameHier["Unfunded"]["local"]] = unfunded
+                                        lst[nameHier["sleeve"]["local"]] = fundList.get(fund)
                     poolGainSum += fundGain
                     poolMDdenominator += fundMDdenominator
                     poolNAV += fundNAV
@@ -2340,7 +2375,7 @@ def processPool(poolData : dict,selfData : dict, lock):
                                 "Ownership" : None, "Calculation Type" : "Total Fund"}
             investorStartEntries = {}
             investorEndEntries = {}
-            investorPositions = load_from_db("positions_high", f"WHERE [Target name] = ? AND [Date] BETWEEN ? AND ?",(pool,month["accountStart"],month["endDay"]), cursor=calcCursor, lock=lock)
+            investorPositions = cache.get("positions_high", {}).get(month["dateTime"], [])
             for pos in investorPositions:
                 investor = pos["Source name"]
                 if pos["Date"] == month["accountStart"]:
@@ -2355,7 +2390,7 @@ def processPool(poolData : dict,selfData : dict, lock):
                         investorEndEntries[investor].append(pos)
 
             allInvestorTransactions = {}
-            transactions = load_from_db("transactions_high",f"WHERE [Target name] = ? AND [Date] BETWEEN ? AND ?", (pool,month["tranStart"],month["endDay"]), cursor=calcCursor, lock=lock)
+            transactions = cache.get("transactions_high", {}).get(month["dateTime"], [])
             for tran in transactions:
                 investor = pos["Source name"]
                 if investor not in allInvestorTransactions:
@@ -2451,6 +2486,16 @@ def processPool(poolData : dict,selfData : dict, lock):
                                     }
                     calculations.append(monthFundInvestorEntry)
             #end of months loop
+        if insert_low:
+            save_to_db("positions_low", insert_low, action="add", connection=calcConnection, lock=lock)
+        if update_low:
+            query = f"UPDATE positions_low SET [{nameHier['Commitment']['local']}] = ?, [{nameHier['Unfunded']['local']}] = ?, [{nameHier['sleeve']['local']}] = ? WHERE [Source name] = ? AND [Target name] = ? AND [Date] = ?"
+            lock.acquire()
+            try:
+                calcCursor.executemany(query, update_low)
+                calcConnection.commit()
+            finally:
+                lock.release()
         failed = updateStatus(pool,len(newMonths),lock,connection=calcConnection, status="Completed")
         return calculations
     except Exception as e:
