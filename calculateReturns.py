@@ -29,9 +29,10 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtGui import QBrush, QColor, QDesktopServices
 from PyQt5.QtCore import Qt, QTimer, QAbstractTableModel, QModelIndex, pyqtSignal, QPoint, QUrl
 
-currentVersion = "1.0.1"
+currentVersion = "1.0.2"
 testDataMode = False
-demoMode = False
+onlyCalcTestMode = True
+demoMode = True
 
 executor = ThreadPoolExecutor()
 gui_queue = queue.Queue()
@@ -57,7 +58,7 @@ ASSETS_DIR = os.path.join(BASE_DIR, 'assets')
 if testDataMode:
     DATABASE_PATH = os.path.join(ASSETS_DIR, 'Acc_Tran_Test.db')
 else:
-    DATABASE_PATH = os.path.join(ASSETS_DIR, 'Acc_Tran_calcTest2.db')
+    DATABASE_PATH = os.path.join(ASSETS_DIR, 'Acc_Tran.db')
 
 if not os.path.exists(BASE_DIR):
     os.makedirs(BASE_DIR)
@@ -73,6 +74,7 @@ nameHier = {
                 "sleeve" : {"sleeve" : "sleeve", "fund" : "Name", "local" : "subAssetSleeve"},
                 "CashFlow" : {"dynLow" : "CashFlowSys", "dynHigh" : "CashFlowSys"}, 
                 "Value" : {"local" : "NAV", "api" : "Value in system currency", "dynLow" : "ValueInSystemCurrency", "dynHigh" : "Value"},
+                "Classification" : {"local" : "Classification" , "dynLow" : "Target nameExposureHFClassificationLevel2"}
             }
 
 commitmentChangeTransactionTypes = ["Commitment", "Transfer of commitment", "Transfer of commitment (out)", "Secondary - Original commitment (by secondary seller)"]
@@ -325,7 +327,7 @@ class returnsApp(QWidget):
         optionsLayout.addWidget(benchBox)
         sortBox = QWidget()
         sortLayout = QVBoxLayout()
-        sortLayout.addWidget(QLabel("Sort by: "))
+        sortLayout.addWidget(QLabel("Group by: "))
         self.sortHierarchy = MultiSelectBox()
         self.sortHierarchy.hierarchyMode()
         self.sortHierarchy.popup.closed.connect(self.buildReturnTable)
@@ -652,7 +654,9 @@ class returnsApp(QWidget):
                 self.populateReturnsTable(self.currentTableData)
     def resetData(self):
         save_to_db("calculations",None,action="reset") #reset calculations so new data will be freshly calculated
-        if testDataMode:
+        if testDataMode or onlyCalcTestMode:
+            if onlyCalcTestMode:
+                self.earliestChangeDate = self.dataTimeStart
             self.calculateReturn()
         else:
             executor.submit(self.pullData)
@@ -928,7 +932,6 @@ class returnsApp(QWidget):
                             levelData.append(entry)
                     struc, lowTotals, fullEntries = buildLevel(sortHierarchy[levelIdx],levelIdx,struc,levelData,tempPath)
                     newTotalEntries.extend(fullEntries)
-                #gui_queue.put(lambda rows = highTotals, name = "Entries for: " + ",".join(options): self.openTableWindow(rows,f"{name} data"))
                     for total in lowTotals:
                         if total["dateTime"] not in highEntries.keys():
                             highEntries[total["dateTime"]] = copy.deepcopy(entryTemplate)
@@ -1248,7 +1251,7 @@ class returnsApp(QWidget):
                     if earliest < self.earliestChangeDate:
                         self.earliestChangeDate = earliest
                 print(f"Differences in {table} : {diffCount} of {len(rows)}")
-                if diffCount > 0:
+                if diffCount > 0 and not demoMode:
                     def openWindow():
                         window = tableWindow(parentSource=self,all_rows=differences,table=table)
                         self.tableWindows[table] = window
@@ -1890,7 +1893,7 @@ class returnsApp(QWidget):
             dates = sorted(dates, reverse=True)
             keys = [d.strftime("%B %Y") for d in dates]
         elif mode == "Complex Table":
-            newOrder = ["NAV","Monthly Gain","Ownership (%)","MTD","QTD","YTD"] + [f"{y}YR" for y in yearOptions] + ["ITD"]
+            newOrder = ["NAV", "Commitment", "Unfunded","MTD","QTD","YTD"] + [f"{y}YR" for y in yearOptions] + ["ITD"]
             ordered = [h for h in newOrder if h in keys]
             ordered += [h for h in keys if h not in newOrder]
             keys = ordered
@@ -1927,15 +1930,16 @@ class returnsApp(QWidget):
         for d in cleaned.values():
             d.pop("dataType", None)
 
-        if not self.headerSort.active or self.tableBtnGroup.checkedButton().text() == "Monthly Table":
+        if not self.headerSort.active or mode == "Monthly Table":
             col_keys = set()
             for d in cleaned.values():
                 col_keys |= set(d.keys())
             col_keys = list(col_keys)
 
             col_keys = self.orderColumns(col_keys)
-            exceptions = ("Return", "Ownership", "MDdenominator")
-            self.headerSort.set_items(col_keys,[item for item in col_keys if item not in exceptions])
+            if mode == "Complex Table":
+                exceptions = ("Return", "Ownership", "MDdenominator", "Monthly Gain")
+                self.headerSort.set_items(col_keys,[item for item in col_keys if item not in exceptions])
         else:
             col_keys = self.headerSort.popup.get_checked_sorted_items()
 
@@ -2262,8 +2266,10 @@ def processPool(poolData : dict,selfData : dict, lock):
                 assetClass = None
                 subAssetClass = None
                 fundClassification = None
-                startEntry = startEntries.get(fund, [])
-                endEntry = endEntries.get(fund, [])
+                startEntryCache = startEntries.get(fund, [])
+                endEntryCache = endEntries.get(fund, [])
+                startEntry = copy.deepcopy(startEntryCache)
+                endEntry = copy.deepcopy(endEntryCache)
                 createFinalValue = False
                 noStartValue = False
                 if len(startEntry) < 1:
@@ -2292,7 +2298,6 @@ def processPool(poolData : dict,selfData : dict, lock):
                         endEntry[0][nameHier["Value"]["dynLow"]] = str(float(endEntry[0][nameHier["Value"]["dynLow"]]) + float(entry[nameHier["Value"]["dynLow"]])) #adds values to the first index
                 startEntry = startEntry[0]
                 endEntry = endEntry[0]
-
                 fundTransactions = allPoolTransactions.get(fund,[])
                 cashFlowSum = 0
                 weightedCashFlow = 0
@@ -2324,6 +2329,8 @@ def processPool(poolData : dict,selfData : dict, lock):
                     fundMDdenominator = float(startEntry[nameHier["Value"]["dynLow"]]) + weightedCashFlow
                     fundNAV = float(endEntry[nameHier["Value"]["dynLow"]])
                     fundReturn = fundGain/fundMDdenominator * 100 if fundMDdenominator != 0 else 0
+                    if unfunded < 0:
+                        unfunded = 0 #corrects for if original commitment was not logged
                     if fundNAV == 0 and fundMDdenominator == 0 and unfunded == 0:
                         #skip if there is no value and no change in value
                         continue
@@ -2331,7 +2338,7 @@ def processPool(poolData : dict,selfData : dict, lock):
                         fundEOMentry = {"Date" : month["endDay"], "Source name" : pool, "Target name" : fund , nameHier["Value"]["dynLow"] : endEntry[nameHier["Value"]["dynLow"]],
                                             "Balancetype" : "Calculated_R", "ExposureAssetClass" : assetClass, "ExposureAssetClassSub-assetClass(E)" : subAssetClass,
                                             nameHier["Commitment"]["local"] : commitment, nameHier["Unfunded"]["local"] : unfunded,
-                                            nameHier["sleeve"]["local"] : fundList[fund]}
+                                            nameHier["sleeve"]["local"] : fundList[fund], nameHier["Classification"]["dynLow"] : fundClassification}
                         insert_low.append(fundEOMentry)
                         # update cache for subsequent months
                         for m in months:
@@ -2398,7 +2405,7 @@ def processPool(poolData : dict,selfData : dict, lock):
             allInvestorTransactions = {}
             transactions = cache.get("transactions_high", {}).get(month["dateTime"], [])
             for tran in transactions:
-                investor = pos["Source name"]
+                investor = tran["Source name"]
                 if investor not in allInvestorTransactions:
                     allInvestorTransactions[investor] = [tran,]
                 else:
