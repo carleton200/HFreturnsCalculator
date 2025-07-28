@@ -17,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 import queue
 import threading
 from dateutil.relativedelta import relativedelta
+from multiprocessing import Pool, freeze_support, Manager
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QStackedWidget, QVBoxLayout,
     QLabel, QLineEdit, QPushButton, QFormLayout,
@@ -28,9 +29,10 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtGui import QBrush, QColor, QDesktopServices
 from PyQt5.QtCore import Qt, QTimer, QAbstractTableModel, QModelIndex, pyqtSignal, QPoint, QUrl
 
-currentVersion = "1.0.1"
+currentVersion = "1.0.2"
 testDataMode = False
-demoMode = False
+onlyCalcTestMode = True
+demoMode = True
 
 executor = ThreadPoolExecutor()
 gui_queue = queue.Queue()
@@ -72,6 +74,7 @@ nameHier = {
                 "sleeve" : {"sleeve" : "sleeve", "fund" : "Name", "local" : "subAssetSleeve"},
                 "CashFlow" : {"dynLow" : "CashFlowSys", "dynHigh" : "CashFlowSys"}, 
                 "Value" : {"local" : "NAV", "api" : "Value in system currency", "dynLow" : "ValueInSystemCurrency", "dynHigh" : "Value"},
+                "Classification" : {"local" : "Classification" , "dynLow" : "Target nameExposureHFClassificationLevel2"}
             }
 
 commitmentChangeTransactionTypes = ["Commitment", "Transfer of commitment", "Transfer of commitment (out)", "Secondary - Original commitment (by secondary seller)"]
@@ -81,6 +84,8 @@ yearOptions = (1,2,3,5,7,10,12,15,20)
 
 timeOptions = ["MTD","QTD","YTD", "Ownership", "Return", "ITD"] + [f"{y}YR" for y in yearOptions]
 percent_headers = {option for option in timeOptions}
+
+calculationPingTime = 8
 
 class returnsApp(QWidget):
     def __init__(self, start_index=0):
@@ -101,6 +106,10 @@ class returnsApp(QWidget):
         self.buildTableCancel = None
         self.buildTableFuture = None
         self.cFundsCalculated = False
+
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.update_from_queue)
+        self.queue = []
 
         # main stack
         self.main_layout = QVBoxLayout()
@@ -131,7 +140,10 @@ class returnsApp(QWidget):
                             background-color: #51AE2B;
                         }
                         QPushButton#exportBtn:hover {
-                                background-color: #429321;
+                            background-color: #429321;
+                        }
+                        QPushButton#cancelBtn {
+                            background-color: #D63131;
                         }
                         QLabel, QRadioButton, QCheckBox, QProgressBar {
                             color: white
@@ -163,9 +175,9 @@ class returnsApp(QWidget):
         self.stack = QStackedWidget()
         self.init_global_widgets()
 
-        self.init_api_key_page() #1
-        self.init_returns_page() #2
-        self.init_calculation_page() #3
+        self.init_api_key_page() #0
+        self.init_returns_page() #1
+        self.init_calculation_page() #2
 
         self.stack.setCurrentIndex(start_index)
         self.main_layout.addWidget(self.stack)
@@ -193,6 +205,7 @@ class returnsApp(QWidget):
         self.calculationLoadingBar.setRange(0,100)
         self.calculationLabel = QLabel()
         self.cancelCalcBtn = QPushButton("Cancel Calculations")
+        self.cancelCalcBtn.setObjectName("cancelBtn")
         self.cancelCalcBtn.clicked.connect(self.cancelCalc)
         loadLay.addWidget(self.calculationLabel)
         loadLay.addWidget(self.calculationLoadingBar)
@@ -314,7 +327,7 @@ class returnsApp(QWidget):
         optionsLayout.addWidget(benchBox)
         sortBox = QWidget()
         sortLayout = QVBoxLayout()
-        sortLayout.addWidget(QLabel("Sort by: "))
+        sortLayout.addWidget(QLabel("Group by: "))
         self.sortHierarchy = MultiSelectBox()
         self.sortHierarchy.hierarchyMode()
         self.sortHierarchy.popup.closed.connect(self.buildReturnTable)
@@ -405,34 +418,44 @@ class returnsApp(QWidget):
         self.dataStartSelect.currentTextChanged.connect(self.buildReturnTable)
     def init_data_processing(self):
         self.calcSubmitted = False
-        lastImport = self.load_from_db("history") if len(self.load_from_db("history")) == 1 else None
-        if not testDataMode and lastImport is None:
+        lastImportDB = load_from_db("history") if len(load_from_db("history")) == 1 else None
+        if not testDataMode and lastImportDB is None:
+            print("No previous import found")
             #pull data is there is no data pulled yet
             executor.submit(lambda: self.pullData())
         elif not testDataMode:
-            lastImportString = lastImport[0]["lastImport"]
+            lastImportString = lastImportDB[0]["lastImport"]
             lastImport = datetime.strptime(lastImportString, "%B %d, %Y @ %I:%M %p")  
             self.lastImportLabel.setText(f"Last Data Import: {lastImportString}")
             now = datetime.now()
-            if lastImport.month != now.month or now > lastImport + relativedelta(hours=2):
+            if lastImport.month != now.month or now > (lastImport + relativedelta(hours=2)):
+                print(f"Reimporting due to two hour data gap. \n     Last import: {lastImport}\n    Current time: {now}")
                 #pull data if in a new month or 1 days have elapsed
                 executor.submit(self.pullData)
+            elif lastImportDB[0]["lastImport"] != lastImportDB[0].get("lastCalculation", "None"):
+                self.earliestChangeDate = datetime.strptime(lastImportDB[0].get("changeDate"), "%B %d, %Y @ %I:%M %p")
+                self.processFunds()
+                self.calculateReturn()
             else:
-                calculations = self.load_from_db("calculations")
-                self.findConsolidatedFunds()
+                calculations = load_from_db("calculations")
+                self.processFunds()
                 if calculations != []:
                     self.populate(self.calculationTable,calculations)
                     self.buildReturnTable()
                 else:
-                    executor.submit(self.calculateReturn)
+                    self.calculateReturn()
         else:
-            calculations = self.load_from_db("calculations")
+            calculations = load_from_db("calculations")
             if calculations != []:
                 self.populate(self.calculationTable,calculations)
                 self.buildReturnTable()
             else:
                 executor.submit(self.calculateReturn)
     def cancelCalc(self):
+        if self.pool:
+            self.pool.terminate()
+        if self.timer:
+            self.timer.stop()
         self.cancel = True
     def viewUnderlyingData(self):
         row = self.returnsTable.currentRow()
@@ -581,11 +604,12 @@ class returnsApp(QWidget):
                 gui_queue.put(lambda: QMessageBox.information(self, "Saved", f"Excel saved to:\n{path}"))
                 gui_queue.put(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(path)))
         executor.submit(processExport)
-    def findConsolidatedFunds(self):
+    def processFunds(self):
         self.cFundsCalculated = True
         self.sleeveFundLinks = {}
         self.cFundToFundLinks = {}
-        funds = self.load_from_db("funds")
+        self.pools = []
+        funds = load_from_db("funds")
         if funds != []:
             consolidatorFunds = {}
             for row in funds: #find sleeve values and consolidated funds
@@ -599,6 +623,8 @@ class returnsApp(QWidget):
                     self.sleeveFundLinks[row["sleeve"]] = [row["Name"]]
                 else:
                     self.sleeveFundLinks[row["sleeve"]].append(row["Name"])
+                if row["Fundpipelinestatus"] == "I - Internal":
+                    self.pools.append({"poolName" : row["Name"], "assetClass" : assetClass, "subAssetClass" : subAssetClass})
             self.consolidatedFunds = {}
             for row in funds: #assign funds to their consolidators
                 if row.get("Parentfund") in consolidatorFunds:
@@ -627,9 +653,11 @@ class returnsApp(QWidget):
             else:
                 self.populateReturnsTable(self.currentTableData)
     def resetData(self):
-        self.save_to_db("calculations",None,action="reset") #reset calculations so new data will be freshly calculated
-        if testDataMode:
-            executor.submit(self.calculateReturn)
+        save_to_db("calculations",None,action="reset") #reset calculations so new data will be freshly calculated
+        if testDataMode or onlyCalcTestMode:
+            if onlyCalcTestMode:
+                self.earliestChangeDate = self.dataTimeStart
+            self.calculateReturn()
         else:
             executor.submit(self.pullData)
     def beginImport(self):
@@ -651,7 +679,7 @@ class returnsApp(QWidget):
         self.buildTableLoadingBox.setVisible(True)
         self.buildTableLoadingBar.setValue(2)
         if not self.cFundsCalculated:
-            self.findConsolidatedFunds()
+            self.processFunds()
         def buildTable(cancelEvent):
             try:
                 print("Building return table...")
@@ -696,7 +724,7 @@ class returnsApp(QWidget):
                 gui_queue.put(lambda: self.buildTableLoadingBar.setValue(3))
                 if cancelEvent.is_set(): #exit if new table build request is made
                     return
-                data = self.load_from_db("calculations",condStatement, tuple(parameters))
+                data = load_from_db("calculations",condStatement, tuple(parameters))
                 output = {"Total##()##" : {}}
                 if self.benchmarkSelection.checkedItems() != []:
                     output = self.applyBenchmarks(output)
@@ -840,7 +868,7 @@ class returnsApp(QWidget):
         benchmarkChoices = self.benchmarkSelection.checkedItems()
         code = self.buildCode([])
         placeholders = ','.join('?' for _ in benchmarkChoices)
-        benchmarks = self.load_from_db("benchmarks",f"WHERE [Index] IN ({placeholders})",tuple(benchmarkChoices))
+        benchmarks = load_from_db("benchmarks",f"WHERE [Index] IN ({placeholders})",tuple(benchmarkChoices))
         for idx, bench in enumerate(benchmarks):
             name = bench["Index"] + code
             if (datetime.strptime(bench["Asofdate"], "%Y-%m-%dT%H:%M:%S") < datetime.strptime(self.dataStartSelect.currentText(), "%B %Y") or
@@ -904,7 +932,6 @@ class returnsApp(QWidget):
                             levelData.append(entry)
                     struc, lowTotals, fullEntries = buildLevel(sortHierarchy[levelIdx],levelIdx,struc,levelData,tempPath)
                     newTotalEntries.extend(fullEntries)
-                #gui_queue.put(lambda rows = highTotals, name = "Entries for: " + ",".join(options): self.openTableWindow(rows,f"{name} data"))
                     for total in lowTotals:
                         if total["dateTime"] not in highEntries.keys():
                             highEntries[total["dateTime"]] = copy.deepcopy(entryTemplate)
@@ -1034,7 +1061,7 @@ class returnsApp(QWidget):
                                             condStatement += f" AND [{filter["dynNameLow"]}] IN ({placeholders})"
                                         for param in paramTemp:
                                             parameters.append(param)
-                            lowAccounts = self.load_from_db("positions_low", condStatement,tuple(parameters))
+                            lowAccounts = load_from_db("positions_low", condStatement,tuple(parameters))
                             
                             options = {}
                             for filter in self.filterOptions:
@@ -1085,10 +1112,10 @@ class returnsApp(QWidget):
 
             monthEntry = {"dateTime" : monthDT, "Month" : dateString, "tranStart" : tranStart.removesuffix(".000Z"), "endDay" : bothEnd.removesuffix(".000Z"), "accountStart" : accountStart.removesuffix(".000Z")}
             dbDates.append(monthEntry)
-        self.save_to_db("Months",dbDates)
+        save_to_db("Months",dbDates)
 
     def pullInvestorNames(self):
-        accountsHigh = self.load_from_db('positions_high')
+        accountsHigh = load_from_db('positions_high')
         if accountsHigh is not None:
             investors = []
             familyBranches = []
@@ -1114,7 +1141,7 @@ class returnsApp(QWidget):
         for filter in self.filterOptions:
             if filter["key"] not in self.highOnlyFilters:
                 allOptions[filter["key"]] = []
-        accountsHigh = self.load_from_db("positions_high")
+        accountsHigh = load_from_db("positions_high")
         if accountsHigh is not None:
             for account in accountsHigh:
                 for filter in self.filterOptions:
@@ -1124,7 +1151,7 @@ class returnsApp(QWidget):
                         allOptions[filter["key"]].append(account[filter["dynNameHigh"]])
         else:
             print("no investor to pool accounts found")
-        accountsLow = self.load_from_db("positions_low")
+        accountsLow = load_from_db("positions_low")
         if accountsLow is not None:
             for lowAccount in accountsLow:
                 for filter in self.filterOptions:
@@ -1147,7 +1174,7 @@ class returnsApp(QWidget):
         self.pullBenchmarks()
 
     def pullBenchmarks(self):
-        benchmarks = self.load_from_db("benchmarks")
+        benchmarks = load_from_db("benchmarks")
         benchNames = []
         for bench in benchmarks:
             if bench["Index"] not in benchNames:
@@ -1186,7 +1213,7 @@ class returnsApp(QWidget):
             try:
                 diffCount = 0
                 differences = []
-                previous = self.load_from_db(table) or []
+                previous = load_from_db(table) or []
 
                 # Build a set of tuple‐keys for the old data
                 seen = set()
@@ -1224,7 +1251,7 @@ class returnsApp(QWidget):
                     if earliest < self.earliestChangeDate:
                         self.earliestChangeDate = earliest
                 print(f"Differences in {table} : {diffCount} of {len(rows)}")
-                if diffCount > 0:
+                if diffCount > 0 and not demoMode:
                     def openWindow():
                         window = tableWindow(parentSource=self,all_rows=differences,table=table)
                         self.tableWindows[table] = window
@@ -1251,7 +1278,7 @@ class returnsApp(QWidget):
                 "benchCols" : (f"Index, As of date, MTD %, QTD %, YTD %, ITD cumulative %, ITD TWRR %, "
                                f"{', '.join(f'Last {y} yr %' for y in yearOptions)}"), 
             }
-            calculationsTest = self.load_from_db("calculations")
+            calculationsTest = load_from_db("calculations")
             if calculationsTest != []:
                 skipCalculations = True
             else:
@@ -1274,77 +1301,166 @@ class returnsApp(QWidget):
                     if i == 0: #transaction
                         if j == 0: #fund level
                             payload = {
+                                        "advf": {
+                                            "e": [
+                                                {
+                                                    "_name": "InvestmentTransaction",
+                                                    "e": [
+                                                        {
+                                                            "_name": "InvestorAccount",
+                                                            "_not": True
+                                                        },
+                                                        {
+                                                            "_name": "Fund",
+                                                            "rule": [
+                                                                {
+                                                                    "_op": "is",
+                                                                    "_prop": "Fund Pipeline Status",
+                                                                    "values": [
+                                                                        {
+                                                                            "id": "d33af081-c4c8-431b-a98b-de9eaf576324",
+                                                                            "es": "L_FundPipelineStatus",
+                                                                            "name": "I - Internal"
+                                                                        }
+                                                                    ]
+                                                                }
+                                                            ]
+                                                        }
+                                                    ],
+                                                    "rule": [
+                                                        {
+                                                            "_op": "not_null",
+                                                            "_prop": "Cash flow change (USD)"
+                                                        },
+                                                        {
+                                                            "_op": "not_null",
+                                                            "_prop": "Investing entity"
+                                                        }
+                                                    ]
+                                                },
+                                                {
+                                                    "_name": "InvestmentTransaction",
+                                                    "e": [
+                                                        {
+                                                            "_name": "InvestorAccount",
+                                                            "_not": True
+                                                        },
+                                                        {
+                                                            "_name": "Fund",
+                                                            "rule": [
+                                                                {
+                                                                    "_op": "is",
+                                                                    "_prop": "Fund Pipeline Status",
+                                                                    "values": [
+                                                                        {
+                                                                            "id": "d33af081-c4c8-431b-a98b-de9eaf576324",
+                                                                            "es": "L_FundPipelineStatus",
+                                                                            "name": "I - Internal"
+                                                                        }
+                                                                    ]
+                                                                }
+                                                            ]
+                                                        }
+                                                    ],
+                                                    "rule": [
+                                                        {
+                                                            "_op": "not_null",
+                                                            "_prop": "Investing entity"
+                                                        },
+                                                        {
+                                                            "_op": "any_item",
+                                                            "_prop": "Transaction type",
+                                                            "values": [
+                                                                [
+                                                                    {
+                                                                        "id": "5327639c-8160-4d85-9b23-8c6bf60c5406",
+                                                                        "es": "L_TransactionType",
+                                                                        "name": "Commitment"
+                                                                    },
+                                                                    {
+                                                                        "id": "37339e7c-1c24-4d13-9d17-86d0efe079b3",
+                                                                        "es": "L_TransactionType",
+                                                                        "name": "Transfer of commitment"
+                                                                    },
+                                                                    {
+                                                                        "id": "0f8f8671-8579-49d7-b604-05300b6a3990",
+                                                                        "es": "L_TransactionType",
+                                                                        "name": "Transfer of commitment (out)"
+                                                                    },
+                                                                    {
+                                                                        "id": "5e098d83-70b0-4135-a629-aff19048fb1c",
+                                                                        "es": "L_TransactionType",
+                                                                        "name": "Secondary - Original commitment (by secondary seller)"
+                                                                    }
+                                                                ]
+                                                            ]
+                                                        }
+                                                    ]
+                                                }
+                                            ]
+                                        },
+                                        "mode": "compact"
+                                    }
+                        else: #investor level
+                            payload = {
+                                        "advf": {
+                                            "e": [
+                                                {
+                                                    "_name": "InvestmentTransaction",
+                                                    "e": [
+                                                        {
+                                                            "_name": "InvestorAccount"
+                                                        }
+                                                    ],
+                                                    "rule": [
+                                                        {
+                                                            "_op": "not_null",
+                                                            "_prop": "Cash flow change (USD)"
+                                                        },
+                                                        {
+                                                            "_op": "not_null",
+                                                            "_prop": "Investing entity"
+                                                        }
+                                                    ]
+                                                }
+                                            ]
+                                        },
+                                        "mode": "compact"
+                                    }
+                        
+                    else: #account (position)
+                        if j == 0: #fund level
+                            payload = {
                                     "advf": {
                                         "e": [
                                             {
-                                                "_name": "InvestmentTransaction",
+                                                "_name": "InvestmentPosition",
+                                                "e": [
+                                                    {
+                                                        "_name": "Fund",
+                                                        "rule": [
+                                                            {
+                                                                "_op": "is",
+                                                                "_prop": "Fund Pipeline Status",
+                                                                "values": [
+                                                                    {
+                                                                        "id": "d33af081-c4c8-431b-a98b-de9eaf576324",
+                                                                        "es": "L_FundPipelineStatus",
+                                                                        "name": "I - Internal"
+                                                                    }
+                                                                ]
+                                                            }
+                                                        ]
+                                                    },
+                                                    {
+                                                        "_name": "InvestorAccount",
+                                                        "_not": True
+                                                    }
+                                                ],
                                                 "rule": [
                                                     {
                                                         "_op": "not_null",
-                                                        "_prop": "Cash flow change"
-                                                    },
-                                                    {
-                                                        "_op": "all",
-                                                        "_prop": "Investing entity",
-                                                        "values": [
-                                                            "pool, llc"
-                                                        ]
-                                                    },
-                                                    {
-                                                        "_op": "between_date",
-                                                        "_prop": "Effective date",
-                                                        "values": [
-                                                            f"{startDate}",
-                                                            f"{endDate}"
-                                                        ]
-                                                    }
-                                                ]
-                                            },
-                                            {
-                                                "_name": "InvestmentTransaction",
-                                                "rule": [
-                                                    {
-                                                        "_op": "any_item",
-                                                        "_prop": "Transaction type",
-                                                        "values": [
-                                                            [
-                                                                {
-                                                                    "id": "5327639c-8160-4d85-9b23-8c6bf60c5406",
-                                                                    "es": "L_TransactionType",
-                                                                    "name": "Commitment"
-                                                                },
-                                                                {
-                                                                    "id": "37339e7c-1c24-4d13-9d17-86d0efe079b3",
-                                                                    "es": "L_TransactionType",
-                                                                    "name": "Transfer of commitment"
-                                                                },
-                                                                {
-                                                                    "id": "0f8f8671-8579-49d7-b604-05300b6a3990",
-                                                                    "es": "L_TransactionType",
-                                                                    "name": "Transfer of commitment (out)"
-                                                                },
-                                                                {
-                                                                    "id": "5e098d83-70b0-4135-a629-aff19048fb1c",
-                                                                    "es": "L_TransactionType",
-                                                                    "name": "Secondary - Original commitment (by secondary seller)"
-                                                                }
-                                                            ]
-                                                        ]
-                                                    },
-                                                    {
-                                                        "_op": "all",
-                                                        "_prop": "Investing entity",
-                                                        "values": [
-                                                            "pool, llc"
-                                                        ]
-                                                    },
-                                                    {
-                                                        "_op": "between_date",
-                                                        "_prop": "Effective date",
-                                                        "values": [
-                                                            f"{startDate}",
-                                                            f"{endDate}"
-                                                        ]
+                                                        "_prop": "Investing entity"
                                                     }
                                                 ]
                                             }
@@ -1352,96 +1468,28 @@ class returnsApp(QWidget):
                                     },
                                     "mode": "compact"
                                 }
-                        else:
+                        else: #investor level
                             payload = {
-                            "advf": {
-                                "e": [
-                                    {
-                                        "_name": "InvestmentTransaction",
-                                        "rule": [
-                                            {
-                                                "_op": "not_null",
-                                                "_prop": "Cash flow change"
-                                            },
-                                            {
-                                                "_op": "all",
-                                                "_prop": f"{investmentLevel}",
-                                                "values": [
-                                                    "pool, llc"
+                                            "advf": {
+                                                "e": [
+                                                    {
+                                                        "_name": "InvestmentPosition",
+                                                        "e": [
+                                                            {
+                                                                "_name": "InvestorAccount"
+                                                            }
+                                                        ],
+                                                        "rule": [
+                                                            {
+                                                                "_op": "not_null",
+                                                                "_prop": "Investing entity"
+                                                            }
+                                                        ]
+                                                    }
                                                 ]
                                             },
-                                            {
-                                                "_op": "between_date",
-                                                "_prop": "Effective date",
-                                                "values": [
-                                                    f"{startDate}",
-                                                    f"{endDate}"
-                                                ]
-                                            }
-                                        ]
-                                    }
-                                ]
-                            },
-                            "mode": "compact"
-                        }
-                        
-                    else: #account (position)
-                        if j == 0: #fund level
-                            payload = {
-                                        "advf": {
-                                            "e": [
-                                                {
-                                                    "_name": "InvestmentPosition",
-                                                    "rule": [
-                                                        {
-                                                            "_op": "all",
-                                                            "_prop": f"{investmentLevel}",
-                                                            "values": [
-                                                                "pool, llc"
-                                                            ]
-                                                        },
-                                                        {
-                                                            "_op": "between_date",
-                                                            "_prop": "As of date",
-                                                            "values": [
-                                                                f"{startDate}",
-                                                                f"{endDate}"
-                                                            ]
-                                                        }
-                                                    ]
-                                                }
-                                            ]
-                                        },
-                                        "mode": "compact"
-                                    }
-                        else:
-                            payload = {
-                                        "advf": {
-                                            "e": [
-                                                {
-                                                    "_name": "InvestmentPosition",
-                                                    "rule": [
-                                                        {
-                                                            "_op": "all",
-                                                            "_prop": "Investment in",
-                                                            "values": [
-                                                                "pool, llc"
-                                                            ]
-                                                        },
-                                                        {
-                                                            "_op": "between_date",
-                                                            "_prop": "As of date",
-                                                            "values": [
-                                                                f"{startDate}",
-                                                                f"{endDate}"
-                                                            ]
-                                                        }
-                                                    ]
-                                                }
-                                            ]
-                                        },
-                                        "mode": "compact"
-                                    }
+                                            "mode": "compact"
+                                        }
                     rows = []
                     idx = 0
                     while rows in ([],None) and idx < 3: #if call fails, tries again
@@ -1479,19 +1527,19 @@ class returnsApp(QWidget):
                                 row[nameHier["Unfunded"]["local"]] = 0
                                 row[nameHier["Commitment"]["local"]] = 0
                                 row[nameHier["sleeve"]["local"]] = None
-                            self.save_to_db('positions_low', rows)
+                            save_to_db('positions_low', rows)
                         else:
                             #positions_high is not checked for new data, as the calculations overwrite Dynamo's calculations
-                            self.save_to_db('positions_high', rows)
+                            save_to_db('positions_high', rows)
                     else:
                         if j == 0:
                             if skipCalculations:
                                 checkNewestData('transactions_low',rows)
-                            self.save_to_db('transactions_low', rows)
+                            save_to_db('transactions_low', rows)
                         else:
                             if skipCalculations:
                                 checkNewestData('transactions_high',rows)
-                            self.save_to_db('transactions_high', rows)
+                            save_to_db('transactions_high', rows)
             fundPayload = {
                             "advf": {
                                 "e": [
@@ -1549,7 +1597,7 @@ class returnsApp(QWidget):
                         if row.get("Parentfund") in consolidatorFunds:
                             self.consolidatedFunds[row["Name"]] = consolidatorFunds.get(row.get("Parentfund"))
                     if rows != []:
-                        self.save_to_db("funds",rows)
+                        save_to_db("funds",rows)
                 except Exception as e:
                     print(f"Error proccessing fund API data : {e} {e.args}.  {traceback.format_exc()}")
                 
@@ -1583,7 +1631,7 @@ class returnsApp(QWidget):
                         rows = []
                     keys_to_remove = {'_id', '_es'}
                     rows = [{k: v for k, v in row.items() if k not in keys_to_remove} for row in rows]
-                    self.save_to_db("benchmarks",rows)
+                    save_to_db("benchmarks",rows)
                 except Exception as e:
                     print(f"Error proccessing benchmark API data : {e} {e.args}.  {traceback.format_exc()}")
                 
@@ -1592,19 +1640,18 @@ class returnsApp(QWidget):
             if skipCalculations:
                 print("Earliest change: ", self.earliestChangeDate)
             gui_queue.put(lambda: self.apiLoadingBar.setValue(100))
-            gui_queue.put(lambda: self.stack.setCurrentIndex(2))
             
             while not gui_queue.empty(): #wait to assure database has been updated in main thread before continuing
                 time.sleep(0.2)
             
 
 
-            self.save_to_db("history",None,action="reset") #clears history then updates most recent import
             currentTime = datetime.now().strftime("%B %d, %Y @ %I:%M %p")
-            self.save_to_db("history",[{"lastImport" : currentTime, "currentVersion": currentVersion}])
+            changeData = datetime.strftime(self.earliestChangeDate, "%B %d, %Y @ %I:%M %p")
+            save_to_db(None,None,query="UPDATE history SET [lastImport] = ?, [changeDate] = ?", inputs=(currentTime,changeData), action="replace")
             self.lastImportLabel.setText(f"Last Data Import: {currentTime}")
             gui_queue.put(lambda: self.apiLoadingBarBox.setVisible(False))
-            self.calculateReturn()
+            gui_queue.put(lambda: self.calculateReturn())
         except Exception as e:
             QMessageBox.warning(self,"Error Importing Data", f"Error pulling data from dynamo: {e} , {e.args}")
         if not testDataMode:
@@ -1622,21 +1669,21 @@ class returnsApp(QWidget):
             self.updateMonths()
             gui_queue.put(lambda: self.pullLevelNames())
             print("Calculating return....")
-            fundListDB = self.load_from_db("funds")
+            fundListDB = load_from_db("funds")
             fundList = {}
             for fund in fundListDB:
                 fundList[fund["Name"]] = fund[nameHier["sleeve"]["sleeve"]]
-            months = self.load_from_db("Months", f"ORDER BY [dateTime] ASC")
+            months = load_from_db("Months", f"ORDER BY [dateTime] ASC")
             calculations = []
             monthIdx = 0
-            if self.load_from_db("calculations") == []:
+            if load_from_db("calculations") == []:
                 noCalculations = True
             else:
                 noCalculations = False
 
             if self.earliestChangeDate > datetime.now() and not noCalculations:
                 #if no new data exists, use old calculations
-                calculations = self.load_from_db("calculations")
+                calculations = load_from_db("calculations")
                 keys = []
                 for row in calculations:
                     for key in row.keys():
@@ -1649,298 +1696,56 @@ class returnsApp(QWidget):
                     gui_queue.put(lambda: self.importButton.setEnabled(True))
                 print("Calculations skipped.")
                 return
-            skippedMonths = 0
-            for monthIdx, month in enumerate(months):
-                
-                #if the calculations for the month have already been complete, pull the old data
-                if self.earliestChangeDate > datetime.strptime(month["endDay"], "%Y-%m-%dT%H:%M:%S") and not noCalculations:
-                    previousCalculations = self.load_from_db("calculations",f"WHERE [dateTime] = ?", (month["dateTime"],))
-                    if len(previousCalculations) > 0:
-                        for calc in previousCalculations:
-                            calculations.append(calc)
-                        gui_queue.put(lambda: self.calculationLabel.setText(f"Using cached data for {month['Month']}"))
-                        skippedMonths += 1
+            
+            # proces pool section----------------------------------------------------------------
+            save_to_db("progress",None,action="reset")
+            self.init_db()
+
+            # ------------------- build data cache ----------------------
+            tables = ["positions_low", "transactions_low", "positions_high", "transactions_high", "calculations"]
+            table_rows = {t: load_from_db(t) for t in tables}
+            cache = {}
+            for table, rows in table_rows.items():
+                for row in rows:
+                    if table in ("positions_low", "transactions_low"):
+                        poolKey = row.get("Source name")
+                    elif table in ("positions_high", "transactions_high"):
+                        poolKey = row.get("Target name")
+                    else:
+                        poolKey = row.get("Pool")
+                    if poolKey is None:
                         continue
-                gui_queue.put(lambda: self.calculationLabel.setText(f"Calculating Financial Data for : {month['Month']}"))
-                totalDays = int(datetime.strptime(month["endDay"], "%Y-%m-%dT%H:%M:%S").day  - datetime.strptime(month["tranStart"], "%Y-%m-%dT%H:%M:%S").day) + 1
-                monthLowAccounts = self.load_from_db("positions_low", f"WHERE [Date] BETWEEN ? AND ?",(month["accountStart"],month["endDay"]))
-                pools = []
-                poolNames = []
-                for item in monthLowAccounts:
-                    if item["Source name"] not in poolNames:
-                        pools.append({"poolName" : item["Source name"], "assetClass" : item["ExposureAssetClass"], "subAssetClass" : item["ExposureAssetClassSub-assetClass(E)"]})
-                        poolNames.append(item["Source name"])
-                monthLowTransactions = self.load_from_db("transactions_low", f"WHERE [Date] BETWEEN ? AND ?",(month["tranStart"],month["endDay"]))
-                for item in monthLowTransactions:
-                    if item["Source name"] not in poolNames:
-                        pools.append({"poolName" : item["Source name"], "assetClass" : item["SysProp_FundTargetNameAssetClass(E)"], "subAssetClass" : item["SysProp_FundTargetNameSub-assetClass(E)"]})
-                        poolNames.append(item["Source name"])
-                for poolIdx, poolDict in enumerate(pools):
-                    if self.cancel:
-                        gui_queue.put(lambda: self.calculationLoadingBox.setVisible(False))
-                        gui_queue.put(lambda: self.importButton.setEnabled(True))
-                        gui_queue.put(lambda: QMessageBox.information(self,"Cancelling","Cancelling Calculation Process"))
-                        self.cancel = False
-                        return
-                    countedMonths = len(months) - skippedMonths
-                    loadingFraction = (
-                                            (monthIdx - skippedMonths) + (poolIdx / len(pools))
-                                        ) / countedMonths
-                    perc = max(0, min(100, int(loadingFraction * 100)))
-                    gui_queue.put(lambda: self.calculationLoadingBar.setValue(perc))
-                    ignoreFrac = 0.2
-                    if loadingFraction > ignoreFrac:
-                        loadingFraction = (loadingFraction - ignoreFrac) / (1-ignoreFrac)
-                        timeElapsed = datetime.now() - calculationStart
-                        secsElapsed = timeElapsed.total_seconds()
-                        if loadingFraction > 0:
-                            est_total_secs = secsElapsed / loadingFraction
-                            secs_remaining = est_total_secs - secsElapsed
-                        else:
-                            secs_remaining = 0
-                        mins, secs = divmod(int(secs_remaining), 60)
-                        time_str = f"{mins}m {secs}s" # format as “Xm Ys” or “MM:SS”
-                        gui_queue.put(lambda: self.calculationLabel.setText(f"Calculating Financial Data for : {month['Month']} (Estimated time remaining: {time_str})"))
-                    pool = poolDict["poolName"]
-                    poolFunds = self.load_from_db("positions_low", f"WHERE [Source name] = ? AND [Date] BETWEEN ? AND ?",(pool,month["accountStart"],month["endDay"]))
-                    #find MD denominator for each investor
-                    #find total gain per pool
-                    funds = []
-                    fundNames = []
-                    for account in poolFunds:
-                        if account["Target name"] not in fundNames:
-                            fundNames.append(account["Target name"])
-                            funds.append({"fundName" : account["Target name"], "hidden" : False})
-
-                    hiddenFunds = self.load_from_db("transactions_low", f"WHERE [Source name] = ? AND [Date] BETWEEN ? AND ?",(pool,month["accountStart"],month["endDay"]))
-                    #funds that do not have account positions. Just transactions that should not appear as a fund (ex: deferred liabilities)
-                    for account in hiddenFunds:
-                        if account["Target name"] not in fundNames:
-                            fundNames.append(account["Target name"])
-                            funds.append({"fundName" : account["Target name"], "hidden" : True})
-
-                    poolGainSum = 0
-                    poolNAV = 0
-                    poolMDdenominator = 0
-                    poolWeightedCashFlow = 0
-                    fundEntryList = []
-                    for fundDict in funds:
-                        fund = fundDict["fundName"]
-                        if fund in (None,'None'):
-                            continue
-                        hidden = fundDict["hidden"]
-                        assetClass = None
-                        subAssetClass = None
-                        fundClassification = None
-                        startEntry = self.load_from_db("positions_low", f"WHERE [Source name] = ? AND [Target name] = ? AND [Date] = ?",(pool, fund,month["accountStart"]))
-                        endEntry = self.load_from_db("positions_low", f"WHERE [Source name] = ? AND [Target name] = ? AND [Date] = ?",(pool, fund,month["endDay"]))
-                        createFinalValue = False
-                        noStartValue = False
-                        if len(startEntry) < 1:
-                            startEntry = [{nameHier["Value"]["dynLow"] : 0}]
-                            noStartValue = True
-                            commitment = 0
-                            unfunded = 0
-                        else:
-                            assetClass = startEntry[0]["ExposureAssetClass"]
-                            subAssetClass = startEntry[0]["ExposureAssetClassSub-assetClass(E)"]
-                            fundClassification = startEntry[0]["Target nameExposureHFClassificationLevel2"]
-                            if nameHier["Commitment"]["local"] in startEntry[0].keys() and nameHier["Unfunded"]["local"] in startEntry[0].keys():
-                                commitment = float(startEntry[0][nameHier["Commitment"]["local"]])
-                                unfunded = float(startEntry[0][nameHier["Unfunded"]["local"]])
-                            else:
-                                commitment = 0
-                                unfunded = 0
-                        if len(startEntry) > 1: #combines the values for fund sub classes
-                            for entry in startEntry[1:]:
-                                startEntry[0][nameHier["Value"]["dynLow"]] = str(float(startEntry[0][nameHier["Value"]["dynLow"]]) + float(entry[nameHier["Value"]["dynLow"]])) #adds values to the first index
-                        if len(endEntry) < 1:
-                            createFinalValue = True
-                            endEntry = [{nameHier["Value"]["dynLow"] : 0}]
-                        elif assetClass is None or subAssetClass is None or fundClassification is None:
-                            assetClass = endEntry[0]["ExposureAssetClass"]
-                            subAssetClass = endEntry[0]["ExposureAssetClassSub-assetClass(E)"]
-                            fundClassification = endEntry[0]["Target nameExposureHFClassificationLevel2"]
-                        if len(endEntry) > 1:
-                            for entry in endEntry[1:]:
-                                endEntry[0][nameHier["Value"]["dynLow"]] = str(float(endEntry[0][nameHier["Value"]["dynLow"]]) + float(entry[nameHier["Value"]["dynLow"]])) #adds values to the first index
-                        startEntry = startEntry[0]
-                        endEntry = endEntry[0]
-                        poolTransactions = self.load_from_db("transactions_low", f"WHERE [Source name] = ? AND [Target name] = ? AND [Date] BETWEEN ? AND ?", (pool,fund,month["tranStart"],month["endDay"]))
-                        cashFlowSum = 0
-                        weightedCashFlow = 0
-                        for transaction in poolTransactions:
-                            if assetClass is None or assetClass == "None":
-                                assetClass = transaction["SysProp_FundTargetNameAssetClass(E)"]
-                            if subAssetClass is None or subAssetClass == "None":
-                                subAssetClass = transaction["SysProp_FundTargetNameSub-assetClass(E)"]
-                            if fundClassification is None or fundClassification == "None":
-                                fundClassification = transaction["Target nameExposureHFClassificationLevel2"]
-                            if transaction["TransactionType"] not in commitmentChangeTransactionTypes and transaction[nameHier["CashFlow"]["dynLow"]] not in (None, "None"):
-                                cashFlowSum -= float(transaction[nameHier["CashFlow"]["dynLow"]])
-                                backDate = self.calculateBackdate(transaction, noStartValue)
-                                weightedCashFlow -= float(transaction[nameHier["CashFlow"]["dynLow"]])  *  (totalDays -int(datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S").day) + backDate)/totalDays
-                                if transaction.get(nameHier["Unfunded"]["dynLow"]) not in (None,"None"):
-                                    unfunded += float(transaction[nameHier["Unfunded"]["value"]])
-                            elif transaction["TransactionType"] in commitmentChangeTransactionTypes:
-                                commitment += float(transaction[nameHier["Commitment"]["dynLow"]])
-                                unfunded += float(transaction[nameHier["Commitment"]["dynLow"]])
-                        try:
-                            if startEntry[nameHier["Value"]["dynLow"]] in (None, "None"):
-                                startEntry[nameHier["Value"]["dynLow"]] = 0
-                            if endEntry[nameHier["Value"]["dynLow"]] in (None, "None"):
-                                endEntry[nameHier["Value"]["dynLow"]] = 0
-                            if createFinalValue:
-                                #implies there is no gain (cash account)
-                                endEntry[nameHier["Value"]["dynLow"]] = float(startEntry[nameHier["Value"]["dynLow"]]) + cashFlowSum    
-                            fundGain = (float(endEntry[nameHier["Value"]["dynLow"]]) - float(startEntry[nameHier["Value"]["dynLow"]]) - cashFlowSum)
-                            fundMDdenominator = float(startEntry[nameHier["Value"]["dynLow"]]) + weightedCashFlow
-                            fundNAV = float(endEntry[nameHier["Value"]["dynLow"]])
-                            fundReturn = fundGain/fundMDdenominator * 100 if fundMDdenominator != 0 else 0
-                            if fundNAV == 0 and fundMDdenominator == 0 and unfunded == 0:
-                                #skip if there is no value and no change in value
+                    for m in months:
+                        if table == "calculations":
+                            if row.get("dateTime") != m["dateTime"]:
                                 continue
-                            elif createFinalValue:
-                                fundEOMentry = {"Date" : month["endDay"], "Source name" : pool, "Target name" : fund , nameHier["Value"]["dynLow"] : endEntry[nameHier["Value"]["dynLow"]],
-                                                    "Balancetype" : "Calculated_R", "ExposureAssetClass" : assetClass, "ExposureAssetClassSub-assetClass(E)" : subAssetClass,
-                                                    nameHier["Commitment"]["local"] : commitment, nameHier["Unfunded"]["local"] : unfunded,
-                                                    nameHier["sleeve"]["local"] : fundList[fund]}
-                                self.save_to_db("positions_low",fundEOMentry, action="add")
-                            else:
-                                query = f"UPDATE positions_low SET [{nameHier['Commitment']["local"]}] = ? , [{nameHier['Unfunded']["local"]}] = ?, [{nameHier["sleeve"]["local"]}] = ? WHERE [Source name] = ? AND [Target name] = ? AND [Date] = ?"
-                                inputs = (commitment,unfunded,fundList.get(fund),pool,fund,month["endDay"])
-                                self.save_to_db("positions_low",None, action = "replace", query=query, inputs = inputs)
-                            poolGainSum += fundGain
-                            poolMDdenominator += fundMDdenominator
-                            poolNAV += fundNAV
-                            poolWeightedCashFlow += weightedCashFlow
-                            monthFundEntry = {"dateTime" : month["dateTime"], "Investor" : "Total Fund", "Pool" : pool, "Fund" : fund ,
-                                            "assetClass" : assetClass, "subAssetClass" : subAssetClass,
-                                            "NAV" : fundNAV, "Monthly Gain" : fundGain, "Return" : fundReturn , 
-                                            "MDdenominator" : fundMDdenominator, "Ownership" : "", "Classification" : fundClassification,
-                                            "Calculation Type" : "Total Fund",
-                                            nameHier["sleeve"]["local"] : fundList.get(fund),
-                                            nameHier["Commitment"]["local"] : commitment,
-                                            nameHier["Unfunded"]["local"] : unfunded}
-                            if fund not in (None,"None"): #removing blank funds (found duplicate of Monogram in 'HF Direct Investments Pool, LLC - PE (2021)' with most None values)
-                                calculations.append(monthFundEntry)
-                                fundEntryList.append(monthFundEntry)
+                        else:
+                            start = m["accountStart"] if table in ("positions_low", "positions_high") else m["tranStart"]
+                            date = row.get("Date")
+                            if not (start <= date <= m["endDay"]):
+                                continue
+                        cache.setdefault(poolKey, {}).setdefault(table, {}).setdefault(m["dateTime"], []).append(row)
 
+            self.manager = Manager()
+            self.lock = self.manager.Lock()
 
-                        except Exception as e:
-                            print(f"Skipped fund {fund} for {pool} in {month["Month"]} because: {e} {e.args}")
-                            print(traceback.format_exc())
-                            #skips fund if the values are zero and cause an error
-                    if poolNAV == 0 and poolWeightedCashFlow == 0:
-                        #skips the pool if there is no cash flow or value in the pool
-                        continue
-                    poolReturn = poolGainSum/poolMDdenominator * 100 if poolMDdenominator != 0 else 0
-                    monthPoolEntry = {"dateTime" : month["dateTime"], "Investor" : "Total Pool", "Pool" : pool, "Fund" : None ,
-                                      "assetClass" : poolDict["assetClass"], "subAssetClass" : poolDict["subAssetClass"] ,
-                                      "NAV" : poolNAV, "Monthly Gain" : poolGainSum, "Return" : poolReturn , "MDdenominator" : poolMDdenominator,
-                                        "Ownership" : None, "Calculation Type" : "Total Fund"}
-                    investorMDdenominatorSum = 0
-                    tempInvestorDicts = {}
-                    poolOwnershipSum = 0
-                    for investor in self.allInvestors:
-                        investorWeightedCashFlow = 0
-                        investorCashFlowSum = 0
-                        tempInvestorDict = {}
-                        try:
-                            startEntry = self.load_from_db("positions_high", f"WHERE [Source name] = ? AND [Target name] = ? AND [Date] = ?",(investor, pool,month["accountStart"]))[0]
-                            tempInvestorDict["Active"] = True
-                        except Exception as e:
-                            #skip month for this investor if there is no starting balance
-                            tempInvestorDict["Active"] = False
-                            continue
-                        investorTransactions = self.load_from_db("transactions_high",f"WHERE [Source name] = ? AND [Target name] = ? AND [Date] BETWEEN ? AND ?", (investor,pool,month["tranStart"],month["endDay"]))
-                        
-                        for transaction in investorTransactions:
-                            investorCashFlowSum -= float(transaction[nameHier["CashFlow"]["dynHigh"]])
-                            backDate = self.calculateBackdate(transaction)
-                            investorWeightedCashFlow -= float(transaction[nameHier["CashFlow"]["dynHigh"]])  *  (totalDays -int(datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S").day) + backDate)/totalDays
-                        investorMDdenominator = float(startEntry[nameHier["Value"]["dynHigh"]]) + investorWeightedCashFlow
-                        tempInvestorDict["MDden"] = investorMDdenominator
-                        tempInvestorDict["cashFlow"] = investorCashFlowSum
-                        tempInvestorDict["startVal"] = float(startEntry[nameHier["Value"]["dynHigh"]])
-                        tempInvestorDict["ExposureAssetClass"] = startEntry["ExposureAssetClass"]
-                        tempInvestorDict["ExposureAssetClassSub-assetClass(E)"] = startEntry["ExposureAssetClassSub-assetClass(E)"]
-                        tempInvestorDict[nameHier["Family Branch"]["local"]] = startEntry[nameHier["Family Branch"]["dynHigh"]]
-                        investorMDdenominatorSum += investorMDdenominator
-                        tempInvestorDicts[investor] = tempInvestorDict
-                    investorEOMsum = 0
-                    monthPoolEntryInvestorList = []
-                    for investor in tempInvestorDicts.keys():
-                        if tempInvestorDicts[investor]["Active"]:
-                            investorMDdenominator = tempInvestorDicts[investor]["MDden"]
-                            if investorMDdenominatorSum == 0:
-                                investorGain = 0 #0 if no true value in the pool. avoids error
-                            else:
-                                investorGain = poolGainSum * investorMDdenominator / investorMDdenominatorSum
-                            if investorMDdenominator == 0:
-                                investorReturn = 0 #0 if investor has no value in pool. avoids error
-                            else:
-                                investorReturn = investorGain / investorMDdenominator
-                            investorEOM = tempInvestorDicts[investor]["startVal"] + tempInvestorDicts[investor]["cashFlow"] + investorGain
-                            investorEOMsum += investorEOM
-                            monthPoolEntryInvestor = monthPoolEntry.copy()
-                            monthPoolEntryInvestor["Investor"] = investor
-                            monthPoolEntryInvestor[nameHier["Family Branch"]["local"]] = tempInvestorDicts[investor][nameHier["Family Branch"]["local"]]
-                            monthPoolEntryInvestor["NAV"] = investorEOM
-                            monthPoolEntryInvestor["Monthly Gain"] = investorGain
-                            monthPoolEntryInvestor["Return"] = investorReturn * 100
-                            monthPoolEntryInvestor["MDdenominator"] = investorMDdenominator
-                            ownershipPerc = investorEOM/poolNAV * 100 if poolNAV != 0 else 0
-                            monthPoolEntryInvestor["Ownership"] = ownershipPerc
-                            poolOwnershipSum += ownershipPerc
-                            # calculations.append(monthPoolEntryInvestor)
-                            # monthCalculations.append(monthPoolEntryInvestor)
-                            monthPoolEntryInvestorList.append(monthPoolEntryInvestor)
-                            inputs = (investorEOM, investor,pool, month["endDay"])
-                            EOMcheck = self.load_from_db("positions_high", f"WHERE [Source name] = ? AND [Target name] = ? AND [Date] = ?",inputs[1:])
-                            if len(EOMcheck) < 1:
-                                EOMentry = {"Date" : month["endDay"], "Source name" : investor, "Target name" : pool, nameHier["Value"]["dynHigh"] : investorEOM,
-                                             "Balancetype" : "Calculated_R", "ExposureAssetClass" : tempInvestorDicts[investor]["ExposureAssetClass"],
-                                               "ExposureAssetClassSub-assetClass(E)" : tempInvestorDicts[investor]["ExposureAssetClassSub-assetClass(E)"],
-                                               nameHier["Family Branch"]["dynHigh"] : tempInvestorDicts[investor][nameHier["Family Branch"]["local"]]}
-                                self.save_to_db("positions_high",EOMentry, action="add")
-                            else:
-                                query = "UPDATE positions_high SET Value = ? WHERE [Source name] = ? AND [Target name] = ? AND [Date] = ?"
-                                self.save_to_db("positions_high",None, action = "replace", query=query, inputs = inputs)
-                    monthPoolEntry["Ownership"] = poolOwnershipSum
-                    for investorEntry in monthPoolEntryInvestorList:
-                        for fundEntry in fundEntryList:
-                            fundInvestorNAV = investorEntry["Ownership"] / 100 * fundEntry["NAV"]
-                            fundInvestorGain = fundEntry["Monthly Gain"] / monthPoolEntry["Monthly Gain"] * investorEntry["Monthly Gain"] if monthPoolEntry["Monthly Gain"] != 0 else 0
-                            fundInvestorMDdenominator = investorEntry["MDdenominator"] / monthPoolEntry["MDdenominator"] * fundEntry["MDdenominator"] if monthPoolEntry["MDdenominator"] != 0 else 0
-                            fundInvestorReturn = fundInvestorGain / fundInvestorMDdenominator if fundInvestorMDdenominator != 0 else 0
-                            fundInvestorOwnership = fundInvestorNAV /  fundEntry["NAV"] if fundEntry["NAV"] != 0 else 0
-                            fundInvestorCommitment = fundEntry[nameHier["Commitment"]["local"]] * fundInvestorOwnership
-                            fundInvestorUnfunded = fundEntry[nameHier["Unfunded"]["local"]] * fundInvestorOwnership
-                            monthFundInvestorEntry = {"dateTime" : month["dateTime"], "Investor" : investorEntry["Investor"], "Pool" : pool, "Fund" : fundEntry["Fund"] ,
-                                            "assetClass" : fundEntry["assetClass"], "subAssetClass" : fundEntry["subAssetClass"],
-                                            "NAV" : fundInvestorNAV, "Monthly Gain" : fundInvestorGain , "Return" :  fundInvestorReturn * 100, 
-                                            "MDdenominator" : fundInvestorMDdenominator, "Ownership" : fundInvestorOwnership * 100,
-                                            "Classification" : fundEntry["Classification"], nameHier["Family Branch"]["local"] : investorEntry[nameHier["Family Branch"]["local"]],
-                                            nameHier["Commitment"]["local"] : fundInvestorCommitment, nameHier["Unfunded"]["local"] : fundInvestorUnfunded, 
-                                            "Calculation Type" : "Total Fund",
-                                            nameHier["sleeve"]["local"] : fundList.get(fundEntry["Fund"])
-                                            }
-                            calculations.append(monthFundInvestorEntry)
-                    #End of pools loop
-                #end of months loop
-            keys = []
-            for row in calculations:
-                for key in row.keys():
-                    if key not in keys:
-                        keys.append(key)
-            self.save_to_db("calculations",calculations, keys=keys)
-            gui_queue.put( lambda: self.populate(self.calculationTable,calculations,keys = keys))
-            gui_queue.put( lambda: self.buildReturnTable())
-            gui_queue.put(lambda: self.calculationLoadingBox.setVisible(False))
-            if not testDataMode:
-                gui_queue.put(lambda: self.importButton.setEnabled(True))
-            print("Calculations complete.")
+            self.pool = Pool()
+            self.futures = []
+            executor.submit(self.watch_db)
+
+            commonData = {"earliestChangeDate" : self.earliestChangeDate, "noCalculations" : noCalculations,
+                            "months" : months, "fundList" : fundList
+                            }
+            
+            self.calcStartTime = datetime.now()
+            for pool in self.pools:
+                pool["cache"] = cache.get(pool.get("poolName"))
+                res = self.pool.apply_async(processPool, args=(pool, commonData, self.lock))
+                self.futures.append(res)
+            self.pool.close()
+
+            self.timer.start(int(calculationPingTime * 0.75) * 1000) #check at 0.75 the ping time to prevent queue buildup
+            #-----------------^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^-----------------------------------
         except Exception as e:
             gui_queue.put(lambda: self.calculationLoadingBox.setVisible(False))
             gui_queue.put(lambda: self.importButton.setEnabled(True))
@@ -1948,24 +1753,124 @@ class returnsApp(QWidget):
             print("e.args:", e.args)
             # maybe also:
             print(traceback.format_exc())
-        
-    def calculateBackdate(self,transaction,noStartValue = False):
-        if transaction.get(nameHier["Transaction Time"]["dynLow"]) not in (None,"None"):
-            time = datetime.strptime(transaction.get(nameHier["Transaction Time"]["dynLow"]), "%Y-%m-%dT%H:%M:%S")
-            if time.hour == 23 and time.minute == 59:
-                #don't backdate if transaction was at the end of the day
-                backDate = 0
+    def init_db(self):
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS progress (
+                pool STRING PRIMARY KEY,
+                completed INTEGER NOT NULL,
+                total INTEGER NOT NULL,
+                status STRING NOT NULL
+            )
+        """)
+        conn.commit()
+        conn.close()
+    def watch_db(self):
+        while True:
+            try:
+                self.lock.acquire()
+                conn = sqlite3.connect(DATABASE_PATH)
+                c = conn.cursor()
+                c.execute("SELECT * FROM progress")
+                cols = [d[0] for d in c.description]
+                statusLines = [dict(zip(cols, row)) for row in c.fetchall()]
+                failed = []
+                working = []
+                for line in statusLines:
+                    if line["status"] == "Failed":
+                        failed.append(line)
+                    elif line["status"] == "Working":
+                        working.append(line)
+                if len(failed) > 0:
+                    print(f"Halting progress watch due to worker '{failed[0].get("pool","Bad Pull")}' failure.")
+                    self.queue.append(-86) #will halt the queue
+                    return
+                elif len(working) == 0 and len(statusLines) == len(self.pools):
+                    print("All workers have declared complete.")
+                    self.queue.append(100) #backup in case the numbers below fail
+                c.execute("SELECT SUM(completed), SUM(total) FROM progress")
+                result = c.fetchone()
+                conn.close()
+                if result and result[1]:
+                    complete, total = result
+                    percent = int((complete / total) * 100)
+                    self.queue.append(percent)
+                    if complete >= total:
+                        return
+                self.lock.release()
+            except Exception as e:
+                self.lock.release()
+                print(f"Error watching database: {e}")
+                print(traceback.format_exc())
+                pass
+            if self.cancel:
+                break
+            time.sleep(calculationPingTime)
+    def update_from_queue(self):
+        if self.queue:
+            val = self.queue.pop(0)
+            self.calculationLoadingBar.setValue(val)
+            timeElapsed = datetime.now() - self.calcStartTime
+            secsElapsed = timeElapsed.total_seconds()
+            loadingFraction = float(val) / 100 #decimal format percentage
+            if loadingFraction > 0:
+                est_total_secs = secsElapsed / loadingFraction
+                secs_remaining = est_total_secs - secsElapsed
             else:
-                backDate = 1 #backdate if beginning of day
-        elif datetime.strptime(transaction.get("Date"), "%Y-%m-%dT%H:%M:%S").day == 1 and noStartValue:
-            backDate = 1
-        else:
-            backDate = 0
-        return backDate
+                secs_remaining = 0
+            mins, secs = divmod(int(secs_remaining), 60)
+            time_str = f"{mins}m {secs}s" # format as “Xm Ys” or “MM:SS”
+            self.calculationLabel.setText(f"Estimated time remaining: {time_str}")
+            if val >= 100:
+                self.timer.stop()
+                self.calcCompletion()
+            elif val == -86:
+                self.timer.stop()
+                QMessageBox.warning(self,"Calculation Failure", "A worker thread has failed. Calculations will not be properly completed.")
+                self.pool.terminate()
+                self.pool.join()
+                
+    def calcCompletion(self):
+        try:
+            print("Checking worker completion...")
+            self.pool.join()
+            print("All workers finished")
+            calculations = []
+            for fut in self.futures:
+                try:
+                    calculations.extend(fut.get())
+                except Exception as e:
+                    print(f"Error appending calculations: {e}")
+            keys = []
+            for row in calculations:
+                for key in row.keys():
+                    if key not in keys:
+                        keys.append(key)
+            save_to_db("calculations",calculations, keys=keys)
+            try:
+                apiPullTime = load_from_db("history")[0]["lastImport"]
+                save_to_db(None,None,query="UPDATE history SET [lastCalculation] = ?", inputs=(apiPullTime,), action="replace")
+            except:
+                print("failed to update last calculation time")
+            gui_queue.put( lambda: self.populate(self.calculationTable,calculations,keys = keys))
+            gui_queue.put( lambda: self.buildReturnTable())
+            gui_queue.put(lambda: self.calculationLoadingBox.setVisible(False))
+            if not testDataMode:
+                gui_queue.put(lambda: self.importButton.setEnabled(True))
+            print("Calculations complete.")
+            save_to_db("progress",None,action="reset")
+        except:
+            gui_queue.put(lambda: self.calculationLoadingBox.setVisible(False))
+            gui_queue.put(lambda: self.importButton.setEnabled(True))
+            print(f"Error occured processing calculation results. Resetting... ")
+            print(traceback.format_exc())
     def checkVersion(self):
         self.currentVersionAccess = False
+        self.globalVersion = None
         try:
-            row = self.load_from_db("history")[0]
+            row = load_from_db("history")[0]
+            self.globalVersion = row["currentVersion"]
             if row["currentVersion"] == currentVersion:
                 self.currentVersionAccess = True
             else:
@@ -1975,64 +1880,6 @@ class returnsApp(QWidget):
             QMessageBox.warning(self,"Error checking version", f"An error occured checking that your version is up to date. This session has been granted limited access. \n "+
                                 "Your session will run, but cannot access the shared data. This will be signifigantly slower and may have bugs/errors. \n \n Try restarting the app." +
                                 " If this error persists, contact an admin.")
-    def save_to_db(self, table, rows, action = "", query = "",inputs = None, keys = None):
-        conn = sqlite3.connect(DATABASE_PATH)
-        cur = conn.cursor()
-        if action == "reset":
-            cur.execute(f"DROP TABLE IF EXISTS {table}")
-        elif action == "add":
-            try:
-                cols = list(rows.keys())
-                quoted_cols = ','.join(f'"{c}"' for c in cols)
-                placeholders = ','.join('?' for _ in cols)
-                sql = f'INSERT INTO "{table}" ({quoted_cols}) VALUES ({placeholders})'
-                vals = tuple(str(rows.get(c, '')) for c in cols)
-                cur.execute(sql,vals)
-                conn.commit()
-            except Exception as e:
-                print(f"Error inserting row into database: {e}")
-                print("e.args:", e.args)
-                # maybe also:
-                print(traceback.format_exc())
-        elif action == "calculationUpdate":
-            try:
-                cur.execute("DELETE FROM calculations WHERE [dateTime] = ?", inputs) #inputs input should be the date for deletion
-                for row in rows:
-                    cols = list(row.keys())
-                    quoted_cols = ','.join(f'"{c}"' for c in cols)
-                    placeholders = ','.join('?' for _ in cols)
-                    sql = (f"INSERT INTO calculations ({quoted_cols}) VALUES ({placeholders})")
-                    vals = tuple(str(row.get(c, '')) for c in cols)
-                    cur.execute(sql,vals)
-                conn.commit()
-            except Exception as e:
-                print(f"Error updating calculations in database: {e}")
-                print("e.args:", e.args)
-                # maybe also:
-                import traceback
-                print(traceback.format_exc())
-        elif action == "replace":
-            cur.execute(query,inputs)
-            conn.commit()
-        elif rows:
-            if keys is None:
-                cols = list(rows[0].keys())
-            else:
-                cols = list(keys)
-            quoted_cols = ','.join(f'"{c}"' for c in cols)
-            col_defs = ','.join(f'"{c}" TEXT' for c in cols)
-            if True:
-                cur.execute(f'DROP TABLE IF EXISTS "{table}";')
-            cur.execute(f'CREATE TABLE IF NOT EXISTS "{table}" ({col_defs})')
-            cur.execute(f'DELETE FROM "{table}"')
-            placeholders = ','.join('?' for _ in cols)
-            sql = f'INSERT INTO "{table}" ({quoted_cols}) VALUES ({placeholders})'
-            vals = [tuple(str(row.get(c, '')) for c in cols) for row in rows]
-            cur.executemany(sql, vals)
-            conn.commit()
-        else:
-            print(f"No rows found for data input to '{table}'")
-        conn.close()
     def separateRowCode(self, label):
         header = re.sub(r'##\(.*\)##', '', label, flags=re.DOTALL)
         code = re.findall(r'##\(.*\)##', label, flags=re.DOTALL)[0]
@@ -2046,7 +1893,7 @@ class returnsApp(QWidget):
             dates = sorted(dates, reverse=True)
             keys = [d.strftime("%B %Y") for d in dates]
         elif mode == "Complex Table":
-            newOrder = ["NAV","Monthly Gain","Ownership (%)","MTD","QTD","YTD"] + [f"{y}YR" for y in yearOptions] + ["ITD"]
+            newOrder = ["NAV", "Commitment", "Unfunded","MTD","QTD","YTD"] + [f"{y}YR" for y in yearOptions] + ["ITD"]
             ordered = [h for h in newOrder if h in keys]
             ordered += [h for h in keys if h not in newOrder]
             keys = ordered
@@ -2083,15 +1930,16 @@ class returnsApp(QWidget):
         for d in cleaned.values():
             d.pop("dataType", None)
 
-        if not self.headerSort.active or self.tableBtnGroup.checkedButton().text() == "Monthly Table":
+        if not self.headerSort.active or mode == "Monthly Table":
             col_keys = set()
             for d in cleaned.values():
                 col_keys |= set(d.keys())
             col_keys = list(col_keys)
 
             col_keys = self.orderColumns(col_keys)
-            exceptions = ("Return", "Ownership", "MDdenominator")
-            self.headerSort.set_items(col_keys,[item for item in col_keys if item not in exceptions])
+            if mode == "Complex Table":
+                exceptions = ("Return", "Ownership", "MDdenominator", "Monthly Gain")
+                self.headerSort.set_items(col_keys,[item for item in col_keys if item not in exceptions])
         else:
             col_keys = self.headerSort.popup.get_checked_sorted_items()
 
@@ -2171,12 +2019,96 @@ class returnsApp(QWidget):
 
         calcTableModel = DictListModel(rows,headers, self)
         table.setModel(calcTableModel)
-
-    def load_from_db(self,table, condStatement = "",parameters = None):
-        # Transactions
-        if os.path.exists(DATABASE_PATH):
+def save_to_db(table, rows, action = "", query = "",inputs = None, keys = None, connection = None, lock = None):
+    try:
+        if lock is not None:
+            lock.acquire()
+        if connection is None:
             conn = sqlite3.connect(DATABASE_PATH)
             cur = conn.cursor()
+        else:
+            conn = connection
+            cur = connection.cursor()
+        if action == "reset":
+            cur.execute(f"DROP TABLE IF EXISTS {table}")
+        elif action == "add":
+            try:
+                for row in rows:
+                    cols = list(row.keys())
+                    quoted_cols = ','.join(f'"{c}"' for c in cols)
+                    placeholders = ','.join('?' for _ in cols)
+                    sql = f'INSERT INTO "{table}" ({quoted_cols}) VALUES ({placeholders})'
+                    vals = tuple(str(row.get(c, '')) for c in cols)
+                    cur.execute(sql,vals)
+                    conn.commit()
+            except Exception as e:
+                print(f"Error inserting row into database: {e}")
+                print("e.args:", e.args)
+                # maybe also:
+                print(traceback.format_exc())
+        elif action == "calculationUpdate":
+            try:
+                cur.execute("DELETE FROM calculations WHERE [dateTime] = ?", inputs) #inputs input should be the date for deletion
+                for row in rows:
+                    cols = list(row.keys())
+                    quoted_cols = ','.join(f'"{c}"' for c in cols)
+                    placeholders = ','.join('?' for _ in cols)
+                    sql = (f"INSERT INTO calculations ({quoted_cols}) VALUES ({placeholders})")
+                    vals = tuple(str(row.get(c, '')) for c in cols)
+                    cur.execute(sql,vals)
+                conn.commit()
+            except Exception as e:
+                print(f"Error updating calculations in database: {e}")
+                print("e.args:", e.args)
+                # maybe also:
+                import traceback
+                print(traceback.format_exc())
+        elif action == "replace":
+            cur.execute(query,inputs)
+            conn.commit()
+        elif rows:
+            if keys is None:
+                cols = list(rows[0].keys())
+            else:
+                cols = list(keys)
+            quoted_cols = ','.join(f'"{c}"' for c in cols)
+            col_defs = ','.join(f'"{c}" TEXT' for c in cols)
+            if True:
+                cur.execute(f'DROP TABLE IF EXISTS "{table}";')
+            cur.execute(f'CREATE TABLE IF NOT EXISTS "{table}" ({col_defs})')
+            cur.execute(f'DELETE FROM "{table}"')
+            placeholders = ','.join('?' for _ in cols)
+            sql = f'INSERT INTO "{table}" ({quoted_cols}) VALUES ({placeholders})'
+            vals = [tuple(str(row.get(c, '')) for c in cols) for row in rows]
+            cur.executemany(sql, vals)
+            conn.commit()
+        else:
+            print(f"No rows found for data input to '{table}'")
+        if connection is None:
+            conn.close()
+        else:
+            cur.close()
+        if lock is not None:
+            lock.release()
+    except:
+        print("DB save failed. closing connections")
+        try:
+            if lock is not None:
+                lock.release()
+            cur.close()
+        except:
+            pass
+def load_from_db(table, condStatement = "",parameters = None, cursor = None, lock = None):
+    try:
+        if lock is not None:
+            lock.acquire()
+        # Transactions
+        if os.path.exists(DATABASE_PATH):
+            if cursor is None:
+                conn = sqlite3.connect(DATABASE_PATH)
+                cur = conn.cursor()
+            else:
+                cur = cursor
             try:
                 if condStatement != "" and parameters is not None:
                     cur.execute(f'SELECT * FROM {table} {condStatement}',parameters)
@@ -2186,7 +2118,10 @@ class returnsApp(QWidget):
                     cur.execute(f'SELECT * FROM {table}')
                 cols = [d[0] for d in cur.description]
                 rows = [dict(zip(cols, row)) for row in cur.fetchall()]
-                conn.close()
+                if cursor is None:
+                    conn.close()
+                if lock is not None:
+                    lock.release()
                 return rows
             except Exception as e:
                 try:
@@ -2196,12 +2131,415 @@ class returnsApp(QWidget):
                         print(f"Error loading from database: {e}, table: {table} condStatment: {condStatement}")
                     else:
                         print(f"Info: {e}, {e.args}")
-                    conn.close()
+                    if cursor is None:
+                        conn.close()
                 except:
                     pass
+                if lock is not None:
+                    lock.release()
                 return []
         else:
+            if lock is not None:
+                lock.release()
             return []
+    except:
+        print("DB load failed. closing connections")
+        try:
+            if lock is not None:
+                lock.release()
+            if cursor is None:
+                cur.close()
+        except:
+            pass
+def updateStatus(pool,totalLoops, lock, status = "Working", connection = None):
+    failure = False
+    try:
+        
+        lock.acquire()
+        if connection is None:
+            conn = sqlite3.connect(DATABASE_PATH)
+        else:
+            conn = connection
+        c = conn.cursor()
+
+        c.execute("SELECT status FROM progress WHERE status = ?",("Failed",))
+        failed = c.fetchall()
+        if len(failed) > 0:
+            failure = True
+        # Update or insert progress for this worker
+        if status == "Working":
+            c.execute("""
+                INSERT INTO progress (pool, completed, total,status)
+                VALUES (?, 0, ?,?)
+                ON CONFLICT(pool) DO UPDATE SET completed = completed + 1
+            """, (pool, totalLoops,status))
+        elif status == "Completed":
+            c.execute("UPDATE progress SET completed = completed + 1, status = ? WHERE pool = ?", (status,pool))
+        else:
+            c.execute("UPDATE progress SET status = ? WHERE pool = ?", (status,pool))
+
+        conn.commit()
+        if connection is None:
+            conn.close()
+    except Exception as e:
+        print(f"Error updating status: {e}")
+    finally:
+        lock.release()
+    return failure
+def processPool(poolData : dict,selfData : dict, lock):
+    try:
+        earliestChangeDate = selfData.get("earliestChangeDate")
+        noCalculations = selfData.get("noCalculations")
+        months = selfData.get("months")
+        fundList = selfData.get("fundList")
+        calculations = []
+        pool = poolData.get("poolName")
+        cache = poolData.get("cache")
+        calcConnection = sqlite3.connect(DATABASE_PATH)
+        calcCursor = calcConnection.cursor()
+        newMonths = []
+        insert_low = []
+        update_low = []
+        insert_high = []
+        update_high = []
+
+
+        if not noCalculations: #if there are calculations, find all months before the data pull, and then pull those calculations
+            for month in months:
+                #if the calculations for the month have already been complete, pull the old data
+                if earliestChangeDate > datetime.strptime(month["endDay"], "%Y-%m-%dT%H:%M:%S"):
+                    calculations.extend(cache.get("calculations", {}).get(month["dateTime"], []))
+                else:
+                    newMonths.append(month)
+        else:
+            newMonths = months
+        for month in newMonths:
+            failed = updateStatus(pool,len(newMonths),lock,connection=calcConnection) #iterate progress up once after each completed month
+            if failed: #if other workers failed, halt the process
+                print(f"Exiting worker {pool} due to other failure...")
+                return []
+            totalDays = int(datetime.strptime(month["endDay"], "%Y-%m-%dT%H:%M:%S").day  - datetime.strptime(month["tranStart"], "%Y-%m-%dT%H:%M:%S").day) + 1
+            poolFunds = cache.get("positions_low", {}).get(month["dateTime"], [])
+            #find MD denominator for each investor
+            #find total gain per pool
+            funds = []
+            fundNames = []
+            startEntries = {}
+            endEntries = {}
+            for account in poolFunds:
+                if account["Target name"] not in fundNames:
+                    fundNames.append(account["Target name"])
+                    funds.append({"fundName" : account["Target name"], "hidden" : False})
+                if account["Date"] == month["accountStart"]:
+                    if account["Target name"] not in startEntries:
+                        startEntries[account["Target name"]] = [account,]
+                    else:
+                        startEntries[account["Target name"]].append(account)
+                elif account["Date"] == month["endDay"]:
+                    if account["Target name"] not in endEntries:
+                        endEntries[account["Target name"]] = [account,]
+                    else:
+                        endEntries[account["Target name"]].append(account)
+
+            hiddenFunds = cache.get("transactions_low", {}).get(month["dateTime"], [])
+            #funds that do not have account positions. Just transactions that should not appear as a fund (ex: deferred liabilities)
+            allPoolTransactions = {}
+            for transaction in hiddenFunds:
+                if transaction["Target name"] not in fundNames:
+                    fundNames.append(transaction["Target name"])
+                    funds.append({"fundName" : transaction["Target name"], "hidden" : True})
+                if transaction["Target name"] not in allPoolTransactions:
+                    allPoolTransactions[transaction["Target name"]] = [transaction,]
+                else:
+                    allPoolTransactions[transaction["Target name"]].append(transaction)
+
+            poolGainSum = 0
+            poolNAV = 0
+            poolMDdenominator = 0
+            poolWeightedCashFlow = 0
+            fundEntryList = []
+            for fundDict in funds:
+                fund = fundDict["fundName"]
+                if fund in (None,'None'):
+                    continue
+                hidden = fundDict["hidden"]
+                assetClass = None
+                subAssetClass = None
+                fundClassification = None
+                startEntryCache = startEntries.get(fund, [])
+                endEntryCache = endEntries.get(fund, [])
+                startEntry = copy.deepcopy(startEntryCache)
+                endEntry = copy.deepcopy(endEntryCache)
+                createFinalValue = False
+                noStartValue = False
+                if len(startEntry) < 1:
+                    startEntry = [{nameHier["Value"]["dynLow"] : 0}]
+                    noStartValue = True
+                    commitment = 0
+                    unfunded = 0
+                else:
+                    assetClass = startEntry[0]["ExposureAssetClass"]
+                    subAssetClass = startEntry[0]["ExposureAssetClassSub-assetClass(E)"]
+                    fundClassification = startEntry[0]["Target nameExposureHFClassificationLevel2"]
+                    commitment = float(startEntry[0].get(nameHier["Commitment"]["local"],0))
+                    unfunded = float(startEntry[0].get(nameHier["Unfunded"]["local"],0))
+                if len(startEntry) > 1: #combines the values for fund sub classes
+                    for entry in startEntry[1:]:
+                        startEntry[0][nameHier["Value"]["dynLow"]] = str(float(startEntry[0][nameHier["Value"]["dynLow"]]) + float(entry[nameHier["Value"]["dynLow"]])) #adds values to the first index
+                if len(endEntry) < 1:
+                    createFinalValue = True
+                    endEntry = [{nameHier["Value"]["dynLow"] : 0}]
+                elif assetClass is None or subAssetClass is None or fundClassification is None:
+                    assetClass = endEntry[0]["ExposureAssetClass"]
+                    subAssetClass = endEntry[0]["ExposureAssetClassSub-assetClass(E)"]
+                    fundClassification = endEntry[0]["Target nameExposureHFClassificationLevel2"]
+                if len(endEntry) > 1:
+                    for entry in endEntry[1:]:
+                        endEntry[0][nameHier["Value"]["dynLow"]] = str(float(endEntry[0][nameHier["Value"]["dynLow"]]) + float(entry[nameHier["Value"]["dynLow"]])) #adds values to the first index
+                startEntry = startEntry[0]
+                endEntry = endEntry[0]
+                fundTransactions = allPoolTransactions.get(fund,[])
+                cashFlowSum = 0
+                weightedCashFlow = 0
+                for transaction in fundTransactions:
+                    if assetClass is None or assetClass == "None":
+                        assetClass = transaction["SysProp_FundTargetNameAssetClass(E)"]
+                    if subAssetClass is None or subAssetClass == "None":
+                        subAssetClass = transaction["SysProp_FundTargetNameSub-assetClass(E)"]
+                    if fundClassification is None or fundClassification == "None":
+                        fundClassification = transaction["Target nameExposureHFClassificationLevel2"]
+                    if transaction["TransactionType"] not in commitmentChangeTransactionTypes and transaction[nameHier["CashFlow"]["dynLow"]] not in (None, "None"):
+                        cashFlowSum -= float(transaction[nameHier["CashFlow"]["dynLow"]])
+                        backDate = calculateBackdate(transaction, noStartValue)
+                        weightedCashFlow -= float(transaction[nameHier["CashFlow"]["dynLow"]])  *  (totalDays -int(datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S").day) + backDate)/totalDays
+                        if transaction.get(nameHier["Unfunded"]["dynLow"]) not in (None,"None"):
+                            unfunded += float(transaction[nameHier["Unfunded"]["value"]])
+                    elif transaction["TransactionType"] in commitmentChangeTransactionTypes:
+                        commitment += float(transaction[nameHier["Commitment"]["dynLow"]])
+                        unfunded += float(transaction[nameHier["Commitment"]["dynLow"]])
+                try:
+                    if startEntry[nameHier["Value"]["dynLow"]] in (None, "None"):
+                        startEntry[nameHier["Value"]["dynLow"]] = 0
+                    if endEntry[nameHier["Value"]["dynLow"]] in (None, "None"):
+                        endEntry[nameHier["Value"]["dynLow"]] = 0
+                    if createFinalValue:
+                        #implies there is no gain (cash account)
+                        endEntry[nameHier["Value"]["dynLow"]] = float(startEntry[nameHier["Value"]["dynLow"]]) + cashFlowSum    
+                    fundGain = (float(endEntry[nameHier["Value"]["dynLow"]]) - float(startEntry[nameHier["Value"]["dynLow"]]) - cashFlowSum)
+                    fundMDdenominator = float(startEntry[nameHier["Value"]["dynLow"]]) + weightedCashFlow
+                    fundNAV = float(endEntry[nameHier["Value"]["dynLow"]])
+                    fundReturn = fundGain/fundMDdenominator * 100 if fundMDdenominator != 0 else 0
+                    if unfunded < 0:
+                        unfunded = 0 #corrects for if original commitment was not logged
+                    if fundNAV == 0 and fundMDdenominator == 0 and unfunded == 0:
+                        #skip if there is no value and no change in value
+                        continue
+                    elif createFinalValue:
+                        fundEOMentry = {"Date" : month["endDay"], "Source name" : pool, "Target name" : fund , nameHier["Value"]["dynLow"] : endEntry[nameHier["Value"]["dynLow"]],
+                                            "Balancetype" : "Calculated_R", "ExposureAssetClass" : assetClass, "ExposureAssetClassSub-assetClass(E)" : subAssetClass,
+                                            nameHier["Commitment"]["local"] : commitment, nameHier["Unfunded"]["local"] : unfunded,
+                                            nameHier["sleeve"]["local"] : fundList[fund], nameHier["Classification"]["dynLow"] : fundClassification}
+                        insert_low.append(fundEOMentry)
+                        # update cache for subsequent months
+                        for m in months:
+                            if m["accountStart"] <= month["endDay"] <= m["endDay"]:
+                                cache.setdefault("positions_low", {}).setdefault(m["dateTime"], []).append(fundEOMentry)
+                                break
+                    else:
+                        query = f"UPDATE positions_low SET [{nameHier['Commitment']["local"]}] = ? , [{nameHier['Unfunded']["local"]}] = ?, [{nameHier["sleeve"]["local"]}] = ? WHERE [Source name] = ? AND [Target name] = ? AND [Date] = ?"
+                        inputs = (commitment,unfunded,fundList.get(fund),pool,fund,month["endDay"])
+                        update_low.append(inputs)
+                        # update cache for all months referencing this date
+                        for m in months:
+                            if m["accountStart"] <= month["endDay"] <= m["endDay"]:
+                                for lst in cache.get("positions_low", {}).get(m["dateTime"], []):
+                                    if lst["Target name"] == fund and lst["Date"] == month["endDay"]:
+                                        lst[nameHier["Commitment"]["local"]] = commitment
+                                        lst[nameHier["Unfunded"]["local"]] = unfunded
+                                        lst[nameHier["sleeve"]["local"]] = fundList.get(fund)
+                    poolGainSum += fundGain
+                    poolMDdenominator += fundMDdenominator
+                    poolNAV += fundNAV
+                    poolWeightedCashFlow += weightedCashFlow
+                    monthFundEntry = {"dateTime" : month["dateTime"], "Investor" : "Total Fund", "Pool" : pool, "Fund" : fund ,
+                                    "assetClass" : assetClass, "subAssetClass" : subAssetClass,
+                                    "NAV" : fundNAV, "Monthly Gain" : fundGain, "Return" : fundReturn , 
+                                    "MDdenominator" : fundMDdenominator, "Ownership" : "", "Classification" : fundClassification,
+                                    "Calculation Type" : "Total Fund",
+                                    nameHier["sleeve"]["local"] : fundList.get(fund),
+                                    nameHier["Commitment"]["local"] : commitment,
+                                    nameHier["Unfunded"]["local"] : unfunded}
+                    if fund not in (None,"None"): #removing blank funds (found duplicate of Monogram in 'HF Direct Investments Pool, LLC - PE (2021)' with most None values)
+                        calculations.append(monthFundEntry)
+                        fundEntryList.append(monthFundEntry)
+
+
+                except Exception as e:
+                    print(f"Skipped fund {fund} for {pool} in {month["Month"]} because: {e} {e.args}")
+                    print(traceback.format_exc())
+                    #skips fund if the values are zero and cause an error
+            if poolNAV == 0 and poolWeightedCashFlow == 0:
+                #skips the pool if there is no cash flow or value in the pool
+                continue
+            poolReturn = poolGainSum/poolMDdenominator * 100 if poolMDdenominator != 0 else 0
+            monthPoolEntry = {"dateTime" : month["dateTime"], "Investor" : "Total Pool", "Pool" : pool, "Fund" : None ,
+                            "assetClass" : poolData.get("assetClass"), "subAssetClass" : poolData.get("subAssetClass") ,
+                            "NAV" : poolNAV, "Monthly Gain" : poolGainSum, "Return" : poolReturn , "MDdenominator" : poolMDdenominator,
+                                "Ownership" : None, "Calculation Type" : "Total Fund"}
+            investorStartEntries = {}
+            investorEndEntries = {}
+            investorPositions = cache.get("positions_high", {}).get(month["dateTime"], [])
+            for pos in investorPositions:
+                investor = pos["Source name"]
+                if pos["Date"] == month["accountStart"]:
+                    if investor not in investorStartEntries:
+                        investorStartEntries[investor] = [pos,]
+                    else:
+                        investorStartEntries[investor].append(pos)
+                if pos["Date"] == month["endDay"]:
+                    if investor not in investorEndEntries:
+                        investorEndEntries[investor] = [pos,]
+                    else:
+                        investorEndEntries[investor].append(pos)
+
+            allInvestorTransactions = {}
+            transactions = cache.get("transactions_high", {}).get(month["dateTime"], [])
+            for tran in transactions:
+                investor = tran["Source name"]
+                if investor not in allInvestorTransactions:
+                    allInvestorTransactions[investor] = [tran,]
+                else:
+                    allInvestorTransactions[investor].append(tran)
+
+
+            investorMDdenominatorSum = 0
+            tempInvestorDicts = {}
+            poolOwnershipSum = 0
+            for investor in investorStartEntries:
+                investorWeightedCashFlow = 0
+                investorCashFlowSum = 0
+                tempInvestorDict = {}
+                try:
+                    startEntry = investorStartEntries.get(investor)[0]
+                    tempInvestorDict["Active"] = True
+                except Exception as e:
+                    #skip month for this investor if there is no starting balance
+                    tempInvestorDict["Active"] = False
+                    continue
+                investorTransactions = allInvestorTransactions.get(investor,[])
+                
+                for transaction in investorTransactions:
+                    investorCashFlowSum -= float(transaction[nameHier["CashFlow"]["dynHigh"]])
+                    backDate = calculateBackdate(transaction)
+                    investorWeightedCashFlow -= float(transaction[nameHier["CashFlow"]["dynHigh"]])  *  (totalDays -int(datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S").day) + backDate)/totalDays
+                investorMDdenominator = float(startEntry[nameHier["Value"]["dynHigh"]]) + investorWeightedCashFlow
+                tempInvestorDict["MDden"] = investorMDdenominator
+                tempInvestorDict["cashFlow"] = investorCashFlowSum
+                tempInvestorDict["startVal"] = float(startEntry[nameHier["Value"]["dynHigh"]])
+                tempInvestorDict["ExposureAssetClass"] = startEntry["ExposureAssetClass"]
+                tempInvestorDict["ExposureAssetClassSub-assetClass(E)"] = startEntry["ExposureAssetClassSub-assetClass(E)"]
+                tempInvestorDict[nameHier["Family Branch"]["local"]] = startEntry[nameHier["Family Branch"]["dynHigh"]]
+                investorMDdenominatorSum += investorMDdenominator
+                tempInvestorDicts[investor] = tempInvestorDict
+            investorEOMsum = 0
+            monthPoolEntryInvestorList = []
+            for investor in tempInvestorDicts.keys():
+                if tempInvestorDicts[investor]["Active"]:
+                    investorMDdenominator = tempInvestorDicts[investor]["MDden"]
+                    if investorMDdenominatorSum == 0:
+                        investorGain = 0 #0 if no true value in the pool. avoids error
+                    else:
+                        investorGain = poolGainSum * investorMDdenominator / investorMDdenominatorSum
+                    if investorMDdenominator == 0:
+                        investorReturn = 0 #0 if investor has no value in pool. avoids error
+                    else:
+                        investorReturn = investorGain / investorMDdenominator
+                    investorEOM = tempInvestorDicts[investor]["startVal"] + tempInvestorDicts[investor]["cashFlow"] + investorGain
+                    investorEOMsum += investorEOM
+                    monthPoolEntryInvestor = monthPoolEntry.copy()
+                    monthPoolEntryInvestor["Investor"] = investor
+                    monthPoolEntryInvestor[nameHier["Family Branch"]["local"]] = tempInvestorDicts[investor][nameHier["Family Branch"]["local"]]
+                    monthPoolEntryInvestor["NAV"] = investorEOM
+                    monthPoolEntryInvestor["Monthly Gain"] = investorGain
+                    monthPoolEntryInvestor["Return"] = investorReturn * 100
+                    monthPoolEntryInvestor["MDdenominator"] = investorMDdenominator
+                    ownershipPerc = investorEOM/poolNAV * 100 if poolNAV != 0 else 0
+                    monthPoolEntryInvestor["Ownership"] = ownershipPerc
+                    poolOwnershipSum += ownershipPerc
+                    monthPoolEntryInvestorList.append(monthPoolEntryInvestor)
+                    inputs = (investorEOM, investor,pool, month["endDay"])
+                    EOMcheck = investorEndEntries.get(investor,[])
+                    if len(EOMcheck) < 1:
+                        EOMentry = {"Date" : month["endDay"], "Source name" : investor, "Target name" : pool, nameHier["Value"]["dynHigh"] : investorEOM,
+                                    "Balancetype" : "Calculated_R", "ExposureAssetClass" : tempInvestorDicts[investor]["ExposureAssetClass"],
+                                    "ExposureAssetClassSub-assetClass(E)" : tempInvestorDicts[investor]["ExposureAssetClassSub-assetClass(E)"],
+                                    nameHier["Family Branch"]["dynHigh"] : tempInvestorDicts[investor][nameHier["Family Branch"]["local"]]}
+                        insert_high.append(EOMentry)
+                        for m in months:
+                            if m["accountStart"] <= month["endDay"] <= m["endDay"]:
+                                cache.setdefault("positions_high", {}).setdefault(m["dateTime"], []).append(EOMentry)
+                                break
+                    else:
+                        update_high.append(inputs)
+                        for m in months:
+                            if m["accountStart"] <= month["endDay"] <= m["endDay"]:
+                                for lst in cache.get("positions_high", {}).get(m["dateTime"], []):
+                                    if lst["Source name"] == investor and lst["Target name"] == pool and lst["Date"] == month["endDay"]:
+                                        lst[nameHier["Value"]["dynHigh"]] = investorEOM
+                                        break
+            monthPoolEntry["Ownership"] = poolOwnershipSum
+            for investorEntry in monthPoolEntryInvestorList:
+                for fundEntry in fundEntryList:
+                    fundInvestorNAV = investorEntry["Ownership"] / 100 * fundEntry["NAV"]
+                    fundInvestorGain = fundEntry["Monthly Gain"] / monthPoolEntry["Monthly Gain"] * investorEntry["Monthly Gain"] if monthPoolEntry["Monthly Gain"] != 0 else 0
+                    fundInvestorMDdenominator = investorEntry["MDdenominator"] / monthPoolEntry["MDdenominator"] * fundEntry["MDdenominator"] if monthPoolEntry["MDdenominator"] != 0 else 0
+                    fundInvestorReturn = fundInvestorGain / fundInvestorMDdenominator if fundInvestorMDdenominator != 0 else 0
+                    fundInvestorOwnership = fundInvestorNAV /  fundEntry["NAV"] if fundEntry["NAV"] != 0 else 0
+                    fundInvestorCommitment = fundEntry[nameHier["Commitment"]["local"]] * fundInvestorOwnership
+                    fundInvestorUnfunded = fundEntry[nameHier["Unfunded"]["local"]] * fundInvestorOwnership
+                    monthFundInvestorEntry = {"dateTime" : month["dateTime"], "Investor" : investorEntry["Investor"], "Pool" : pool, "Fund" : fundEntry["Fund"] ,
+                                    "assetClass" : fundEntry["assetClass"], "subAssetClass" : fundEntry["subAssetClass"],
+                                    "NAV" : fundInvestorNAV, "Monthly Gain" : fundInvestorGain , "Return" :  fundInvestorReturn * 100, 
+                                    "MDdenominator" : fundInvestorMDdenominator, "Ownership" : fundInvestorOwnership * 100,
+                                    "Classification" : fundEntry["Classification"], nameHier["Family Branch"]["local"] : investorEntry[nameHier["Family Branch"]["local"]],
+                                    nameHier["Commitment"]["local"] : fundInvestorCommitment, nameHier["Unfunded"]["local"] : fundInvestorUnfunded, 
+                                    "Calculation Type" : "Total Fund",
+                                    nameHier["sleeve"]["local"] : fundList.get(fundEntry["Fund"])
+                                    }
+                    calculations.append(monthFundInvestorEntry)
+            #end of months loop
+        if insert_low:
+            save_to_db("positions_low", insert_low, action="add", connection=calcConnection, lock=lock)
+        if update_low:
+            query = f"UPDATE positions_low SET [{nameHier['Commitment']['local']}] = ?, [{nameHier['Unfunded']['local']}] = ?, [{nameHier['sleeve']['local']}] = ? WHERE [Source name] = ? AND [Target name] = ? AND [Date] = ?"
+            lock.acquire()
+            try:
+                calcCursor.executemany(query, update_low)
+                calcConnection.commit()
+            finally:
+                lock.release()
+        failed = updateStatus(pool,len(newMonths),lock,connection=calcConnection, status="Completed")
+        return calculations
+    except Exception as e:
+        failed = updateStatus(pool,len(newMonths),lock,connection=calcConnection, status="Failed")
+        print(f"Worker for {poolData.get("poolName")} failed.")
+        print(traceback.format_exc())
+        print("\n")
+        return []
+            
+def calculateBackdate(transaction,noStartValue = False):
+        if transaction.get(nameHier["Transaction Time"]["dynLow"]) not in (None,"None"):
+            time = datetime.strptime(transaction.get(nameHier["Transaction Time"]["dynLow"]), "%Y-%m-%dT%H:%M:%S")
+            if time.hour == 23 and time.minute == 59:
+                #don't backdate if transaction was at the end of the day
+                backDate = 0
+            else:
+                backDate = 1 #backdate if beginning of day
+        elif datetime.strptime(transaction.get("Date"), "%Y-%m-%dT%H:%M:%S").day == 1 and noStartValue:
+            backDate = 1
+        else:
+            backDate = 0
+        return backDate
 
 class DictListModel(QAbstractTableModel):
     """
@@ -2440,7 +2778,7 @@ class underlyingDataWindow(QWidget):
                             inputs.extend(filterSelections)
                 inputs.extend([highTables[table],allEnd])
                 try:
-                    rows = self.parent.load_from_db(table,query.removesuffix("AND") + " AND [Date] BETWEEN ? AND ?", tuple(inputs))
+                    rows = load_from_db(table,query.removesuffix("AND") + " AND [Date] BETWEEN ? AND ?", tuple(inputs))
                 except Exception as e:
                     print(f"Error in call : {e} ; {e.args}")
                     rows = []
@@ -2497,7 +2835,7 @@ class underlyingDataWindow(QWidget):
                         inputs.extend(filterSelections)
             inputs.extend([lowTables[table],allEnd])
             try:
-                rows = self.parent.load_from_db(table,query.removesuffix("AND") + " AND [Date] BETWEEN ? AND ?", tuple(inputs))
+                rows = load_from_db(table,query.removesuffix("AND") + " AND [Date] BETWEEN ? AND ?", tuple(inputs))
             except Exception as e:
                 print(f"Error in call : {e}; {e.args}")
                 rows = []
@@ -2930,6 +3268,7 @@ class SmartStretchTable(QTableWidget):
         QTimer.singleShot(0, self._maybeStretchColumns)
 
 if __name__ == '__main__':
+    freeze_support()
     key = os.environ.get(dynamoAPIenvName)
     ok = key
     app = QApplication(sys.argv)
