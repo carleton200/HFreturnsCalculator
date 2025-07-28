@@ -452,6 +452,8 @@ class returnsApp(QWidget):
     def cancelCalc(self):
         if self.pool:
             self.pool.terminate()
+        if self.timer:
+            self.timer.stop()
         self.cancel = True
     def viewUnderlyingData(self):
         row = self.returnsTable.currentRow()
@@ -2027,13 +2029,14 @@ def save_to_db(table, rows, action = "", query = "",inputs = None, keys = None, 
             cur.execute(f"DROP TABLE IF EXISTS {table}")
         elif action == "add":
             try:
-                cols = list(rows.keys())
-                quoted_cols = ','.join(f'"{c}"' for c in cols)
-                placeholders = ','.join('?' for _ in cols)
-                sql = f'INSERT INTO "{table}" ({quoted_cols}) VALUES ({placeholders})'
-                vals = tuple(str(rows.get(c, '')) for c in cols)
-                cur.execute(sql,vals)
-                conn.commit()
+                for row in rows:
+                    cols = list(row.keys())
+                    quoted_cols = ','.join(f'"{c}"' for c in cols)
+                    placeholders = ','.join('?' for _ in cols)
+                    sql = f'INSERT INTO "{table}" ({quoted_cols}) VALUES ({placeholders})'
+                    vals = tuple(str(row.get(c, '')) for c in cols)
+                    cur.execute(sql,vals)
+                    conn.commit()
             except Exception as e:
                 print(f"Error inserting row into database: {e}")
                 print("e.args:", e.args)
@@ -2193,6 +2196,9 @@ def processPool(poolData : dict,selfData : dict, lock):
         newMonths = []
         insert_low = []
         update_low = []
+        insert_high = []
+        update_high = []
+
 
         if not noCalculations: #if there are calculations, find all months before the data pull, and then pull those calculations
             for month in months:
@@ -2461,10 +2467,19 @@ def processPool(poolData : dict,selfData : dict, lock):
                                     "Balancetype" : "Calculated_R", "ExposureAssetClass" : tempInvestorDicts[investor]["ExposureAssetClass"],
                                     "ExposureAssetClassSub-assetClass(E)" : tempInvestorDicts[investor]["ExposureAssetClassSub-assetClass(E)"],
                                     nameHier["Family Branch"]["dynHigh"] : tempInvestorDicts[investor][nameHier["Family Branch"]["local"]]}
-                        save_to_db("positions_high",EOMentry, action="add", connection=calcConnection, lock=lock)
+                        insert_high.append(EOMentry)
+                        for m in months:
+                            if m["accountStart"] <= month["endDay"] <= m["endDay"]:
+                                cache.setdefault("positions_high", {}).setdefault(m["dateTime"], []).append(EOMentry)
+                                break
                     else:
-                        query = "UPDATE positions_high SET Value = ? WHERE [Source name] = ? AND [Target name] = ? AND [Date] = ?"
-                        save_to_db("positions_high",None, action = "replace", query=query, inputs = inputs, connection=calcConnection, lock=lock)
+                        update_high.append(inputs)
+                        for m in months:
+                            if m["accountStart"] <= month["endDay"] <= m["endDay"]:
+                                for lst in cache.get("positions_high", {}).get(m["dateTime"], []):
+                                    if lst["Source name"] == investor and lst["Target name"] == pool and lst["Date"] == month["endDay"]:
+                                        lst[nameHier["Value"]["dynHigh"]] = investorEOM
+                                        break
             monthPoolEntry["Ownership"] = poolOwnershipSum
             for investorEntry in monthPoolEntryInvestorList:
                 for fundEntry in fundEntryList:
@@ -2756,7 +2771,7 @@ class underlyingDataWindow(QWidget):
                             inputs.extend(filterSelections)
                 inputs.extend([highTables[table],allEnd])
                 try:
-                    rows = self.parent.load_from_db(table,query.removesuffix("AND") + " AND [Date] BETWEEN ? AND ?", tuple(inputs))
+                    rows = load_from_db(table,query.removesuffix("AND") + " AND [Date] BETWEEN ? AND ?", tuple(inputs))
                 except Exception as e:
                     print(f"Error in call : {e} ; {e.args}")
                     rows = []
@@ -2813,7 +2828,7 @@ class underlyingDataWindow(QWidget):
                         inputs.extend(filterSelections)
             inputs.extend([lowTables[table],allEnd])
             try:
-                rows = self.parent.load_from_db(table,query.removesuffix("AND") + " AND [Date] BETWEEN ? AND ?", tuple(inputs))
+                rows = load_from_db(table,query.removesuffix("AND") + " AND [Date] BETWEEN ? AND ?", tuple(inputs))
             except Exception as e:
                 print(f"Error in call : {e}; {e.args}")
                 rows = []
