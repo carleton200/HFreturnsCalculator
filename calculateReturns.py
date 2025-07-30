@@ -16,6 +16,7 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 import queue
 import threading
+import logging, functools
 from dateutil.relativedelta import relativedelta
 from multiprocessing import Pool, freeze_support, Manager
 from PyQt5.QtWidgets import (
@@ -29,7 +30,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtGui import QBrush, QColor, QDesktopServices
 from PyQt5.QtCore import Qt, QTimer, QAbstractTableModel, QModelIndex, pyqtSignal, QPoint, QUrl
 
-currentVersion = "1.0.4"
+currentVersion = "1.0.5"
 testDataMode = False
 onlyCalcTestMode = True
 demoMode = False
@@ -49,6 +50,7 @@ def poll_queue():
                     print(f"Error occured while attempting to run background gui update: {e}. \n traceback: \n {trace}")
     except queue.Empty:
         pass
+
 # Determine assets path, works in PyInstaller bundle or script
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -62,6 +64,28 @@ else:
 
 if not os.path.exists(BASE_DIR):
     os.makedirs(BASE_DIR)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    filename=ASSETS_DIR + "/systemLogs.log",
+    filemode="a"
+)
+def log_exceptions(method):
+    @functools.wraps(method)
+    def wrapper(*args, **kwargs):
+        try:
+            return method(*args, **kwargs)
+        except Exception as e:
+            logging.exception(f"Error in {method.__qualname__}: {e}")
+            raise  # Re-raise the exception after logging
+    return wrapper
+def attach_logging_to_class(cls):
+    for attr_name, attr_value in cls.__dict__.items():
+        if callable(attr_value):  # Only wrap methods
+            setattr(cls, attr_name, log_exceptions(attr_value))
+    return cls
 
 dynamoAPIenvName = "Dynamo_API"
 mainURL = "https://api.dynamosoftware.com/api/v2.2"
@@ -82,13 +106,14 @@ headerOptions = ["Return","NAV", "Monthly Gain", "Ownership" , "MDdenominator", 
 dataOptions = ["Investor","Family Branch","Classification", "dateTime"]
 yearOptions = (1,2,3,5,7,10,12,15,20)
 
-timeOptions = ["MTD","QTD","YTD", "Ownership", "Return", "ITD"] + [f"{y}YR" for y in yearOptions]
+timeOptions = ["MTD","QTD","YTD", "ITD"] + [f"{y}YR" for y in yearOptions]
 percent_headers = {option for option in timeOptions}
 for header in ("Return","Ownership"):
     percent_headers.add(header)
 
 calculationPingTime = 2
 
+@attach_logging_to_class
 class returnsApp(QWidget):
     def __init__(self, start_index=0):
         super().__init__()
@@ -109,6 +134,7 @@ class returnsApp(QWidget):
         self.buildTableCancel = None
         self.buildTableFuture = None
         self.cFundsCalculated = False
+        self.previousGrouping = []
 
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_from_queue)
@@ -451,7 +477,7 @@ class returnsApp(QWidget):
     def cancelCalc(self):
         _ = updateStatus("DummyFail",99,lock=self.lock, status="Failed")
         self.cancel = True
-    def viewUnderlyingData(self):
+    def viewUnderlyingData(self,*_):
         row = self.returnsTable.currentRow()
         col = self.returnsTable.currentColumn()
         key = list(self.filteredReturnsTableData.keys())[row]
@@ -469,7 +495,7 @@ class returnsApp(QWidget):
                 window.show()
         except Exception as e:
             print(f"Error in data viewing window: {e} {traceback.format_exc()}")
-    def exportCurrentTable(self):
+    def exportCurrentTable(self,*_):
         # helper to darken a 6-digit hex color by a given factor
         def darken_color(hex_color, factor=0.01):
             h = hex_color.strip("#")
@@ -646,7 +672,7 @@ class returnsApp(QWidget):
                 self.buildReturnTable()
             else:
                 self.populateReturnsTable(self.currentTableData)
-    def resetData(self):
+    def resetData(self,*_):
         save_to_db("calculations",None,action="reset") #reset calculations so new data will be freshly calculated
         self.poolChangeDates = {"active" : False}
         if testDataMode or onlyCalcTestMode:
@@ -670,7 +696,7 @@ class returnsApp(QWidget):
         self.dataEndSelect.setCurrentText(monthList[-1])
         self.dataStartSelect.addItems(monthList)
         self.dataStartSelect.setCurrentText(monthList[0])
-    def buildReturnTable(self):
+    def buildReturnTable(self, *_):
         self.buildTableLoadingBox.setVisible(True)
         self.buildTableLoadingBar.setValue(2)
         if not self.cFundsCalculated:
@@ -760,11 +786,11 @@ class returnsApp(QWidget):
                             for option in headerOptions:
                                 if option != "Ownership":
                                     complexOutput[level][option] += float(entry[option] if entry[option] is not None and entry[option] != '' else 0)
-                        if self.filterDict["Investor"].checkedItems() != [] or self.filterDict["Family Branch"].checkedItems() != []:
-                            if "Ownership (%)" not in complexOutput[level].keys():
-                                complexOutput[level]["Ownership (%)"] = entry["Ownership"]
-                            else:
-                                complexOutput[level]["Ownership (%)"] += entry["Ownership"]
+                        if entry.get("Ownership") not in (None,"None") and (self.filterDict["Investor"].checkedItems() != [] or self.filterDict["Family Branch"].checkedItems() != []):
+                            if "Ownership" not in complexOutput[level].keys():
+                                complexOutput[level]["Ownership"] = float(entry["Ownership"])
+                            # else:
+                            #     complexOutput[level]["Ownership"] += float(entry["Ownership"])
                 gui_queue.put(lambda: self.buildTableLoadingBar.setValue(5))
                 if cancelEvent.is_set(): #exit if new table build request is made
                     return
@@ -967,6 +993,7 @@ class returnsApp(QWidget):
                         if entry[levelName] == option:
                             levelData.append(entry)
                     nameList = []
+                    investorsAccessed = {}
                     for entry in levelData:
                         fundName = entry["Fund"] if not self.consolidateFundsBtn.isChecked() or entry["Fund"] not in self.consolidatedFunds or entry["Fund"] in self.filterDict["Fund"].checkedItems() else self.consolidatedFunds.get(entry["Fund"]).get("cFund")
                         nameList.append(fundName + code)
@@ -985,9 +1012,14 @@ class returnsApp(QWidget):
                         for header in headerOptions:
                             if header != "Ownership":
                                 totalEntriesLow[entry["dateTime"]][header] += float(entry[header])
-                            elif levelName in ("Investor", "Family Branch") and "Pool" in sortHierarchy and entry.get(header) not in (None,"None","",0) and totalEntriesLow[entry["dateTime"]].get(header) is None:
-                                if float(entry.get(header)) != 0:
+                            elif levelName in ("Investor", "Family Branch") and "Pool" in sortHierarchy and entry.get(header) not in (None,"None","",0):
+                                investor = entry.get("Investor")
+                                if totalEntriesLow[entry["dateTime"]].get(header) is None:
                                     totalEntriesLow[entry["dateTime"]][header] = float(entry[header]) #assign investor to ownership based on fund
+                                    investorsAccessed[entry["dateTime"]] = [investor,]
+                                elif investor not in investorsAccessed[entry["dateTime"]]: #accounts for family branch level to add the investor level ownerships
+                                    totalEntriesLow[entry["dateTime"]][header] += float(entry[header])
+                                    investorsAccessed[entry["dateTime"]].append(investor)
                     for name in sorted(nameList):
                         struc[name] = {}
                     for month in totalEntriesLow.keys():
@@ -1189,6 +1221,10 @@ class returnsApp(QWidget):
         for filt in ("Investor", "Family Branch"):
             if filt in groupOpts and self.filterDict[filt].checkedItems() == []:
                 self.filterDict[filt].selectAll()
+            elif filt in self.previousGrouping: #removes the selections if they stop grouping by investor/family
+                self.filterDict[filt].clearSelection()
+        self.previousGrouping = self.filterDict[filt].checkedItems()
+            
         self.filterCallLock = False
         self.buildReturnTable()
     def check_api_key(self):
@@ -1216,7 +1252,7 @@ class returnsApp(QWidget):
         else:
             self.api_label.setText('API key cannot be empty')
 
-    def show_results(self):
+    def show_results(self,*_):
         self.stack.setCurrentIndex(2)
 
     def pullData(self):
@@ -1831,7 +1867,7 @@ class returnsApp(QWidget):
         c = conn.cursor()
         while True:
             count = 0
-            while not self.workerStatusQueue.empty() and count < 100:
+            while not self.workerStatusQueue.empty() and count < 300:
                 count += 1 #count to allow the loading bar to take the lock and update
                 vars = self.workerStatusQueue.get()
                 try:
@@ -1842,10 +1878,10 @@ class returnsApp(QWidget):
                     trace = traceback.format_exc()
                     print(f"Error occured while attempting to run background worker status update: {e}. \n traceback: \n {trace}")
             try:
-                self.lock.acquire()
-                c.execute("SELECT * FROM progress")
-                cols = [d[0] for d in c.description]
-                statusLines = [dict(zip(cols, row)) for row in c.fetchall()]
+                with self.lock:
+                    c.execute("SELECT * FROM progress")
+                    cols = [d[0] for d in c.description]
+                    statusLines = [dict(zip(cols, row)) for row in c.fetchall()]
                 failed = []
                 completed = []
                 complete = 0
@@ -1864,39 +1900,54 @@ class returnsApp(QWidget):
                 elif len(completed) == len(self.pools):
                     print("All workers have declared complete.")
                     self.queue.append(100) #backup in case the numbers below fail
+                    break
                 if total != 0:
                     percent = int((complete / total) * 100)
                     self.queue.append(percent)
                     if complete >= total:
                         break
-                self.lock.release()
             except Exception as e:
-                self.lock.release()
                 print(f"Error watching database: {e}")
                 print(traceback.format_exc())
                 pass
             time.sleep(calculationPingTime * 0.01)
         conn.close()
     def updateWorkerDB(self):
-        conn = sqlite3.connect(DATABASE_PATH)
-        cursor = conn.cursor()
-        while not self.workerDBqueue.empty():
+        try:
+            conn = sqlite3.connect(DATABASE_PATH)
+            cursor = conn.cursor()
+        except:
+            print("connection failed")
+        dbFailure = False
+        while True:
             try:
-                results = self.workerDBqueue.get()
+                results = self.workerDBqueue.get_nowait()  # non-blocking, safe for fixed queues
                 data = results.get("data")
-                if results.get("type") == "insert":
-                    print("inserting...")
-                    save_to_db(data[0], data[1], action=data[2], connection=conn, lock=self.lock)
-                elif results.get("type") == "update":
-                    with self.lock:
-                        print("updating...")
-                        cursor.executemany(data[0], data[1])
-                        conn.commit()
-                else:
-                    print(f"\n \n Database data was not handled correctly: {results} \n \n \n \n \n ")
+                failCount = 0
+                while True:
+                    try:
+                        if results.get("type") == "insert":
+                            save_to_db(data[0], data[1], action=data[2], connection=conn, lock=self.lock)
+                            break
+                        elif results.get("type") == "update":
+                            with self.lock:
+                                cursor.executemany(data[0], data[1])
+                                conn.commit()
+                                break
+                        else:
+                            print(f"\n\n Database data was not handled correctly: {results} \n\n")
+                            break
+                    except:
+                        failCount += 1
+                        if failCount > 4:
+                            print("Error occured in delayed database updates. Calculation date will be reset")
+                            dbFailure = True
+            except queue.Empty:
+                break  # all done; queue drained
             except Exception as e:
-                print(f"Error occured updated database from worker threads: {e}, {e.args}")
-                print(traceback.format_exc())
+                print(f"Error occurred updating database from worker threads: {e}, {e.args}")
+        if dbFailure: #will force a recalculation on the next opening since the database won't be accurate
+            save_to_db(None,None,query="UPDATE history SET [lastCalculation] = ?", inputs=("Database Failure",), action="replace", lock=self.lock)
         conn.close()
     def update_from_queue(self):
         if self.queue:
@@ -1918,7 +1969,7 @@ class returnsApp(QWidget):
             self.calculationLabel.setText(f"Estimated time remaining: {time_str}")
             if val >= 100:
                 self.timer.stop()
-                self.calcCompletion()
+                executor.submit(self.calcCompletion)
             elif val == -86:
                 self.timer.stop()
                 if self.cancel:
@@ -1949,10 +2000,10 @@ class returnsApp(QWidget):
                 for key in row.keys():
                     if key not in keys:
                         keys.append(key)
-            save_to_db("calculations",calculations, keys=keys)
+            save_to_db("calculations",calculations, keys=keys, lock=self.lock)
             try:
                 apiPullTime = load_from_db("history")[0]["lastImport"]
-                save_to_db(None,None,query="UPDATE history SET [lastCalculation] = ?", inputs=(apiPullTime,), action="replace")
+                save_to_db(None,None,query="UPDATE history SET [lastCalculation] = ?", inputs=(apiPullTime,), action="replace", lock=self.lock)
             except:
                 print("failed to update last calculation time")
             gui_queue.put( lambda: self.populate(self.calculationTable,calculations,keys = keys))
@@ -1961,7 +2012,7 @@ class returnsApp(QWidget):
             if not testDataMode:
                 gui_queue.put(lambda: self.importButton.setEnabled(True))
             print("Calculations complete.")
-            save_to_db("progress",None,action="reset")
+            save_to_db("progress",None,action="reset", lock=self.lock)
         except:
             gui_queue.put(lambda: self.calculationLoadingBox.setVisible(False))
             gui_queue.put(lambda: self.importButton.setEnabled(True))
@@ -2193,8 +2244,8 @@ def save_to_db(table, rows, action = "", query = "",inputs = None, keys = None, 
             cur.close()
         if lock is not None:
             lock.release()
-    except:
-        print("DB save failed. closing connections")
+    except Exception as e:
+        print(f"DB save failed. closing connections {e}, {e.args}") 
         try:
             if lock is not None:
                 lock.release()
@@ -2258,36 +2309,34 @@ def updateStatus(pool,totalLoops, lock, status = "Working", connection = None):
     failure = False
     try:
         
-        lock.acquire()
-        if connection is None:
-            conn = sqlite3.connect(DATABASE_PATH)
-        else:
-            conn = connection
-        c = conn.cursor()
+        with lock:
+            if connection is None:
+                conn = sqlite3.connect(DATABASE_PATH)
+            else:
+                conn = connection
+            c = conn.cursor()
 
-        c.execute("SELECT status FROM progress WHERE status = ?",("Failed",))
-        failed = c.fetchall()
-        if len(failed) > 0:
-            failure = True
-        # Update or insert progress for this worker
-        if status in ("Working","Initialization") or pool == "DummyFail":
-            c.execute("""
-                INSERT INTO progress (pool, completed, total,status)
-                VALUES (?, -1, ?,?)
-                ON CONFLICT(pool) DO UPDATE SET completed = completed + 1
-            """, (pool, totalLoops,status))
-        elif status == "Completed":
-            c.execute("UPDATE progress SET completed = completed + 1, status = ? WHERE pool = ?", (status,pool))
-        else:
-            c.execute("UPDATE progress SET status = ? WHERE pool = ?", (status,pool))
+            c.execute("SELECT status FROM progress WHERE status = ?",("Failed",))
+            failed = c.fetchall()
+            if len(failed) > 0:
+                failure = True
+            # Update or insert progress for this worker
+            if status in ("Working","Initialization") or pool == "DummyFail":
+                c.execute("""
+                    INSERT INTO progress (pool, completed, total,status)
+                    VALUES (?, -1, ?,?)
+                    ON CONFLICT(pool) DO UPDATE SET completed = completed + 1
+                """, (pool, totalLoops,status))
+            elif status == "Completed":
+                c.execute("UPDATE progress SET completed = completed + 1, status = ? WHERE pool = ?", (status,pool))
+            else:
+                c.execute("UPDATE progress SET status = ? WHERE pool = ?", (status,pool))
 
-        conn.commit()
-        if connection is None:
-            conn.close()
+            conn.commit()
+            if connection is None:
+                conn.close()
     except Exception as e:
         print(f"Error updating status: {e}")
-    finally:
-        lock.release()
     return failure
 def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
     try:
@@ -2473,7 +2522,6 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
 
                 except Exception as e:
                     print(f"Skipped fund {fund} for {pool} in {month["Month"]} because: {e} {e.args}")
-                    print(traceback.format_exc())
                     #skips fund if the values are zero and cause an error
             if poolNAV == 0 and poolWeightedCashFlow == 0:
                 #skips the pool if there is no cash flow or value in the pool
@@ -2512,17 +2560,25 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
             investorMDdenominatorSum = 0
             tempInvestorDicts = {}
             poolOwnershipSum = 0
-            for investor in investorStartEntries:
+            for investor in set(investorStartEntries.keys()) | set(investorEndEntries.keys()) | set(allInvestorTransactions.keys()):
                 investorWeightedCashFlow = 0
                 investorCashFlowSum = 0
                 tempInvestorDict = {}
-                try:
-                    startEntry = investorStartEntries.get(investor)[0]
+                startEntry_cache = investorStartEntries.get(investor)
+                if startEntry_cache:
+                    startEntry = startEntry_cache[0]
                     tempInvestorDict["Active"] = True
-                except Exception as e:
-                    #skip month for this investor if there is no starting balance
-                    tempInvestorDict["Active"] = False
-                    continue
+                    noStartValue = False
+                else:
+                    end_cache = investorEndEntries.get(investor)
+                    if end_cache:
+                        startEntry = copy.deepcopy(end_cache[0])
+                        startEntry[nameHier["Value"]["dynHigh"]] = 0
+                        tempInvestorDict["Active"] = True
+                        noStartValue = True
+                    else:
+                        tempInvestorDict["Active"] = False
+                        continue
                 investorTransactions = allInvestorTransactions.get(investor,[])
                 
                 for transaction in investorTransactions:
@@ -2640,6 +2696,7 @@ def calculateBackdate(transaction,noStartValue = False):
             backDate = 0
         return backDate
 
+@attach_logging_to_class
 class DictListModel(QAbstractTableModel):
     """
     Simple table model over a list of dicts.
@@ -2700,6 +2757,7 @@ class DictListModel(QAbstractTableModel):
             return self._headers[section]
         return None            
 
+@attach_logging_to_class
 class underlyingDataWindow(QWidget):
     """
     A window that loads data from four database sources in the parent,
@@ -2983,6 +3041,7 @@ class underlyingDataWindow(QWidget):
 
         self.success = True
 
+@attach_logging_to_class
 class tableWindow(QWidget):
     """
     A window that loads data from four database sources in the parent,
@@ -3026,6 +3085,7 @@ class tableWindow(QWidget):
                 except:
                     item = QTableWidgetItem(str(raw))
                 self.table.setItem(r, c, item)
+
 
 class ClickableLineEdit(QLineEdit):
     clicked = pyqtSignal()
