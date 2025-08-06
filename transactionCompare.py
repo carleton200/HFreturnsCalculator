@@ -34,7 +34,6 @@ currentVersion = "1.0.6"
 testDataMode = False
 onlyCalcTestMode = True
 demoMode = False
-ownershipCorrect = True
 
 executor = ThreadPoolExecutor()
 gui_queue = queue.Queue()
@@ -2473,7 +2472,6 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
             poolNAV = 0
             poolMDdenominator = 0
             poolWeightedCashFlow = 0
-            poolCashFlow = 0
             fundEntryList = []
             for fundDict in funds: #iterate through all funds to find the pool NAV and MD den
                 fund = fundDict["fundName"]
@@ -2575,7 +2573,6 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
                     poolGainSum += fundGain
                     poolMDdenominator += fundMDdenominator
                     poolNAV += fundNAV
-                    poolCashFlow += cashFlowSum
                     poolWeightedCashFlow += weightedCashFlow
                     monthFundEntry = {"dateTime" : month["dateTime"], "Investor" : "Total Fund", "Pool" : pool, "Fund" : fund ,
                                     "assetClass" : assetClass, "subAssetClass" : subAssetClass,
@@ -2593,7 +2590,7 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
                 except Exception as e:
                     print(f"Skipped fund {fund} for {pool} in {month["Month"]} because: {e} {e.args}")
                     #Testing flag. skips fund if the values are zero and cause an error
-            if poolNAV == 0 and poolCashFlow == 0:
+            if poolNAV == 0 and poolWeightedCashFlow == 0:
                 #skips the pool if there is no cash flow or value in the pool
                 continue
             poolReturn = poolGainSum/poolMDdenominator * 100 if poolMDdenominator != 0 else 0
@@ -2719,7 +2716,7 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
             for investorEntry in monthPoolEntryInvestorList:
                 #final (3rd) investor level iteration to use the pool level results for the investor to calculate the fund level information
                 for fundEntry in fundEntryList:
-                    investorOwnership = investorEntry["Ownership"] * 100 /  poolOwnershipSum if poolOwnershipSum != 0 and ownershipCorrect else investorEntry["Ownership"]
+                    investorOwnership = investorEntry["Ownership"] * 100 /  poolOwnershipSum if poolOwnershipSum != 0 else investorEntry["Ownership"]
                     fundInvestorNAV = investorOwnership / 100 * fundEntry["NAV"]
                     fundInvestorGain = fundEntry["Monthly Gain"] / monthPoolEntry["Monthly Gain"] * investorEntry["Monthly Gain"] if monthPoolEntry["Monthly Gain"] != 0 else 0
                     fundInvestorMDdenominator = investorEntry["MDdenominator"] / monthPoolEntry["MDdenominator"] * fundEntry["MDdenominator"] if monthPoolEntry["MDdenominator"] != 0 else 0
