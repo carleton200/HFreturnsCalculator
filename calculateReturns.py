@@ -32,7 +32,7 @@ from PyQt5.QtCore import Qt, QTimer, QAbstractTableModel, QModelIndex, pyqtSigna
 
 currentVersion = "1.1.1"
 testDataMode = False
-demoMode = False
+demoMode = True
 ownershipCorrect = True
 
 executor = ThreadPoolExecutor()
@@ -146,7 +146,7 @@ class returnsApp(QWidget):
         self.api_key = None
         self.filterCallLock = False
         self.cancel = False
-        self.lock = None
+        self.lock = threading.Lock()
         self.tableWindows = {}
         self.dataTimeStart = datetime(2000,1,1)
         self.earliestChangeDate = datetime(datetime.now().year,datetime.now().month + 1,datetime.now().day)
@@ -322,7 +322,8 @@ class returnsApp(QWidget):
         self.importButton.clicked.connect(self.beginImport)
         if testDataMode:
             self.importButton.setEnabled(False)
-        clearButton = QPushButton('Full Recalculation')
+        if not demoMode:
+            clearButton = QPushButton('Full Recalculation')
         clearButton.clicked.connect(self.resetData)
         controlsLayout.addWidget(clearButton, stretch=0)
         controlsLayout.addWidget(self.importButton, stretch=0)
@@ -366,8 +367,8 @@ class returnsApp(QWidget):
         self.tableBtnGroup.buttonClicked.connect(self.buildReturnTable)
         self.complexTableBtn.setChecked(True)
         
-        self.dataStartSelect = QComboBox()
-        self.dataEndSelect = QComboBox()
+        self.dataStartSelect = simpleMonthSelector()
+        self.dataEndSelect = simpleMonthSelector()
         for idx, [text, CB] in enumerate((["Start: ", self.dataStartSelect], ["End: ", self.dataEndSelect])):
             optionsGrid.addWidget(QLabel(text),idx,2)
             optionsGrid.addWidget(CB,idx,3)
@@ -440,7 +441,8 @@ class returnsApp(QWidget):
         layout.addWidget(mainFilterBox)
         t1 = QVBoxLayout() #build table loading bar
         self.buildTableLoadingBox = QWidget()
-        t1.addWidget(QLabel("Building returns table..."))
+        self.tableLoadingLabel = QLabel("Building returns table...")
+        t1.addWidget(self.tableLoadingLabel)
         self.buildTableLoadingBar = QProgressBar()
         self.buildTableLoadingBar.setRange(0,8)
         t1.addWidget(self.buildTableLoadingBar)
@@ -712,6 +714,9 @@ class returnsApp(QWidget):
             else:
                 self.populateReturnsTable(self.currentTableData)
     def resetData(self,*_):
+        if not self.testAPIconnection():
+            QMessageBox.warning(self,"API Failure", "API connection has failed. Server is down or API key is bad. \n Previous calculations are left in place for viewing.")
+            return
         for table in ("calculations","positions_low","positions_high","transactions_low","transactions_high"):
             save_to_db(table,None,action="clear") #reset all tables so everything will be fresh data
         self.poolChangeDates = {"active" : False}
@@ -1128,6 +1133,9 @@ class returnsApp(QWidget):
         return tableStructure,newEntries
                     
     def filterUpdate(self):
+        self.buildTableLoadingBar.setValue(0)
+        self.tableLoadingLabel.setText("Waiting on database connection...")
+        self.buildTableLoadingBox.setVisible(True)
         def resetOptions(key,options):
             currentSelections = self.filterDict[key].checkedItems()
             multiBox = self.filterDict[key]
@@ -1138,6 +1146,7 @@ class returnsApp(QWidget):
                     multiBox.setCheckedItem(currentText)
         def exitFunc():
             self.filterCallLock = False
+            gui_queue.put(lambda: self.tableLoadingLabel.setText("Building returns table..."))
             gui_queue.put(lambda: self.buildReturnTable())
         if not self.filterCallLock:
             def processFilter():
@@ -1305,20 +1314,26 @@ class returnsApp(QWidget):
             
         self.filterCallLock = False
         self.buildReturnTable()
-    def check_api_key(self):
+    def testAPIconnection(self, key=None):
+        apiKey = self.api_key if key is None else key
+        headers = {
+            "Authorization": f"Bearer {apiKey}",
+            "Content-Type":  "application/json"
+        }
+        payload = {
+            "advf": [{ "_name": "Fund" }],
+            "mode": "compact",
+            "page": {"size": 0}
+        }
+        resp = requests.get(f"{mainURL}/Entity", headers=headers, json=payload)
+        if resp.status_code == 200:
+            return True
+        else:
+            return False
+    def check_api_key(self, *_):
         key = self.api_input.text().strip()
         if key:
-            headers = {
-                "Authorization": f"Bearer {key}",
-                "Content-Type":  "application/json"
-            }
-            payload = {
-                "advf": [{ "_name": "Fund" }],
-                "mode": "compact",
-                "page": {"size": 0}
-            }
-            resp = requests.get(f"{mainURL}/Entity", headers=headers, json=payload)
-            if resp.status_code == 200:
+            if self.testAPIconnection(key=key):
                 self.api_label.setText('API key valid. Saving to system...')
                 subprocess.run(['setx',dynamoAPIenvName,key], check=True)
                 os.environ[dynamoAPIenvName] = key
@@ -1326,7 +1341,7 @@ class returnsApp(QWidget):
                 self.stack.setCurrentIndex(1)
                 self.init_data_processing()
             else:
-                self.api_label.setText('Invalid API key')
+                self.api_label.setText('Invalid API key or Dynamo is not responding')
         else:
             self.api_label.setText('API key cannot be empty')
 
@@ -1334,7 +1349,20 @@ class returnsApp(QWidget):
         self.stack.setCurrentIndex(2)
 
     def pullData(self):
+        if not self.testAPIconnection():
+            gui_queue.put(lambda: QMessageBox.warning(self,"API Failure", "API connection has failed. Server is down or API key is bad. \n Previous calculations are left in place for viewing."))
+            return
         def checkNewestData(table, rows):
+            def buildKey(record):
+                value = record[nameHier["Value"]["dynHigh"] if "position" in table else nameHier["CashFlow"]["dynLow"]]
+                value = 0 if value is None or value == "None" else value
+                key = (
+                        record['Source name'] if record['Source name'] is not None else "None",
+                        record['Target name'] if record['Target name'] is not None else "None",
+                        round(float(value)) if table != "positions_high" else 0,               # normalize to float
+                        record['Date'].replace(' ', 'T')      # normalize format if needed
+                    )
+                return key
             try:
                 diffCount = 0
                 differences = []
@@ -1342,28 +1370,18 @@ class returnsApp(QWidget):
                 previous = load_from_db(table) or []
 
                 # Build a set of tuple‐keys for the old data
-                seen = set()
+                oldRecords = set()
                 for rec in previous:
-                    value = rec[nameHier["Value"]["dynHigh"] if "position" in table else nameHier["CashFlow"]["dynLow"]]
-                    value = 0 if value is None or value == "None" else value
-                    seen.add((
-                        rec['Source name'] if rec['Source name'] is not None else "None",
-                        rec['Target name'] if rec['Target name'] is not None else "None",
-                        round(float(value)) if table != "positions_high" else 0,               # normalize to float
-                        rec['Date'].replace(' ', 'T')      # normalize format if needed
-                    ))
+                    oldRecords.add(buildKey(rec))
 
+                newRecords = set()
                 earliest = None
                 for rec in rows:
                     value = rec[nameHier["Value"]["dynHigh"] if "position" in table else nameHier["CashFlow"]["dynLow"]]
                     value = 0 if value is None or value == "None" else value
-                    key = (
-                        rec['Source name'] if rec['Source name'] is not None else "None",
-                        rec['Target name'] if rec['Target name'] is not None else "None",
-                        round(float(value)) if table != "positions_high" else 0,               
-                        rec['Date'].replace(' ', 'T')
-                    )
-                    if key in seen:
+                    key = buildKey(rec)
+                    newRecords.add(key)
+                    if key in oldRecords:
                         continue
                     diffCount += 1
                     newRows.append(rec)
@@ -1376,10 +1394,19 @@ class returnsApp(QWidget):
                     poolTag = "Target name" if "high" in table else "Source name"
                     if dt < self.poolChangeDates.get(rec.get(poolTag),datetime.now()): 
                         self.poolChangeDates[rec.get(poolTag)] = dt # sets each pool value to earliest and instantiates if not existing
-                self.poolChangeDates["active"] = True
-                if earliest:
+                for oldRec in oldRecords:
+                    if oldRec not in newRecords: #find if a new record no longer exists in the old. Means old data is removed and must be redone
+                        self.foundRetroChange = True
+                        self.poolChangeDates["active"] = False
+                        print(f"Retroactive changes found in {table}. Resetting whole table.")
+                        break
+                
+                if earliest and not self.foundRetroChange:
                     if earliest < self.earliestChangeDate:
                         self.earliestChangeDate = earliest
+                if self.foundRetroChange: #push full api data and reset calc date to redo all data
+                    self.earliestChangeDate =  self.dataTimeStart
+                    return rows, False
                 print(f"Differences in {table} : {diffCount} of {len(rows)}")
                 if diffCount > 0 and not demoMode:
                     def openWindow():
@@ -1387,7 +1414,7 @@ class returnsApp(QWidget):
                         self.tableWindows[table] = window
                         window.show()
                     gui_queue.put(lambda: openWindow())
-                return newRows
+                return newRows, True
             except Exception as e:
                 print(f"Error searching old data: {e}")
         try:
@@ -1415,6 +1442,8 @@ class returnsApp(QWidget):
             calculationsTest = load_from_db("calculations")
             if calculationsTest != []:
                 skipCalculations = True
+                self.poolChangeDates["active"] = True
+                self.foundRetroChange = False
             else:
                 skipCalculations = False
             for i in range(2):
@@ -1648,40 +1677,48 @@ class returnsApp(QWidget):
                                 print(f"Error in API call. Code: {response.status_code}. {response}")
                                 try:
                                     print(f"Error: {response.json()}")
-                                    print(f"Headers used:  \n {headers}, \n payload used: \n {payload}")
                                 except:
                                     pass
                         if i == 1:
                             if j == 0:
                                 if skipCalculations: #separate out only new rows to alter db
-                                    rows = checkNewestData('positions_low',rows)
+                                    rows, good = checkNewestData('positions_low',rows)
                                 for row in rows:
                                     row[nameHier["Unfunded"]["local"]] = 0
                                     row[nameHier["Commitment"]["local"]] = 0
                                     row[nameHier["sleeve"]["local"]] = None
-                                if skipCalculations:
-                                    save_to_db('positions_low', rows, action="add")
+                                if skipCalculations and good:
+                                    save_to_db('positions_low', rows, action="add", lock=self.lock)
                                 else:
-                                    save_to_db('positions_low', rows)
+                                    save_to_db('positions_low', rows, lock=self.lock)
                             else:
                                 if skipCalculations: #separate out only new rows to alter db
-                                    rows = checkNewestData('positions_high',rows)
-                                    save_to_db('positions_high', rows, action="add")
+                                    rows, good = checkNewestData('positions_high',rows)
+                                    if good:
+                                        save_to_db('positions_high', rows, action="add", lock=self.lock)
+                                    else:
+                                        save_to_db('positions_high', rows, lock=self.lock)
                                 else:
-                                    save_to_db('positions_high', rows)
+                                    save_to_db('positions_high', rows, lock=self.lock)
                         else:
                             if j == 0:
                                 if skipCalculations: #separate out only new rows to alter db
-                                    rows = checkNewestData('transactions_low',rows)
-                                    save_to_db('transactions_low', rows, action="add")
+                                    rows, good = checkNewestData('transactions_low',rows)
+                                    if good:
+                                        save_to_db('transactions_low', rows, action="add", lock=self.lock)
+                                    else:
+                                        save_to_db('transactions_low', rows, lock=self.lock)
                                 else:
-                                    save_to_db('transactions_low', rows)
+                                    save_to_db('transactions_low', rows, lock=self.lock)
                             else:
                                 if skipCalculations: #separate out only new rows to alter db
-                                    rows = checkNewestData('transactions_high',rows)
-                                    save_to_db('transactions_high', rows, action="add")
+                                    rows, good = checkNewestData('transactions_high',rows)
+                                    if good:
+                                        save_to_db('transactions_high', rows, action="add", lock=self.lock)
+                                    else:
+                                        save_to_db('transactions_high', rows, lock=self.lock)
                                 else:
-                                    save_to_db('transactions_high', rows)
+                                    save_to_db('transactions_high', rows, lock=self.lock)
                         with completeLock:
                             self.complete += 1
                         frac = self.complete/totalCalls
@@ -1747,7 +1784,7 @@ class returnsApp(QWidget):
                             if row.get("Parentfund") in consolidatorFunds:
                                 self.consolidatedFunds[row["Name"]] = consolidatorFunds.get(row.get("Parentfund"))
                         if rows != []:
-                            save_to_db("funds",rows)
+                            save_to_db("funds",rows,lock=self.lock)
                     except Exception as e:
                         print(f"Error proccessing fund API data : {e} {e.args}.  {traceback.format_exc()}")
                     
@@ -1786,7 +1823,7 @@ class returnsApp(QWidget):
                             rows = []
                         keys_to_remove = {'_id', '_es'}
                         rows = [{k: v for k, v in row.items() if k not in keys_to_remove} for row in rows]
-                        save_to_db("benchmarks",rows)
+                        save_to_db("benchmarks",rows, lock=self.lock)
                     except Exception as e:
                         print(f"Error proccessing benchmark API data : {e} {e.args}.  {traceback.format_exc()}")
                     
@@ -1801,9 +1838,10 @@ class returnsApp(QWidget):
             APIexecutor.shutdown(wait=True) #wait for all api pulls to complete
             if skipCalculations:
                 print("Earliest change: ", self.earliestChangeDate)
-                print(f"Changes dates by pools:")
-                for pool in self.poolChangeDates:
-                    print(f"        {pool} : {self.poolChangeDates.get(pool)}")
+                if self.poolChangeDates.get("active", False):
+                    print(f"Changes dates by pools:")
+                    for pool in self.poolChangeDates:
+                        print(f"        {pool} : {self.poolChangeDates.get(pool)}")
             gui_queue.put(lambda: self.apiLoadingBar.setValue(100))
             
             while not gui_queue.empty(): #wait to assure database has been updated in main thread before continuing
@@ -1813,7 +1851,7 @@ class returnsApp(QWidget):
 
             currentTime = datetime.now().strftime("%B %d, %Y @ %I:%M %p")
             changeDate = datetime.strftime(self.earliestChangeDate, "%B %d, %Y @ %I:%M %p")
-            save_to_db(None,None,query="UPDATE history SET [lastImport] = ?, [changeDate] = ?", inputs=(currentTime,changeDate), action="replace")
+            save_to_db(None,None,query="UPDATE history SET [lastImport] = ?, [changeDate] = ?", inputs=(currentTime,changeDate), action="replace", lock=self.lock)
             self.lastImportDB[0]["lastImport"] = currentTime
             self.lastImportDB[0]["changeDate"] = changeDate
             self.lastImportLabel.setText(f"Last Data Import: {currentTime}")
@@ -1841,10 +1879,10 @@ class returnsApp(QWidget):
                 fundList = {}
                 for fund in fundListDB:
                     fundList[fund["Name"]] = fund[nameHier["sleeve"]["sleeve"]]
-                months = load_from_db("Months", f"ORDER BY [dateTime] ASC")
+                months = load_from_db("Months", f"ORDER BY [dateTime] ASC",lock=self.lock)
                 calculations = []
                 monthIdx = 0
-                if load_from_db("calculations") == []:
+                if load_from_db("calculations",lock=self.lock) == []:
                     noCalculations = True
                 else:
                     noCalculations = False
@@ -1869,12 +1907,12 @@ class returnsApp(QWidget):
                     return
                 
                 # proces pool section----------------------------------------------------------------
-                save_to_db("progress",None,action="reset")
+                save_to_db("progress",None,action="reset", lock=self.lock)
                 self.initializeProgressDB()
 
                 # ------------------- build data cache ----------------------
                 tables = ["positions_low", "transactions_low", "positions_high", "transactions_high", "calculations"]
-                table_rows = {t: load_from_db(t) for t in tables}
+                table_rows = {t: load_from_db(t,lock=self.lock) for t in tables}
                 cache = {}
                 for table, rows in table_rows.items():
                     for row in rows:
@@ -1923,7 +1961,7 @@ class returnsApp(QWidget):
                                 newMonths.append(month)
                     else:
                         newMonths = months
-                    _ = updateStatus(pool.get("poolName"),len(newMonths),threading.Lock(),status="Initialization")
+                    _ = updateStatus(pool.get("poolName"),len(newMonths),self.lock,status="Initialization")
                 def initializeWorkerPool():
                     self.manager = Manager()
                     self.lock = self.manager.Lock()
@@ -1957,18 +1995,19 @@ class returnsApp(QWidget):
                 print(traceback.format_exc())
         executor.submit(initalizeCalc)
     def initializeProgressDB(self):
-        conn = sqlite3.connect(DATABASE_PATH)
-        c = conn.cursor()
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS progress (
-                pool STRING PRIMARY KEY,
-                completed INTEGER NOT NULL,
-                total INTEGER NOT NULL,
-                status STRING NOT NULL
-            )
-        """)
-        conn.commit()
-        conn.close()
+        with self.lock:
+            conn = sqlite3.connect(DATABASE_PATH)
+            c = conn.cursor()
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS progress (
+                    pool STRING PRIMARY KEY,
+                    completed INTEGER NOT NULL,
+                    total INTEGER NOT NULL,
+                    status STRING NOT NULL
+                )
+            """)
+            conn.commit()
+            conn.close()
     def watch_db(self):
         conn = sqlite3.connect(DATABASE_PATH)
         c = conn.cursor()
@@ -2318,7 +2357,10 @@ def save_to_db(table, rows, action = "", query = "",inputs = None, keys = None, 
                 print(f"Error inserting row into database: {e}")
                 print("e.args:", e.args)
                 # maybe also:
-                print(traceback.format_exc())
+                try:
+                    print(traceback.format_exc())
+                except:
+                    pass
         elif action == "calculationUpdate":
             try:
                 cur.execute("DELETE FROM calculations WHERE [dateTime] = ?", inputs) #inputs input should be the date for deletion
@@ -2334,8 +2376,11 @@ def save_to_db(table, rows, action = "", query = "",inputs = None, keys = None, 
                 print(f"Error updating calculations in database: {e}")
                 print("e.args:", e.args)
                 # maybe also:
-                import traceback
-                print(traceback.format_exc())
+                try:
+                    import traceback
+                    print(traceback.format_exc())
+                except:
+                    pass
         elif action == "replace":
             cur.execute(query,inputs)
             conn.commit()
@@ -2926,6 +2971,47 @@ def calculateBackdate(transaction,noStartValue = False):
         else:
             backDate = 0
         return backDate
+
+class simpleMonthSelector(QWidget):
+    currentTextChanged = pyqtSignal()
+    def __init__(self, parent = None):
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        self.monthSelect = QComboBox()
+        self.yearSelect = QComboBox()
+        self.changeLock = False
+        layout.addWidget(self.monthSelect)
+        layout.addWidget(self.yearSelect)
+        self.monthSelect.currentTextChanged.connect(self.emitSignal)
+        self.yearSelect.currentTextChanged.connect(self.emitSignal)
+    def addItems(self, items):
+        self.changeLock = True
+        months = set()
+        years = set()
+        for item in items:
+            month, year = item.split(" ")
+            months.add(month)
+            years.add(year)
+        self.monthSelect.addItems(sorted(months))
+        self.yearSelect.addItems(sorted(years))
+        self.changeLock = False
+    def setCurrentText(self,text):
+        self.changeLock = True
+        [month,year] = text.split(" ")
+        self.monthSelect.setCurrentText(month)
+        self.yearSelect.setCurrentText(year)
+        self.changeLock = False
+    def currentText(self):
+        month = self.monthSelect.currentText()
+        year = self.yearSelect.currentText()
+        joined = " ".join([month,year])
+        return joined
+    def emitSignal(self):
+        if not self.changeLock:
+            self.currentTextChanged.emit()
+
+
+
 class displayWindow(QWidget):
     def __init__(self, parent=None, flags=Qt.WindowFlags(), parentSource = None, text = "", title=""):
         super().__init__(parent, flags)
