@@ -30,9 +30,8 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtGui import QBrush, QColor, QDesktopServices
 from PyQt5.QtCore import Qt, QTimer, QAbstractTableModel, QModelIndex, pyqtSignal, QPoint, QUrl
 
-currentVersion = "1.0.6"
+currentVersion = "1.1.1"
 testDataMode = False
-onlyCalcTestMode = True
 demoMode = False
 ownershipCorrect = True
 
@@ -55,16 +54,20 @@ def poll_queue():
 # Determine assets path, works in PyInstaller bundle or script
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
+    ASSETS_DIR = os.path.join(BASE_DIR, '_internal','assets')
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-ASSETS_DIR = os.path.join(BASE_DIR, 'assets')
+    ASSETS_DIR = os.path.join(BASE_DIR, 'assets')
+if not os.path.exists(BASE_DIR):
+    os.makedirs(BASE_DIR)
+
 if testDataMode:
     DATABASE_PATH = os.path.join(ASSETS_DIR, 'Acc_Tran_Test.db')
 else:
     DATABASE_PATH = os.path.join(ASSETS_DIR, 'Acc_Tran.db')
+HELP_PATH = os.path.join(ASSETS_DIR,"helpInfo.txt")
 
-if not os.path.exists(BASE_DIR):
-    os.makedirs(BASE_DIR)
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -87,6 +90,17 @@ def attach_logging_to_class(cls):
         if callable(attr_value):  # Only wrap methods
             setattr(cls, attr_name, log_exceptions(attr_value))
     return cls
+if getattr(sys, 'frozen', False): #Executables will log print statements
+    class PrintToLogger:
+        def write(self, msg):
+            msg = msg.strip()
+            if msg:
+                logging.info(msg)
+
+        def flush(self):
+            pass
+
+    sys.stdout = PrintToLogger()
 
 dynamoAPIenvName = "Dynamo_API"
 mainURL = "https://api.dynamosoftware.com/api/v2.2"
@@ -99,13 +113,18 @@ nameHier = {
                 "sleeve" : {"sleeve" : "sleeve", "fund" : "Name", "local" : "subAssetSleeve"},
                 "CashFlow" : {"dynLow" : "CashFlowSys", "dynHigh" : "CashFlowSys"}, 
                 "Value" : {"local" : "NAV", "api" : "Value in system currency", "dynLow" : "ValueInSystemCurrency", "dynHigh" : "ValueInSystemCurrency"},
-                "Classification" : {"local" : "Classification" , "dynLow" : "Target nameExposureHFClassificationLevel2"}
+                "Classification" : {"local" : "Classification" , "dynLow" : "Target nameExposureHFClassificationLevel2"},
+                "FundClass" : {"dynLow" : "Fundclass" , "dynHigh" : "Fundclass"},
             }
 
 commitmentChangeTransactionTypes = ["Commitment", "Transfer of commitment", "Transfer of commitment (out)", "Secondary - Original commitment (by secondary seller)"]
 ignoreInvTranTypes = [""]
 headerOptions = ["Return","NAV", "Monthly Gain", "Ownership" , "MDdenominator", "Commitment", "Unfunded"]
 dataOptions = ["Investor","Family Branch","Classification", "dateTime"]
+displayLinks = {"assetClass" : "Asset Level 1", "subAssetClass" : "Asset Level 2" , "subAssetSleeve" : "Asset Level 3"}
+for link in displayLinks.copy(): #builds out in reverse so it can work both ways
+    displayLinks[displayLinks.get(link)] = link
+balanceTypePriority = ["Actual", "Adjusted", "Manager Estimate"]
 yearOptions = (1,2,3,5,7,10,12,15,20)
 
 timeOptions = ["MTD","QTD","YTD", "ITD"] + [f"{y}YR" for y in yearOptions]
@@ -137,7 +156,7 @@ class returnsApp(QWidget):
         self.buildTableCancel = None
         self.buildTableFuture = None
         self.cFundsCalculated = False
-        self.previousGrouping = []
+        self.previousGrouping = set()
 
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_from_queue)
@@ -145,7 +164,7 @@ class returnsApp(QWidget):
 
         # main stack
         self.main_layout = QVBoxLayout()
-        appStyle = ("""
+        self.appStyle = ("""
                         QWidget#borderFrame {
                             border: 2px solid #3E85E9;
                             border-radius: 4px;
@@ -177,6 +196,10 @@ class returnsApp(QWidget):
                         QPushButton#cancelBtn {
                             background-color: #D63131;
                         }
+                        QPushButton#helpBtn {
+                            background-color: #FFDE59;
+                            color: black;
+                        }
                         QLabel, QRadioButton, QCheckBox, QProgressBar {
                             color: white
                         }
@@ -201,7 +224,7 @@ class returnsApp(QWidget):
                             color : white;
                         }
                     """)
-        self.setStyleSheet(appStyle)
+        self.setStyleSheet(self.appStyle)
         self.setObjectName("mainPage")
         self.checkVersion()
         self.stack = QStackedWidget()
@@ -219,8 +242,15 @@ class returnsApp(QWidget):
         headerLayout = QHBoxLayout()
         self.lastImportLabel = QLabel("Last Data Import: ")
         headerLayout.addWidget(self.lastImportLabel)
+        if ownershipCorrect:
+            headerLayout.addStretch()
+            headerLayout.addWidget(QLabel("                              Notice: \n Investor ownership has manual corrections due to Dynamo issues"))
         headerLayout.addStretch()
         headerLayout.addWidget(QLabel(f"Version: {currentVersion}"))
+        self.helpBtn = QPushButton("Help")
+        self.helpBtn.clicked.connect(self.helpClicked)
+        self.helpBtn.setObjectName("helpBtn")
+        headerLayout.addWidget(self.helpBtn)
         headerBox.setLayout(headerLayout)
         self.main_layout.addWidget(headerBox)
         self.apiLoadingBarBox = QWidget()
@@ -292,10 +322,9 @@ class returnsApp(QWidget):
         self.importButton.clicked.connect(self.beginImport)
         if testDataMode:
             self.importButton.setEnabled(False)
-        clearButton = QPushButton('Clear All Cached Data')
+        clearButton = QPushButton('Full Recalculation')
         clearButton.clicked.connect(self.resetData)
-        if not demoMode:
-            controlsLayout.addWidget(clearButton, stretch=0)
+        controlsLayout.addWidget(clearButton, stretch=0)
         controlsLayout.addWidget(self.importButton, stretch=0)
         btn_to_results = QPushButton('See Calculation Database')
         btn_to_results.clicked.connect(self.show_results)
@@ -349,6 +378,7 @@ class returnsApp(QWidget):
         optionsGrid.addWidget(QLabel("Group by: "),0,5)
         self.sortHierarchy = MultiSelectBox()
         self.sortHierarchy.hierarchyMode()
+        self.sortHierarchy.setCheckedItems(["assetClass","subAssetClass"])
         self.sortHierarchy.popup.closed.connect(self.groupingChange)
         optionsGrid.addWidget(self.sortHierarchy,1,5)
         self.consolidateFundsBtn = QRadioButton("Consolidate Funds")
@@ -403,8 +433,8 @@ class returnsApp(QWidget):
                 self.sortHierarchy.addItem(filter["key"])
             self.filterDict[filter["key"]] = MultiSelectBox()
             self.filterDict[filter["key"]].popup.closed.connect(lambda: self.filterUpdate())
-            
             mainFilterLayout.addWidget(self.filterDict[filter["key"]],1,col)
+        self.sortHierarchy.setCheckedItems(["assetClass","subAssetClass"])
         self.filterBtnGroup.buttonToggled.connect(self.filterBtnUpdate)
         mainFilterBox.setLayout(mainFilterLayout)
         layout.addWidget(mainFilterBox)
@@ -444,13 +474,15 @@ class returnsApp(QWidget):
         self.dataStartSelect.currentTextChanged.connect(self.buildReturnTable)
     def init_data_processing(self):
         self.calcSubmitted = False
-        lastImportDB = load_from_db("history") if len(load_from_db("history")) == 1 else None
-        if not testDataMode and lastImportDB is None:
+        self.lastImportDB = load_from_db("history")
+        if len(self.lastImportDB) != 1:
+            self.lastImportDB = None
+        if not testDataMode and self.lastImportDB is None:
             print("No previous import found")
             #pull data is there is no data pulled yet
             executor.submit(lambda: self.pullData())
         elif not testDataMode:
-            lastImportString = lastImportDB[0]["lastImport"]
+            lastImportString = self.lastImportDB[0]["lastImport"]
             lastImport = datetime.strptime(lastImportString, "%B %d, %Y @ %I:%M %p")  
             self.lastImportLabel.setText(f"Last Data Import: {lastImportString}")
             now = datetime.now()
@@ -458,8 +490,8 @@ class returnsApp(QWidget):
                 print(f"Reimporting due to two hour data gap. \n     Last import: {lastImport}\n    Current time: {now}")
                 #pull data if in a new month or 1 days have elapsed
                 executor.submit(self.pullData)
-            elif lastImportDB[0]["lastImport"] != lastImportDB[0].get("lastCalculation", "None"):
-                self.earliestChangeDate = datetime.strptime(lastImportDB[0].get("changeDate"), "%B %d, %Y @ %I:%M %p")
+            elif self.lastImportDB[0]["lastImport"] != self.lastImportDB[0].get("lastCalculation", "None"):
+                self.earliestChangeDate = datetime.strptime(self.lastImportDB[0].get("changeDate"), "%B %d, %Y @ %I:%M %p")
                 self.processFunds()
                 self.calculateReturn()
             else:
@@ -477,6 +509,15 @@ class returnsApp(QWidget):
                 self.buildReturnTable()
             else:
                 executor.submit(self.calculateReturn)
+    def helpClicked(self,*_):
+        #try:
+            with open(HELP_PATH, 'r', encoding='utf-8') as f:
+                text = f.read()
+            helpMessage = displayWindow(parentSource=self, text=text, title="Help Page")
+            helpMessage.show()
+            self.helpPage = helpMessage
+        # except:
+        #     QMessageBox.warning(self,"Error","Error opening help page.")
     def cancelCalc(self, *_):
         _ = updateStatus("DummyFail",99,lock=self.lock, status="Failed")
         self.cancel = True
@@ -520,7 +561,7 @@ class returnsApp(QWidget):
 
         def processExport():
             try:
-                data = self.currentTableData  # dict of dicts
+                data = self.filteredReturnsTableData
 
                 # 2) determine hierarchy levels present
                 all_types = {row.get("dataType") for row in data.values()}
@@ -529,7 +570,7 @@ class returnsApp(QWidget):
                 else:
                     full_hierarchy = ["Total", "Total assetClass", "Total Fund"]
                 hierarchy_levels = [lvl for lvl in full_hierarchy if lvl in all_types]
-                num_hier = len(hierarchy_levels)
+                num_hier = 1
 
                 # 3) dynamic data columns minus "dataType"
                 all_cols = {
@@ -543,10 +584,8 @@ class returnsApp(QWidget):
                 wb = Workbook()
                 ws = wb.active
 
-                rowStart = 4
+                rowStart = 3
                 # 5) header row
-                for idx, lvl in enumerate(hierarchy_levels, start=1):
-                    ws.cell(row=rowStart, column=idx, value=lvl)
                 for idx, colname in enumerate(sorted_cols, start=num_hier+1):
                     ws.cell(row=rowStart, column=idx, value=colname)
 
@@ -572,13 +611,11 @@ class returnsApp(QWidget):
                     data_fill   = PatternFill("solid", data_color, data_color)
                     header_fill = PatternFill("solid", header_color, header_color)
 
+                    data_start = 2
                     # spread header fill across hierarchy cols
-                    data_start = num_hier + 1
-                    for col in range(level+1, data_start):
-                        cell = ws.cell(row=r, column=col, value=row_name if col==level+1 else None)
-                        cell.fill = header_fill
-                        if col == level+1:
-                            cell.alignment = Alignment(indent=level)
+                    cell = ws.cell(row=r, column=1, value=row_name)
+                    cell.fill = header_fill
+                    cell.alignment = Alignment(indent=level)
 
                     # data cells with proper formatting
                     for c, colname in enumerate(sorted_cols, start=data_start):
@@ -603,20 +640,19 @@ class returnsApp(QWidget):
                             max_len = max(max_len, len(text))
                     ws.column_dimensions[get_column_letter(idx)].width = max_len + 2
 
-                appliedFilters = {}
+                filterSelections = {}
                 for filter in self.filterOptions:
-                    if self.filterDict[filter["key"]].checkedItems() != []:
-                        appliedFilters[filter["key"]] = self.filterDict[filter["key"]].checkedItems()
-                filterStart = num_hier
-                if self.filterDict[filter["key"]].checkedItems() != []: #only write if there are filters applied
-                    cell= ws.cell(row=1, column=filterStart, value="Filter:")
+                    selections = self.filterDict.get(filter.get("key")).checkedItems()
+                    if selections != []:
+                        filterSelections[filter.get("key")] = ", ".join(selections)
+                if filterSelections:
+                    cell = ws.cell(row=1,column=1,value="Filters:")
                     cell.font = Font(bold=True)
-                    cell = ws.cell(row=2, column=filterStart, value="Selections:")
+                    cell = ws.cell(row=2,column=1,value="Selections:")
                     cell.font = Font(bold=True)
-                    for idx, key in enumerate(appliedFilters, start=filterStart + 1):
-                        cell = ws.cell(row=1, column=idx, value=key)
-                        cell.alignment = Alignment(wrap_text=True)
-                        cell = ws.cell(row=2, column=idx, value=", ".join(appliedFilters[key]))
+                    for idx, filter in enumerate(filterSelections, start=2):
+                        ws.cell(row=1,column=idx, value=filter)
+                        cell = ws.cell(row=2,column=idx, value=filterSelections.get(filter))
                         cell.alignment = Alignment(wrap_text=True)
 
             
@@ -676,11 +712,10 @@ class returnsApp(QWidget):
             else:
                 self.populateReturnsTable(self.currentTableData)
     def resetData(self,*_):
-        save_to_db("calculations",None,action="reset") #reset calculations so new data will be freshly calculated
+        for table in ("calculations","positions_low","positions_high","transactions_low","transactions_high"):
+            save_to_db(table,None,action="clear") #reset all tables so everything will be fresh data
         self.poolChangeDates = {"active" : False}
-        if testDataMode or onlyCalcTestMode:
-            if onlyCalcTestMode:
-                self.earliestChangeDate = self.dataTimeStart
+        if testDataMode:
             self.calculateReturn()
         else:
             executor.submit(self.pullData)
@@ -767,7 +802,6 @@ class returnsApp(QWidget):
                     date = datetime.strftime(datetime.strptime(entry["dateTime"], "%Y-%m-%d %H:%M:%S"), "%B %Y")
                     Dtype = entry["Calculation Type"]
                     level = entry["rowKey"]
-
                     
                     if level not in output.keys():
                         output[level] = {}
@@ -1257,13 +1291,17 @@ class returnsApp(QWidget):
         self.benchmarkSelection.addItems(benchNames)
     def groupingChange(self):
         groupOpts = self.sortHierarchy.checkedItems()
+        if groupOpts == []:
+            self.sortHierarchy.setCheckedItems(["assetClass","subAssetClass"])
         self.filterCallLock = True
         for filt in ("Investor", "Family Branch"):
             if filt in groupOpts and self.filterDict[filt].checkedItems() == []:
                 self.filterDict[filt].selectAll()
+                self.previousGrouping.add(filt)
             elif filt in self.previousGrouping: #removes the selections if they stop grouping by investor/family
                 self.filterDict[filt].clearSelection()
-        self.previousGrouping = self.filterDict[filt].checkedItems()
+                self.previousGrouping.remove(filt)
+            
             
         self.filterCallLock = False
         self.buildReturnTable()
@@ -1367,7 +1405,7 @@ class returnsApp(QWidget):
                 "tranCols": "Investment in, Investing Entity, Transaction Type, Effective date, Asset Class (E), Sub-asset class (E), HF Classification, Remaining commitment change, Transaction timing, Amount in system currency, Cash flow change (USD), Parent investor",
                 "tranName": "InvestmentTransaction",
                 "tranSort": "Effective date:desc",
-                "accountCols": "As of Date, Balance Type, Asset Class, Sub-asset class, Value of Investments, Investing entity, Investment in, HF Classification, Parent investor, Value in system currency",
+                "accountCols": "As of Date, Balance Type, Asset Class, Sub-asset class, Investing entity, Investment in, HF Classification, Parent investor, Value in system currency, Fund class",
                 "accountName": "InvestmentPosition",
                 "accountSort": "As of Date:desc",
                 "fundCols" : "Fund Name, Asset class category, Parent fund, Fund Pipeline Status",
@@ -1774,8 +1812,10 @@ class returnsApp(QWidget):
 
 
             currentTime = datetime.now().strftime("%B %d, %Y @ %I:%M %p")
-            changeData = datetime.strftime(self.earliestChangeDate, "%B %d, %Y @ %I:%M %p")
-            save_to_db(None,None,query="UPDATE history SET [lastImport] = ?, [changeDate] = ?", inputs=(currentTime,changeData), action="replace")
+            changeDate = datetime.strftime(self.earliestChangeDate, "%B %d, %Y @ %I:%M %p")
+            save_to_db(None,None,query="UPDATE history SET [lastImport] = ?, [changeDate] = ?", inputs=(currentTime,changeDate), action="replace")
+            self.lastImportDB[0]["lastImport"] = currentTime
+            self.lastImportDB[0]["changeDate"] = changeDate
             self.lastImportLabel.setText(f"Last Data Import: {currentTime}")
             gui_queue.put(lambda: self.apiLoadingBarBox.setVisible(False))
             gui_queue.put(lambda: self.calculateReturn())
@@ -1822,6 +1862,9 @@ class returnsApp(QWidget):
                     gui_queue.put(lambda: self.calculationLoadingBox.setVisible(False))
                     if not testDataMode:
                         gui_queue.put(lambda: self.importButton.setEnabled(True))
+                    apiPullTime = self.lastImportDB[0].get("lastImport")
+                    save_to_db(None,None,query="UPDATE history SET [lastCalculation] = ?", inputs=(apiPullTime,), action="replace", lock=self.lock)
+                    self.lastImportDB[0]["lastCalculation"] = apiPullTime
                     print("Calculations skipped.")
                     return
                 
@@ -1853,6 +1896,17 @@ class returnsApp(QWidget):
                                 if not (start <= date <= m["endDay"]):
                                     continue
                             cache.setdefault(poolKey, {}).setdefault(table, {}).setdefault(m["dateTime"], []).append(row)
+                
+                self.cachedPoolCalculations = []
+                if self.poolChangeDates.get("active",False): #iterate through pools that have custom calculation dates
+                    runPools = []
+                    for idx, pool in enumerate(self.pools):
+                        if pool.get("poolName") in self.poolChangeDates or idx == 0: #if there is a date to calculate from. Needs at least one pool to run (idx 0)
+                            runPools.append(pool)
+                        else: #otherwise, get the calculations and avoid building a worker thread for nothing
+                            for month in cache.get(pool.get("poolName")).get("calculations", {}):
+                                self.cachedPoolCalculations.extend(cache.get(pool.get("poolName")).get("calculations", {}).get(month)) #add all calculations for the pool
+                    self.pools = runPools #only run calculatable pools
                 for idx, pool in enumerate(self.pools):
                     self.pools[idx]["cache"] = cache.get(pool.get("poolName"))
                     if self.poolChangeDates.get("active",False): #if the pool changes have been calculated, use it or set to current date if no changes occured
@@ -1967,6 +2021,7 @@ class returnsApp(QWidget):
         conn.close()
     def updateWorkerDB(self):
         try:
+            time.sleep(8) #give time for calculations to be saved first in other thread
             conn = sqlite3.connect(DATABASE_PATH)
             cursor = conn.cursor()
         except:
@@ -2006,6 +2061,7 @@ class returnsApp(QWidget):
         print("Background database updates complete")
         if dbFailure: #will force a recalculation on the next opening since the database won't be accurate
             save_to_db(None,None,query="UPDATE history SET [lastCalculation] = ?", inputs=("Database Failure",), action="replace", lock=self.lock)
+            self.lastImportDB[0]["lastCalculation"] = "Database Failure"
         conn.close()
     def update_from_queue(self):
         if self.queue:
@@ -2053,6 +2109,7 @@ class returnsApp(QWidget):
                     calculations.extend(fut.get())
                 except Exception as e:
                     print(f"Error appending calculations: {e}")
+            calculations.extend(self.cachedPoolCalculations)
             keys = []
             for row in calculations:
                 for key in row.keys():
@@ -2060,7 +2117,7 @@ class returnsApp(QWidget):
                         keys.append(key)
             save_to_db("calculations",calculations, keys=keys, lock=self.lock)
             try:
-                apiPullTime = load_from_db("history")[0]["lastImport"]
+                apiPullTime = self.lastImportDB[0].get("lastImport")
                 save_to_db(None,None,query="UPDATE history SET [lastCalculation] = ?", inputs=(apiPullTime,), action="replace", lock=self.lock)
             except:
                 print("failed to update last calculation time")
@@ -2243,6 +2300,10 @@ def save_to_db(table, rows, action = "", query = "",inputs = None, keys = None, 
             cur = connection.cursor()
         if action == "reset":
             cur.execute(f"DROP TABLE IF EXISTS {table}")
+            conn.commit()
+        elif action == "clear":
+            cur.execute(f"DELETE FROM {table}")
+            conn.commit()
         elif action == "add":
             try:
                 for row in rows:
@@ -2383,8 +2444,8 @@ def updateStatus(pool,totalLoops, lock, status = "Working", connection = None):
                 c.execute("""
                     INSERT INTO progress (pool, completed, total,status)
                     VALUES (?, -1, ?,?)
-                    ON CONFLICT(pool) DO UPDATE SET completed = completed + 1
-                """, (pool, totalLoops,status))
+                    ON CONFLICT(pool) DO UPDATE SET completed = completed + 1, status = ?
+                """, (pool, totalLoops,status,status))
             elif status == "Completed":
                 c.execute("UPDATE progress SET completed = completed + 1, status = ? WHERE pool = ?", (status,pool))
             else:
@@ -2501,8 +2562,45 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
                     commitment = float(startEntry[0].get(nameHier["Commitment"]["local"],0))
                     unfunded = float(startEntry[0].get(nameHier["Unfunded"]["local"],0))
                 if len(startEntry) > 1: #combines the values for fund sub classes for calculations
-                    for entry in startEntry[1:]:
-                        startEntry[0][nameHier["Value"]["dynLow"]] = str(float(startEntry[0][nameHier["Value"]["dynLow"]]) + float(entry[nameHier["Value"]["dynLow"]])) #adds values to the first index
+                    split = {}
+                    foundDuplicate = False
+                    for entry in startEntry: #split the entries by fundclass to check for duplicates
+                        fundClass = entry.get(nameHier["FundClass"]["dynLow"])
+                        if fundClass not in split:
+                            split[fundClass] = [entry,]
+                        else:
+                            split[fundClass].append(entry)
+                            foundDuplicate = True
+                    singleEntries = []
+                    if foundDuplicate: #if duplicates, loop through to find the best balance type
+                        for fundClass in split: #loop by fund
+                            if len(split.get(fundClass)) > 1: #check if duplicates
+                                foundType = False
+                                for balanceType in balanceTypePriority: #loop through balance types by priority
+                                    for entry in split.get(fundClass): #loop through the duplicate entries
+                                        if entry.get("Balancetype") == balanceType and entry.get(nameHier["Value"]["dynLow"]) not in (None,"None"): #if the balance type is preferred, add the entry and break
+                                            singleEntries.append(entry)
+                                            foundType = True
+                                            break
+                                    if foundType: #stop balance type checking if found
+                                        break
+                                if not foundType: #reaches if nothing was found
+                                    for entry in split.get(fundClass): #loop through to find the first with a value
+                                        if entry.get(nameHier["Value"]["dynLow"]) not in (None,"None"): #if the balance type is preferred, add the entry and break
+                                            singleEntries.append(entry)
+                                            foundType = True
+                                            break
+                                    if not foundType: #final attempt just take the first entry
+                                        singleEntries.append(split.get(fundClass)[0])
+                            else: #no duplicates for this fund
+                                singleEntries.append(split.get(fundClass)[0])
+                    else:
+                        singleEntries.extend(startEntry)
+                    NAV = 0
+                    for entry in singleEntries:
+                        if entry.get(nameHier["Value"]["dynLow"]) not in (None,0,"None"):
+                            NAV += float(entry[nameHier["Value"]["dynLow"]]) #adds values to the first index
+                    startEntry[0][nameHier["Value"]["dynLow"]] = str(NAV)
                 if len(endEntry) < 1: #no end account balance yet, so create it.  
                     # !!!!!!!!! Should I remove this and just not use the fund if an end balance is not there?
                     createFinalValue = True
@@ -2512,8 +2610,45 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
                     subAssetClass = endEntry[0]["ExposureAssetClassSub-assetClass(E)"]
                     fundClassification = endEntry[0]["Target nameExposureHFClassificationLevel2"]
                 if len(endEntry) > 1: #combine sub funds for calculations
-                    for entry in endEntry[1:]:
-                        endEntry[0][nameHier["Value"]["dynLow"]] = str(float(endEntry[0][nameHier["Value"]["dynLow"]]) + float(entry[nameHier["Value"]["dynLow"]])) #adds values to the first index
+                    split = {}
+                    foundDuplicate = False
+                    for entry in endEntry: #split the entries by fundclass to check for duplicates
+                        fundClass = entry.get(nameHier["FundClass"]["dynLow"])
+                        if fundClass not in split:
+                            split[fundClass] = [entry,]
+                        else:
+                            split[fundClass].append(entry)
+                            foundDuplicate = True
+                    singleEntries = []
+                    if foundDuplicate: #if duplicates, loop through to find the best balance type
+                        for fundClass in split: #loop by fund
+                            if len(split.get(fundClass)) > 1: #check if duplicates
+                                foundType = False
+                                for balanceType in balanceTypePriority: #loop through balance types by priority
+                                    for entry in split.get(fundClass): #loop through the duplicate entries
+                                        if entry.get("Balancetype") == balanceType and entry.get(nameHier["Value"]["dynLow"]) not in (None,"None"): #if the balance type is preferred, add the entry and break
+                                            singleEntries.append(entry)
+                                            foundType = True
+                                            break
+                                    if foundType: #stop balance type checking if found
+                                        break
+                                if not foundType: #reaches if nothing was found
+                                    for entry in split.get(fundClass): #loop through to find the first with a value
+                                        if entry.get(nameHier["Value"]["dynLow"]) not in (None,"None"): #if the balance type is preferred, add the entry and break
+                                            singleEntries.append(entry)
+                                            foundType = True
+                                            break
+                                    if not foundType: #final attempt take first entry
+                                        singleEntries.append(split.get(fundClass)[0])
+                            else: #no duplicates for this fund
+                                singleEntries.append(split.get(fundClass)[0])
+                    else:
+                        singleEntries.extend(endEntry)
+                    NAV = 0
+                    for entry in singleEntries:
+                        if entry.get(nameHier["Value"]["dynLow"]) not in (None,0,"None"):
+                            NAV += float(entry.get(nameHier["Value"]["dynLow"])) #adds values to the first index
+                    endEntry[0][nameHier["Value"]["dynLow"]] = str(NAV)
                 startEntry = startEntry[0]
                 endEntry = endEntry[0]
                 fundTransactions = allPoolTransactions.get(fund,[]) 
@@ -2532,7 +2667,7 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
                         weightedCashFlow -= float(transaction[nameHier["CashFlow"]["dynLow"]])  *  (totalDays -int(datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S").day) + backDate)/totalDays
                         if transaction.get(nameHier["Unfunded"]["dynLow"]) not in (None,"None"):
                             unfunded += float(transaction[nameHier["Unfunded"]["value"]])
-                    elif transaction["TransactionType"] in commitmentChangeTransactionTypes:
+                    elif transaction["TransactionType"] in commitmentChangeTransactionTypes and transaction.get("TransactionType") not in (None,"None"):
                         commitment += float(transaction[nameHier["Commitment"]["dynLow"]])
                         unfunded += float(transaction[nameHier["Commitment"]["dynLow"]])
                 try:
@@ -2649,12 +2784,15 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
                         noStartValue = True
                     else:
                         continue #ignore the investor completely if there is no starting or ending value
+                if startEntry.get(nameHier["Value"]["dynHigh"]) in (None,"None"):
+                    startEntry[nameHier["Value"]["dynHigh"]] = 0 #prevent float conversion errors
                 investorTransactions = allInvestorTransactions.get(investor,[]) #all investor transactions in the pool for the month
                 
                 for transaction in investorTransactions: 
-                    investorCashFlowSum -= float(transaction[nameHier["CashFlow"]["dynHigh"]])
-                    backDate = calculateBackdate(transaction) #dynamo revert by a day logic
-                    investorWeightedCashFlow -= float(transaction[nameHier["CashFlow"]["dynHigh"]])  *  (totalDays -int(datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S").day) + backDate)/totalDays
+                    if transaction.get(nameHier["CashFlow"]["dynHigh"]) not in (None,"None"):
+                        investorCashFlowSum -= float(transaction[nameHier["CashFlow"]["dynHigh"]])
+                        backDate = calculateBackdate(transaction) #dynamo revert by a day logic
+                        investorWeightedCashFlow -= float(transaction[nameHier["CashFlow"]["dynHigh"]])  *  (totalDays -int(datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S").day) + backDate)/totalDays
                 investorMDdenominator = float(startEntry[nameHier["Value"]["dynHigh"]]) + investorWeightedCashFlow
                 tempInvestorDict["MDden"] = investorMDdenominator
                 tempInvestorDict["cashFlow"] = investorCashFlowSum
@@ -2667,7 +2805,10 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
                         print("exit 1")
                     continue #ignore investors with no value
                 EOM = investorEndEntries.get(investor,[])
-                if round(tempInvestorDict.get("startVal") + tempInvestorDict.get("cashFlow")) != 0 and len(EOM) > 0 and round(float(EOM[0].get(nameHier["Value"]["dynHigh"]))) != 0:
+                if len(EOM) > 0:
+                    if EOM[0].get(nameHier["Value"]["dynHigh"]) in (None,"None"):
+                        EOM[0][nameHier["Value"]["dynHigh"]] = 0
+                if round(tempInvestorDict.get("startVal") + tempInvestorDict.get("cashFlow")) != 0 and len(EOM) > 0 and round(float(EOM[0].get(nameHier["Value"]["dynHigh"],0))) != 0:
                     #only accounts for investor gain (MD den) if they have not exited
                     #exit check: starting value + cashflow is zero OR there is no ending value
                     investorMDdenominatorSum += investorMDdenominator
@@ -2676,6 +2817,9 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
             for investor in tempInvestorDicts.keys():
                 # second investor iteration to find the gain, return,ownership, and NAV values at pool level (i think it is not needed to be split, but remnant from old logic.)
                 EOMcheck = investorEndEntries.get(investor,[])
+                if len(EOMcheck) > 0:
+                    if EOMcheck[0].get(nameHier["Value"]["dynHigh"]) in (None,"None"):
+                        EOMcheck[0][nameHier["Value"]["dynHigh"]] = 0 #prevents float conversion errors
                 investorMDdenominator = tempInvestorDicts[investor]["MDden"]
                 if investorMDdenominatorSum == 0:
                     investorGain = 0 #0 if no true value in the pool. avoids errors
@@ -2685,7 +2829,7 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
                     investorReturn = 0 #0 if investor has no value in pool. avoids error
                 else:
                     investorReturn = investorGain / investorMDdenominator
-                if round(tempInvestorDicts[investor]["startVal"] + tempInvestorDicts[investor]["cashFlow"]) == 0 or len(EOMcheck) == 0 or round(float(EOMcheck[0].get(nameHier["Value"]["dynHigh"]))) == 0: 
+                if round(tempInvestorDicts[investor]["startVal"] + tempInvestorDicts[investor]["cashFlow"]) == 0 or len(EOMcheck) == 0 or round(float(EOMcheck[0].get(nameHier["Value"]["dynHigh"],0))) == 0: 
                     #zero values if exited investor
                     #exit check: start value and cashflow sums to zero OR no end value OR end value is zero
                     investorEOM = 0
@@ -2709,7 +2853,7 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
                 
                 
                 if len(EOMcheck) > 0: #only update the database for the investor if they have account balances
-                    if round(float(EOMcheck[0].get(nameHier["Value"]["dynHigh"]))) != round(investorEOM): #don't push an update if the values are the same
+                    if round(float(EOMcheck[0].get(nameHier["Value"]["dynHigh"],0))) != round(investorEOM): #don't push an update if the values are the same
                         update_high.append(inputs)
                         for m in newMonths:
                             if m["accountStart"] <= month["endDay"] <= m["endDay"]:
@@ -2758,7 +2902,14 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
     except Exception as e: #halt operations for failure or force close/cancel
         statusQueue.put((pool,len(newMonths),"Failed"))
         print(f"Worker for {poolData.get("poolName")} failed.")
-        print(traceback.format_exc())
+        failed = True
+        try:
+            trace = traceback.format_exc()
+            print(trace)
+            logging.error(trace)
+        except:
+            pass
+        logging.error(e)
         print("\n")
         return []
             
@@ -2775,7 +2926,19 @@ def calculateBackdate(transaction,noStartValue = False):
         else:
             backDate = 0
         return backDate
+class displayWindow(QWidget):
+    def __init__(self, parent=None, flags=Qt.WindowFlags(), parentSource = None, text = "", title=""):
+        super().__init__(parent, flags)
+        self.setWindowTitle(title)
+        self.parent = parentSource
+        if self.parent:
+            self.setObjectName("mainPage")
+            self.setStyleSheet(self.parent.appStyle)
+        #self.resize(1000, 600)
 
+        # Layout and table
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(text))
 @attach_logging_to_class
 class DictListModel(QAbstractTableModel):
     """
@@ -3277,6 +3440,7 @@ class MultiSelectBox(QWidget):
         for item in items:
             self.addItem(item)
     def addItem(self, text):
+        text = displayLinks.get(text,text) #put checkboxes to show the display version
         if text in self._checkboxes:
             return
         cb = QCheckBox(text, self.popup)
@@ -3295,23 +3459,25 @@ class MultiSelectBox(QWidget):
 
     def setCheckedItems(self, items):
         for text, cb in self._checkboxes.items():
+            text = displayLinks.get(text,text) # check as display version
             if text in items:
                 cb.setChecked(True)
         self._updateLine()
     def setCheckedItem(self, item):
         for text, cb in self._checkboxes.items():
+            text = displayLinks.get(text,text) # check as display version
             if text == item:
                 cb.setChecked(True)
         self._updateLine()
 
     def checkedItems(self):
         if self.hierarchy:
-            if len(self.currentItems) == 0:
-                return ["assetClass"]
-            else:
-                return self.currentItems
+            items = []
+            for item in self.currentItems:
+                items.append(displayLinks.get(item,item)) #revert to normal version for output
+            return items
         else:
-            return [t for t, cb in self._checkboxes.items() if cb.isChecked()]
+            return [displayLinks.get(t,t) for t, cb in self._checkboxes.items() if cb.isChecked()]
 
     def clearSelection(self):
         for cb in self._checkboxes.values():
@@ -3328,6 +3494,7 @@ class MultiSelectBox(QWidget):
         temp = self.hierarchy
         self.hierarchy = False
         sel = self.checkedItems()
+        sel = [displayLinks.get(item,item) for item in sel.copy()]
         self.hierarchy = temp
         if self.hierarchy:
             for idx, item in enumerate(self.currentItems): #check if item is removed.
@@ -3338,7 +3505,8 @@ class MultiSelectBox(QWidget):
                 if item not in self.currentItems:
                     self.currentItems.append(item)
                     break
-            lines = [f"{i+1}: {text}" for i, text in enumerate(self.currentItems)]
+            lines = [f"({i+1}) '{text}'" for i, text in enumerate(self.currentItems)]
+
             display = "\n".join(lines)
         else:
             # the old single-line, comma-separated format

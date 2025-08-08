@@ -24,8 +24,11 @@ try:
             base_path = os.path.abspath(".")
 
         return os.path.join(base_path, relative_path)
-    
-    DATABASE_PATH = r"C:\Users\coneil\Local Files\Returns Calculator\assets\Acc_Tran_Test.db"
+    TestMode = False
+    if TestMode:
+        DATABASE_PATH = r"C:\Users\coneil\Local Files\Returns Calculator\assets\Acc_Tran_Test.db"
+    else:
+        DATABASE_PATH = r"C:\Users\coneil\Local Files\Returns Calculator\assets\Acc_Tran.db"
 
     mainExecutor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
     gui_queue = queue.Queue()
@@ -45,26 +48,43 @@ class AdminApp:
         self.root.geometry("1250x600")
         self.root.title("Admin App")
         
+        self.root.rowconfigure(0, weight=1)
+        self.root.columnconfigure(0, weight=1)
+
         self.adminAppFrame = ctk.CTkFrame(root)
-        self.adminAppFrame.pack(fill='both', expand=True)
+        self.adminAppFrame.grid(row = 0, column = 0, sticky='nsew')
+
+        self.adminAppFrame.rowconfigure(8, weight=1)
+        self.adminAppFrame.columnconfigure(0, weight=1)
 
         # GUI Elements
         self.table_label = ctk.CTkLabel(self.adminAppFrame, text="Select Table:")
-        self.table_label.pack(pady=5)
+        self.table_label.grid(pady=5)
 
         # Dropdown menu to select table
         self.tables_combobox = ttk.Combobox(self.adminAppFrame)
-        self.tables_combobox.pack(pady=5)
+        self.tables_combobox.grid(pady=5)
 
         # Button to fetch table content
         self.fetch_button = ctk.CTkButton(self.adminAppFrame, text="Fetch Table Data", command=self.fetch_table_data)
-        self.fetch_button.pack(pady=5)
+        self.fetch_button.grid(pady=5)
 
         self.adminButtonFrame = ctk.CTkFrame(self.adminAppFrame)
-        self.adminButtonFrame.pack()
+        self.adminButtonFrame.grid()
 
         self.refresh_button = ctk.CTkButton(self.adminButtonFrame, text="Refresh App", command=self.refresh)
         self.refresh_button.grid(row=0, column=2, padx=5, pady = 5)
+
+        self.delete_table_button = ctk.CTkButton(self.adminButtonFrame, text="Delete Table", command=self.delete_table)
+        self.delete_table_button.grid(row=0, column=3, padx=5, pady=5)
+        self.clear_table_button = ctk.CTkButton(self.adminButtonFrame, text="Clear Table", command=self.clear_table)
+        self.clear_table_button.grid(row=0, column=4, padx=5, pady=5)
+        self.refresh_tables_button = ctk.CTkButton(self.adminButtonFrame, text="Refresh Table List", command=self.load_tables)
+        self.refresh_tables_button.grid(row=0, column=5, padx=5, pady=5)
+        self.change_db_button = ctk.CTkButton(self.adminButtonFrame, text="Change DB File", command=self.select_new_database)
+        self.change_db_button.grid(row=0, column=6, padx=5, pady=5)
+        self.addColBtn = ctk.CTkButton(self.adminButtonFrame, text="Add Column", command=self.addColumn)
+        self.addColBtn.grid(row=0, column=7, padx=5, pady=5)
 
         self.filter_string = ctk.StringVar(value="")
         self.filterLabel = ctk.StringVar(value="")
@@ -72,22 +92,28 @@ class AdminApp:
         self.filterDisp.grid(row=1, column=0, padx=5,pady=5)
         self.filterDisp.grid_remove()
         
-        self.filter_button = ctk.CTkButton(self.adminButtonFrame, text="Filter Data", command=self.add_filter)
+        self.filter_button = ctk.CTkButton(self.adminButtonFrame, text="Add filter", command=self.add_filter)
+        self.activeFilters = []
         self.filter_button.grid(row=1, column=1, padx=5, pady=5)
         
-        self.remove_filter_button = ctk.CTkButton(self.adminButtonFrame, text="Clear Filter", command=self.clear_filter)
+        self.remove_filter_button = ctk.CTkButton(self.adminButtonFrame, text="Clear Filters", command=self.clear_filter)
         self.remove_filter_button.grid(row=1, column=2, padx=5,pady=5)
 
         self.style = ttk.Style()
         self.style.configure("Treeview", rowheight=30)
         # Treeview to display data
         self.tree = ttk.Treeview(self.adminAppFrame)
-        self.tree.pack(pady=5, fill='both', expand=True)
+        self.tree.grid(row=8, column=0, sticky="nsew")
         self.tree.bind('<ButtonRelease-1>', self.on_entry_select)
+
+        #Vertical scrollbar
+        vsb = ttk.Scrollbar(self.adminAppFrame, orient="vertical", command=self.tree.yview)
+        vsb.grid(row=8, column=1, sticky="ns")
+        self.tree.configure(yscrollcommand=vsb.set)
 
         # Container for Entry widgets
         self.entries_frame = ctk.CTkFrame(self.adminAppFrame)
-        self.entries_frame.pack(pady=5)
+        self.entries_frame.grid(pady=5)
 
         # Buttons for editing and deleting entries
         self.delete_button = ctk.CTkButton(self.adminAppFrame, text="Delete Entry(ies)", command=self.delete_entry)
@@ -100,14 +126,16 @@ class AdminApp:
     def add_filter(self):
         filter = simpledialog.askstring("Filter", "Input filter for data:")
         if filter:
-            self.filter_string.set(filter)
-            self.filterLabel.set("Current Filter: " + filter)
+            self.activeFilters.append(filter)
+            self.filter_string.set(",".join(self.activeFilters))
+            self.filterLabel.set("Current Filter: " + ",".join(self.activeFilters))
             self.filterDisp.grid()
             self.fetch_table_data()
 
 
     def clear_filter(self):
         self.filter_string.set("")
+        self.activeFilters = []
         self.filterLabel.set("")
         self.filterDisp.grid_remove()
         self.fetch_table_data()
@@ -161,7 +189,7 @@ class AdminApp:
             logging.warning(f"Failed attempt for admin to load table: {e}")
             return
         
-        self.add_button.pack(pady=5)
+        self.add_button.grid(pady=5)
         # Update the columns in Treeview
         self.tree["columns"] = columns
         self.tree.column("#0", width=0, stretch=tk.NO)  # Hide the tree column
@@ -187,12 +215,17 @@ class AdminApp:
                 rowIdx += 1
                 self.tree.insert("", "end", values=sanitized_row, tags=(tag,))
             else:
-                found = False
-                for item in row:
-                    if item is not None:
-                        if self.filter_string.get().lower() in item.lower():
+                allFound = True
+                for filter in self.activeFilters:
+                    found = False
+                    for item in row:
+                        if item is not None and filter.lower() in item.lower():
                             found = True
-                if found:
+                            break #exit row checking
+                    if not found:
+                        allFound = False
+                        break
+                if allFound:
                     rowIdx += 1
                     self.tree.insert("", "end", values=sanitized_row, tags=(tag,))
 
@@ -234,29 +267,47 @@ class AdminApp:
         selected_item = self.tree.selection()
         if selected_item:
             if len(selected_item) == 1:
-                self.delete_button.pack(pady=5)
-                self.update_button.pack(pady=5)
-                self.add_button.pack(pady=5)
+                self.delete_button.grid(pady=5)
+                self.update_button.grid(pady=5)
+                self.add_button.grid(pady=5)
                 self.selected_rows = selected_item
                 self.selected_row = self.tree.item(selected_item[0], "values")
                 for i, value in enumerate(self.selected_row):
                     self.entries[i].delete(0, tk.END)
                     self.entries[i].insert(0, value)
             else:
-                self.update_button.pack_forget()
-                self.add_button.pack_forget()
+                self.update_button.grid_remove()
+                self.add_button.grid_remove()
                 self.selected_rows = selected_item
                 self.selected_row = self.tree.item(selected_item[0], "values")
                 for i, value in enumerate(self.selected_row):
                     self.entries[i].delete(0, tk.END)
                     self.entries[i].insert(0, "Multi Select")
         else:
-            self.update_button.pack_forget()
-            self.delete_button.pack_forget()
+            self.update_button.grid_remove()
+            self.delete_button.grid_remove()
             if hasattr(self,'selected_rows'):
                 del self.selected_rows
             if hasattr(self,'selected_row'):
                 del self.selected_row
+    def addColumn(self):
+        try:
+            selected_table = self.tables_combobox.get()
+            if not selected_table:
+                messagebox.showwarning("Warning", "Please select a table.")
+                return
+            colName = simpledialog.askstring("Column", "Input new column name:")
+            colType = simpledialog.askstring("Column", "Input column type:")
+            update_query = f"ALTER TABLE {selected_table} ADD COLUMN {colName} {colType};"
+            self.adminCommandError = False
+            self.send_admin_command(update_query)
+            self.root.after(2000,self.fetch_table_data)
+            time.sleep(0.5)
+            if not self.adminCommandError:
+                messagebox.showinfo("Success", "Column added successfully.")
+        except Exception as e:
+            logging.error(f"Error occured while adding column to database: {e}")
+            messagebox.showinfo("Error", "Issue occured while adding column. Try again.")
     def add_entry(self):
         try:
             selected_table = self.tables_combobox.get()
@@ -436,6 +487,50 @@ class AdminApp:
     def refresh(self):
         self.adminAppFrame.destroy()
         AdminApp(self.root)
+    def delete_table(self):
+        table = self.tables_combobox.get()
+        if not table:
+            messagebox.showwarning("Warning", "Please select a table to delete.")
+            return
+        if messagebox.askyesno("Confirm", f"Are you sure you want to permanently delete the table '{table}'?"):
+            try:
+                dbCursor.execute(f"DROP TABLE IF EXISTS {table}")
+                dbConnection.commit()
+                messagebox.showinfo("Deleted", f"Table '{table}' deleted.")
+                self.load_tables()
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to delete table: {e}")
+    def clear_table(self):
+        table = self.tables_combobox.get()
+        if not table:
+            messagebox.showwarning("Warning", "Please select a table to clear.")
+            return
+        if messagebox.askyesno("Confirm", f"Are you sure you want to clear all entries from table '{table}'?"):
+            try:
+                dbCursor.execute(f"DELETE FROM {table}")
+                dbConnection.commit()
+                messagebox.showinfo("Cleared", f"All entries from table '{table}' removed.")
+                self.fetch_table_data()
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to clear table: {e}")
+
+    def select_new_database(self):
+        global dbConnection, dbCursor, DATABASE_PATH
+        new_path = filedialog.askopenfilename(filetypes=[("SQLite DB", "*.db"), ("All files", "*.*")])
+        if not new_path:
+            return
+        try:
+            test_conn = sqlite3.connect(new_path)
+            test_conn.execute("SELECT name FROM sqlite_master WHERE type='table';")
+            test_conn.close()
+            dbConnection.close()
+            DATABASE_PATH = new_path
+            dbConnection = sqlite3.connect(DATABASE_PATH)
+            dbCursor = dbConnection.cursor()
+            messagebox.showinfo("Success", f"Database switched to: {DATABASE_PATH}")
+            self.load_tables()
+        except Exception as e:
+            messagebox.showerror("Error", f"Invalid database file: {e}")
 
 
 
