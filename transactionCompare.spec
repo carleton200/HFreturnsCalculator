@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['dbEditor.py'],
+    ['transactionCompare.py'],
     pathex=[],
     binaries=[],
     datas=[],
@@ -22,7 +22,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='dbEditor',
+    name='transactionCompare',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
