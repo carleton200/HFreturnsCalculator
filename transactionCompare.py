@@ -1639,7 +1639,7 @@ class returnsApp(QWidget):
                     
                     self.calcStartTime = datetime.now()
                     for pool in self.pools:
-                        res = self.pool.apply_async(processPool, args=(pool, commonData,self.workerStatusQueue, self.workerDBqueue, self.calcFailedFlag))
+                        res = self.pool.apply_async(processPoolTransactions, args=(pool, commonData,self.workerStatusQueue, self.workerDBqueue, self.calcFailedFlag))
                         self.futures.append(res)
                     self.pool.close()
 
@@ -2147,7 +2147,7 @@ def updateStatus(pool,totalLoops, lock, status = "Working", connection = None):
     except Exception as e:
         print(f"Error updating status: {e}")
     return failure
-def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
+def processPoolTransactions(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
     #Function to take all the information for one pool, calculate all relevant information, and return a list of the calculations
     #Inputs:
     #   poolData: dict with information relevant to this specific pool

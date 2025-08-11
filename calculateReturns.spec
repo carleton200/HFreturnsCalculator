@@ -3,6 +3,7 @@
 from pathlib import Path
 assets = [
     ('assets/Acc_Tran.db', 'assets'),
+    ('assets/tranCalc.db', 'assets'),
     ('assets/helpInfo.txt', 'assets'),
 ]
 
