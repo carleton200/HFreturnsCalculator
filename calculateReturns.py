@@ -6,6 +6,8 @@ import traceback
 import sqlite3
 import requests
 import calendar
+import warnings
+import pandas as pd
 import time
 import copy
 import re
@@ -16,7 +18,10 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, wait
 import queue
 import threading
+import pyxirr
 import logging, functools
+import numpy_financial as npf
+from scipy.optimize import fsolve
 from dateutil.relativedelta import relativedelta
 from multiprocessing import Pool, freeze_support, Manager
 from PyQt5.QtWidgets import (
@@ -25,12 +30,12 @@ from PyQt5.QtWidgets import (
     QRadioButton, QButtonGroup, QComboBox, QHBoxLayout,
     QTableWidget, QTableWidgetItem, QProgressBar, QTableView, QCheckBox, QMessageBox,
     QScrollArea, QFileDialog, QListWidgetItem, QListWidget, QDialog, QSizePolicy, QGridLayout,
-    QFrame, QTextEdit, QHeaderView
+    QFrame, QTextEdit, QHeaderView, QDateEdit
 )
 from PyQt5.QtGui import QBrush, QColor, QDesktopServices
-from PyQt5.QtCore import Qt, QTimer, QAbstractTableModel, QModelIndex, pyqtSignal, QPoint, QUrl
+from PyQt5.QtCore import Qt, QTimer, QAbstractTableModel, QModelIndex, pyqtSignal, QPoint, QUrl, QDate
 
-currentVersion = "1.1.3"
+currentVersion = "1.1.4"
 demoMode = True
 ownershipCorrect = True
 importInterval = relativedelta(hours=2)
@@ -118,7 +123,7 @@ nameHier = {
 
 commitmentChangeTransactionTypes = ["Commitment", "Transfer of commitment", "Transfer of commitment (out)", "Secondary - Original commitment (by secondary seller)"]
 ignoreInvTranTypes = [""]
-headerOptions = ["Return","NAV", "Monthly Gain", "Ownership" , "MDdenominator", "Commitment", "Unfunded"]
+headerOptions = ["Return","NAV", "Monthly Gain", "Ownership" , "MDdenominator", "Commitment", "Unfunded", "IRR ITD"]
 dataOptions = ["Investor","Family Branch","Classification", "dateTime"]
 tranAppHeaderOptions = ["Transaction Sum"]
 tranAppDataOptions = ["Investor","Family Branch", "dateTime"]
@@ -134,6 +139,99 @@ for header in ("Return","Ownership"):
     percent_headers.add(header)
 
 calculationPingTime = 2
+#-------------------------------- Common functions --------------------------------
+warnings.simplefilter("error",RuntimeWarning)
+def calculate_xirr(cash_flows, dates, guess : float = None):
+    try:
+        if cash_flows[-1] == 0:
+            #indicates closed fund. Remove the NAV as the cashflows should show the fund emptying
+            if len(cash_flows) > 2 and cash_flows[-2] != 0:
+                cash_flows = cash_flows[:-1]
+                dates = dates[:-1]
+            else:
+                return None #if only two cashflows, it is just a singular investment
+        if not( any(cf > 0 for cf in cash_flows) and any(cf < 0 for cf in cash_flows)):
+            return None #indicates no returns yet or no investments
+        result = pyxirr.xirr(dates, cash_flows)
+        if result:
+            return result * 100
+        else:
+            return None
+    except pyxirr.InvalidPaymentsError as e:
+        print(f"Skipping XIRR calculation due to InvalidPaymentsError: {e} \n Cash flows: {cash_flows} \n Dates: {dates}")
+        return None
+    except RuntimeWarning as e:
+        #print(f"Skipping XIRR calculation due to RuntimeWarning: {e}")
+        return None
+    except Exception as e:
+        print(f"Skipping XIRR calculation due to Exception: {e} \n Cash flows: {cash_flows} \n Dates: {dates}")
+        return None
+
+
+#-----------------------------Database Manager ---------------------------#
+class DatabaseManager:
+    """Thread-safe SQLite database manager.
+
+    Uses a single connection with check_same_thread=False and an RLock to
+    serialize access. Suitable for simple concurrent usage via a thread pool.
+    """
+
+    def __init__(self, db_path: str) -> None:
+        self.db_path = db_path
+        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+        self._lock = threading.RLock()
+        self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self._conn.execute("PRAGMA journal_mode=WAL;")
+        self._conn.execute("PRAGMA foreign_keys=ON;")
+        self._conn.commit()
+        self.instantiateTables()
+
+
+    def instantiateTables(self) -> None:
+        """Instantiate the tables in the database."""
+        with self._lock:
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS calculations (
+                    dateTime TEXT,
+                    Investor TEXT,
+                    Pool TEXT,
+                    Fund TEXT,
+                    assetClass TEXT,
+                    subAssetClass TEXT,
+                    NAV TEXT,
+                    MonthlyGain TEXT,
+                    Return TEXT,
+                    MDdenominator TEXT,
+                    Ownership TEXT,
+                    Commitment TEXT,
+                    Unfunded TEXT,
+                    IRRITD TEXT,
+                    Classification TEXT,
+                    Return REAL,
+                    NAV REAL,
+                    MonthlyGain REAL,
+                    Ownership REAL,
+                    MDdenominator REAL,
+                    Commitment REAL,
+                    Unfunded REAL,
+                    IRRITD REAL,
+                    PRIMARY KEY (dateTime, Investor, FamilyBranch, Classification)
+                )
+            """)
+            self._conn.commit()
+            
+            # Populate default box effects if table is empty
+
+
+    def fetch_all_records(self) -> list:
+        pass
+
+    def close(self) -> None:
+        try:
+            with self._lock:
+                self._conn.close()
+        except Exception:
+            pass
 
 @attach_logging_to_class
 class returnsApp(QWidget):
@@ -302,6 +400,10 @@ class returnsApp(QWidget):
         self.info_label = QLabel('Results')
         layout.addWidget(self.info_label)
         btn_to_form = QPushButton('Go to Results')
+        exportBtn = QPushButton('Export Data')
+        exportBtn.setObjectName("exportBtn")
+        exportBtn.clicked.connect(self.exportCalculations)
+        layout.addWidget(exportBtn)
         btn_to_form.clicked.connect(lambda: self.stack.setCurrentIndex(1))
         layout.addWidget(btn_to_form)
         
@@ -532,6 +634,10 @@ class returnsApp(QWidget):
             self.helpPage = helpMessage
         # except:
         #     QMessageBox.warning(self,"Error","Error opening help page.")
+    def exportCalculations(self,*_):
+        window = exportWindow(parentSource=self)
+        window.show()
+        self.exportWindow = window
     def openTranApp(self,*_):
         tranApp = transactionApp(apiKey=self.api_key)
         tranApp.stack.setCurrentIndex(1)
@@ -828,6 +934,9 @@ class returnsApp(QWidget):
                     date = datetime.strftime(datetime.strptime(entry["dateTime"], "%Y-%m-%d %H:%M:%S"), "%B %Y")
                     Dtype = entry["Calculation Type"]
                     level = entry["rowKey"]
+
+                    if dataOutputType == "IRR ITD" and self.consolidateFundsBtn.isChecked() and entry.get("fundName") in self.consolidatedFunds:
+                        continue #cannot use IRR ITD for consolidated funds
                     
                     if level not in output.keys():
                         output[level] = {}
@@ -851,11 +960,14 @@ class returnsApp(QWidget):
                             complexOutput[level]["dataType"] = Dtype
                         if headerOptions[0] not in complexOutput[level].keys() and headerOptions:
                             for option in headerOptions:
-                                complexOutput[level][option] = float(entry[option] if entry[option] is not None and entry[option] != '' else 0)
+                                if option == "IRR ITD" and self.consolidateFundsBtn.isChecked() and entry.get("fundName") in self.consolidatedFunds:
+                                    continue #cannot use IRR ITD for consolidated funds
+                                complexOutput[level][option] = float(entry[option] if entry.get(option) not in (None,"None","") else 0)
                         else:
                             for option in headerOptions:
-                                if option != "Ownership":
-                                    complexOutput[level][option] += float(entry[option] if entry[option] is not None and entry[option] != '' else 0)
+                                if option not in ("Ownership", "IRR ITD") and option != "IRR ITD" and dataOutputType == "IRR ITD" and self.consolidateFundsBtn.isChecked() and entry.get("fundName") in self.consolidatedFunds:
+                                    continue #cannot use IRR ITD for consolidated funds
+                                    complexOutput[level][option] += float(entry[option] if entry.get(option) not in (None,"None","") else 0)
                         if entry.get("Ownership") not in (None,"None") and (self.filterDict["Investor"].checkedItems() != [] or self.filterDict["Family Branch"].checkedItems() != []):
                             if "Ownership" not in complexOutput[level].keys():
                                 complexOutput[level]["Ownership"] = float(entry["Ownership"])
@@ -1024,9 +1136,9 @@ class returnsApp(QWidget):
             entryTemplate = {"dateTime" : None, "Calculation Type" : "Total " + levelName, "Pool" : None, "Fund" : None ,
                                             "assetClass" : None, "subAssetClass" : None, "Investor" : None,
                                             "Return" : None , nameHier["sleeve"]["local"] : None,
-                                            "Ownership" : None}
+                                            "Ownership" : None, "IRR ITD" : None}
             for header in headerOptions:
-                if header != "Ownership":
+                if header not in ("Ownership", "IRR ITD"):
                     entryTemplate[header] = 0
 
             #check for filtering. If none, use all options
@@ -1063,9 +1175,9 @@ class returnsApp(QWidget):
                                 if levelName == "subAssetClass":
                                     highEntries[total["dateTime"]]["assetClass"] = total["assetClass"] if total["assetClass"] != "Cash" else "Cash "
                         for header in headerOptions:
-                            if header != "Ownership":
+                            if header not in ("Ownership", "IRR ITD"):
                                 highEntries[total["dateTime"]][header] += float(total[header])
-                            elif levelName in ("Pool", "Investor", "Family Branch") and total.get(header) not in (None,"None","",0) and "Pool" in sortHierarchy[:levelIdx]:
+                            elif header == "Ownership" and levelName in ("Pool", "Investor", "Family Branch") and total.get(header) not in (None,"None","",0) and "Pool" in sortHierarchy[:levelIdx]:
                                 if highEntries[total["dateTime"]].get(header) is None:
                                     highEntries[total["dateTime"]][header] = float(total[header]) #initialize
                                 else:
@@ -1110,9 +1222,9 @@ class returnsApp(QWidget):
                                 if levelName == "subAssetClass":
                                     totalEntriesLow[entry["dateTime"]]["assetClass"] = entry["assetClass"] if entry["assetClass"] != "Cash" else "Cash "
                         for header in headerOptions:
-                            if header != "Ownership":
+                            if header not in ("Ownership", "IRR ITD") and entry.get(header) not in (None,"None",""):
                                 totalEntriesLow[entry["dateTime"]][header] += float(entry[header])
-                            elif levelName in ("Investor", "Family Branch") and "Pool" in sortHierarchy and entry.get(header) not in (None,"None","") and float(entry.get(header)) != 0:
+                            elif header == "Ownership" and levelName in ("Investor", "Family Branch") and "Pool" in sortHierarchy and entry.get(header) not in (None,"None","") and float(entry.get(header)) != 0:
                                 investor = entry.get("Investor")
                                 if totalEntriesLow[entry["dateTime"]].get(header) is None:
                                     totalEntriesLow[entry["dateTime"]][header] = float(entry[header]) #assign investor to ownership based on fund
@@ -1137,7 +1249,7 @@ class returnsApp(QWidget):
                 trueTotalEntries[total["dateTime"]] = {"dateTime" : None, "Calculation Type" : "Total", "Pool" : None, "Fund" : None ,
                                             "assetClass" : None, "subAssetClass" : None, "Investor" : None,
                                             "Return" : None , nameHier["sleeve"]["local"] : None,
-                                            "Ownership" : None}
+                                            "Ownership" : None, "IRR ITD" : None}
                 trueTotalEntries[total["dateTime"]]["rowKey"] = "Total" + self.buildCode([])
                 for header in headerOptions:
                     if header != "Ownership":
@@ -1145,7 +1257,7 @@ class returnsApp(QWidget):
                 for label in dataOptions:
                     trueTotalEntries[total["dateTime"]][label] = total[label]
             for header in headerOptions:
-                if header != "Ownership":
+                if header not in ("Ownership", "IRR ITD"):
                     trueTotalEntries[total["dateTime"]][header] += float(total[header])
         for month in trueTotalEntries.keys():
             trueTotalEntries[month]["Return"] = trueTotalEntries[month]["Monthly Gain"] / trueTotalEntries[month]["MDdenominator"] * 100 if trueTotalEntries[month]["MDdenominator"] != 0 else 0
@@ -4234,6 +4346,153 @@ class transactionApp(QWidget):
         calcTableModel = DictListModel(rows,headers, self)
         table.setModel(calcTableModel)
 
+class exportWindow(QWidget):
+    def __init__(self, parent=None, flags=Qt.WindowFlags(), parentSource=None):
+        super().__init__(parent, flags)
+        self.parent = parentSource
+        self.setWindowTitle("Export Data")
+        self.resize(600, 400)
+        self.setStyleSheet(self.parent.appStyle)
+        self.setObjectName("mainPage")
+
+        # Layouts
+        main_layout = QVBoxLayout(self)
+        form_layout = QFormLayout()
+        self.filter_boxes = {}
+        self.filter_labels = {}
+
+        # --- Filter ComboBoxes for each filterOption ---
+        self.filterOptions = getattr(self.parent, "filterOptions", [
+            {"key": "Investor", "name": "Investor"},
+            {"key": "Pool", "name": "Pool"},
+            {"key": "Fund", "name": "Fund"},
+            {"key": "assetClass", "name": "Asset Class"},
+            {"key": "subAssetClass", "name": "Sub Asset Class"},
+            {"key": "Classification", "name": "Classification"},
+        ])
+        # Use parent's lock if available
+        self.lock = getattr(self.parent, "lock", None)
+
+        # Query unique options for each filter from the calculations table
+        with self.parent.lock:
+            dbPath = getattr(self.parent, "dbPath", DATABASE_PATH)
+            conn = sqlite3.connect(dbPath)
+            cur = conn.cursor()
+            for f in self.filterOptions:
+                key = f["key"]
+                name = f["name"]
+                combo = QComboBox()
+                combo.addItem("")  # blank for optional
+                try:
+                    cur.execute(f"SELECT DISTINCT [{key}] FROM calculations")
+                    options = [row[0] for row in cur.fetchall() if row[0] not in (None, "", "None")]
+                    options = sorted(set(options))
+                    combo.addItems(options)
+                except Exception as e:
+                    print(f"Error loading filter options for {key}: {e}")
+                self.filter_boxes[key] = combo
+                self.filter_labels[key] = name
+                form_layout.addRow(name + ":", combo)
+            conn.close()
+
+        # --- Date selectors ---
+        date_layout = QHBoxLayout()
+        self.start_date_edit = QDateEdit()
+        self.start_date_edit.setCalendarPopup(True)
+        self.start_date_edit.setDisplayFormat("yyyy-MM-dd")
+        self.start_date_edit.setDate(QDate.currentDate())
+        self.start_date_edit.setSpecialValueText("")  # blank for optional
+        self.start_date_edit.setDateRange(QDate(1990, 1, 1), QDate(2100, 12, 31))
+        self.start_date_edit.setDate(QDate(2000, 1, 1))
+        self.start_date_edit.setMinimumWidth(120)
+        self.start_date_edit.setDate(QDate())  # blank
+
+        self.end_date_edit = QDateEdit()
+        self.end_date_edit.setCalendarPopup(True)
+        self.end_date_edit.setDisplayFormat("yyyy-MM-dd")
+        self.end_date_edit.setDate(QDate.currentDate())
+        self.end_date_edit.setSpecialValueText("")  # blank for optional
+        self.end_date_edit.setDateRange(QDate(1900, 1, 1), QDate(2100, 12, 31))
+        self.end_date_edit.setDate(QDate())  # blank
+        self.end_date_edit.setMinimumWidth(120)
+
+        date_layout.addWidget(QLabel("Start Date:"))
+        date_layout.addWidget(self.start_date_edit)
+        date_layout.addSpacing(20)
+        date_layout.addWidget(QLabel("End Date:"))
+        date_layout.addWidget(self.end_date_edit)
+        form_layout.addRow(date_layout)
+
+        # --- Confirm Button ---
+        self.confirm_btn = QPushButton("Export to Excel")
+        self.confirm_btn.clicked.connect(self.export_to_excel)
+        main_layout.addLayout(form_layout)
+        main_layout.addWidget(self.confirm_btn, alignment=Qt.AlignRight)
+
+    def export_to_excel(self):
+        # Build WHERE clause from filters
+        filters = []
+        values = []
+        for key, combo in self.filter_boxes.items():
+            val = combo.currentText()
+            if val:
+                filters.append(f"[{key}] = ?")
+                values.append(val)
+        # Date filters
+        start_date = self.start_date_edit.date()
+        end_date = self.end_date_edit.date()
+        if start_date.isValid():
+            filters.append("[dateTime] >= ?")
+            # Convert QDate to Python datetime, then format as string
+            values.append(start_date.toPyDate().strftime("%Y-%m-%d %H:%M:%S"))
+        if end_date.isValid():
+            filters.append("[dateTime] <= ?")
+            values.append(end_date.toPyDate().strftime("%Y-%m-%d %H:%M:%S"))
+
+        where_clause = ""
+        if filters:
+            where_clause = "WHERE " + " AND ".join(filters)
+
+        # Query the database
+        with self.parent.lock:
+            dbPath = getattr(self.parent, "dbPath", DATABASE_PATH)
+            conn = sqlite3.connect(dbPath)
+            cur = conn.cursor()
+            try:
+                cur.execute("PRAGMA table_info(calculations)")
+                columns = [row[1] for row in cur.fetchall()]
+                sql = f"SELECT * FROM calculations {where_clause}"
+                print(sql)
+                print(tuple(values))
+                cur.execute(sql, tuple(values))
+                rows = cur.fetchall()
+            except Exception as e:
+                QMessageBox.warning(self, "Error", f"Failed to query database: {e}")
+                conn.close()
+                return
+
+        if not rows:
+            QMessageBox.information(self, "No Data", "No data found for the selected filters.")
+            conn.close()
+            return
+
+        # Prompt user for file path
+        path, _ = QFileDialog.getSaveFileName(self, "Save as…", "", "Excel Files (*.xlsx)")
+        if not path:
+            conn.close()
+            return
+        if not path.lower().endswith(".xlsx"):
+            path += ".xlsx"
+
+        # Write to Excel
+        try:
+            df = pd.DataFrame(rows, columns=columns)
+            df.to_excel(path, index=False)
+            QMessageBox.information(self, "Success", f"Data exported to {path}")
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Failed to export to Excel: {e}")
+        finally:
+            conn.close()
 
 def save_to_db(table, rows, action = "", query = "",inputs = None, keys = None, connection = None, lock = None, db = None):
     try:
@@ -4446,7 +4705,10 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
                     newMonths.append(month)
         else:
             newMonths = months #check all months if there are no previous calculations
+        IRRtrack = {} #dict of each fund's cash flows and dates for IRR calculation
+        IRRinvestorTrack = {} #dict of each investor's cash flows and dates for IRR calculation
         for month in newMonths: #loops through every month relevant to the pool
+            monthFundIRRtrack = {}
             statusQueue.put((pool,len(newMonths),"Working")) #puts to queue to update loading bar status. Allows computations to continue
             if failed.value: #if other workers failed, halt the process
                 print(f"Exiting worker {pool} due to other failure...")
@@ -4496,7 +4758,6 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
                 fund = fundDict["fundName"]
                 if fund in (None,'None'):
                     continue
-                hidden = fundDict["hidden"] #obsolete. Likely delete
                 assetClass = None
                 subAssetClass = None
                 fundClassification = None
@@ -4607,6 +4868,14 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
                     endEntry[0][nameHier["Value"]["dynLow"]] = str(NAV)
                 startEntry = startEntry[0]
                 endEntry = endEntry[0]
+                if fund not in IRRtrack and not noStartValue: #populate with initial investment if it does not appear first from a cashflow
+                    IRRtrack[fund] = {"cashFlows" : [], "dates" : []}
+                    IRRtrack[fund]["cashFlows"].append(float(startEntry[nameHier["Value"]["dynLow"]]) * -1) #negative because it is an initial investment
+                    IRRtrack[fund]["dates"].append(datetime.strptime(month["accountStart"], "%Y-%m-%dT%H:%M:%S"))
+                    if fund not in monthFundIRRtrack:
+                        monthFundIRRtrack[fund] = {"cashFlows" : [], "dates" : []}
+                    monthFundIRRtrack[fund]["cashFlows"].append(float(startEntry[nameHier["Value"]["dynLow"]]) * -1)
+                    monthFundIRRtrack[fund]["dates"].append(datetime.strptime(month["accountStart"], "%Y-%m-%dT%H:%M:%S"))
                 fundTransactions = allPoolTransactions.get(fund,[]) 
                 cashFlowSum = 0
                 weightedCashFlow = 0
@@ -4623,6 +4892,14 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
                         weightedCashFlow -= float(transaction[nameHier["CashFlow"]["dynLow"]])  *  (totalDays -int(datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S").day) + backDate)/totalDays
                         if transaction.get(nameHier["Unfunded"]["dynLow"]) not in (None,"None"):
                             unfunded += float(transaction[nameHier["Unfunded"]["value"]])
+                        if fund not in IRRtrack:
+                            IRRtrack[fund] = {"cashFlows" : [], "dates" : []}
+                        IRRtrack[fund]["cashFlows"].append(float(transaction[nameHier["CashFlow"]["dynLow"]]))
+                        IRRtrack[fund]["dates"].append(datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S"))
+                        if fund not in monthFundIRRtrack:
+                            monthFundIRRtrack[fund] = {"cashFlows" : [], "dates" : []}
+                        monthFundIRRtrack[fund]["cashFlows"].append(float(transaction[nameHier["CashFlow"]["dynLow"]]))
+                        monthFundIRRtrack[fund]["dates"].append(datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S"))
                     elif transaction["TransactionType"] in commitmentChangeTransactionTypes and transaction.get("TransactionType") not in (None,"None"):
                         commitment += float(transaction[nameHier["Commitment"]["dynLow"]])
                         unfunded += float(transaction[nameHier["Commitment"]["dynLow"]])
@@ -4638,6 +4915,13 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
                     fundMDdenominator = float(startEntry[nameHier["Value"]["dynLow"]]) + weightedCashFlow
                     fundNAV = float(endEntry[nameHier["Value"]["dynLow"]])
                     fundReturn = fundGain/fundMDdenominator * 100 if fundMDdenominator != 0 else 0
+                    if fund in IRRtrack:
+                        #print(f"IRR input for {fund} in {month['Month']} in {pool}:")
+                        #print([*IRRtrack[fund]["cashFlows"], fundNAV])
+                        #print([*IRRtrack[fund]["dates"], datetime.strptime(month["endDay"], "%Y-%m-%dT%H:%M:%S")])
+                        IRRitd = calculate_xirr([*IRRtrack[fund]["cashFlows"], fundNAV], [*IRRtrack[fund]["dates"], datetime.strptime(month["endDay"], "%Y-%m-%dT%H:%M:%S")])
+                    else:
+                        IRRitd = None
                     if unfunded < 0:
                         unfunded = 0 #corrects for if original commitment was not logged properly
                     if createFinalValue: #builds an entry to put into the database and cache if it is missing
@@ -4673,6 +4957,7 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
                                     "NAV" : fundNAV, "Monthly Gain" : fundGain, "Return" : fundReturn , 
                                     "MDdenominator" : fundMDdenominator, "Ownership" : "", "Classification" : fundClassification,
                                     "Calculation Type" : "Total Fund",
+                                    "IRR ITD" : IRRitd,
                                     nameHier["sleeve"]["local"] : fundList.get(fund),
                                     nameHier["Commitment"]["local"] : commitment,
                                     nameHier["Unfunded"]["local"] : unfunded}
@@ -4827,6 +5112,24 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
                     fundInvestorOwnership = fundInvestorNAV /  fundEntry["NAV"] if fundEntry["NAV"] != 0 else 0
                     fundInvestorCommitment = fundEntry[nameHier["Commitment"]["local"]] * fundInvestorOwnership
                     fundInvestorUnfunded = fundEntry[nameHier["Unfunded"]["local"]] * fundInvestorOwnership
+                    if investorEntry["MDdenominator"] != 0 and investorMDdenominatorSum != 0:
+                        if investor not in IRRinvestorTrack:
+                            IRRinvestorTrack[investor] = {}
+                        if fundEntry["Fund"] not in IRRinvestorTrack[investor]:
+                            IRRinvestorTrack[investor][fundEntry["Fund"]] = {"cashFlows" : [], "dates" : []}
+                        cashflows = monthFundIRRtrack.get(fundEntry["Fund"], {}).get("cashFlows", [])
+                        dates = monthFundIRRtrack.get(fundEntry["Fund"], {}).get("dates", [])
+                        for cashflow, date in zip(cashflows, dates):
+                            adjustedCashflow = cashflow * investorEntry["MDdenominator"] / investorMDdenominatorSum #ratio the cashflow to their MDdenominator
+                            IRRinvestorTrack[investor][fundEntry["Fund"]]["cashFlows"].append(adjustedCashflow)
+                            IRRinvestorTrack[investor][fundEntry["Fund"]]["dates"].append(date)
+                    if investorEntry["Investor"] in IRRinvestorTrack and fundEntry["Fund"] in IRRinvestorTrack[investorEntry["Investor"]]:
+                        #print(f"IRR input for {investorEntry['Investor']} in {month['Month']} in {pool}:")
+                        #print([*IRRinvestorTrack[investorEntry["Investor"]]["cashFlows"], fundInvestorNAV])
+                        #print([*IRRinvestorTrack[investorEntry["Investor"]]["dates"], datetime.strptime(month["endDay"], "%Y-%m-%dT%H:%M:%S")])
+                        fundInvestorIRR = calculate_xirr([*IRRinvestorTrack[investorEntry["Investor"]][fundEntry["Fund"]]["cashFlows"], fundInvestorNAV], [*IRRinvestorTrack[investorEntry["Investor"]][fundEntry["Fund"]]["dates"], datetime.strptime(month["endDay"], "%Y-%m-%dT%H:%M:%S")])
+                    else:
+                        fundInvestorIRR = None
                     monthFundInvestorEntry = {"dateTime" : month["dateTime"], "Investor" : investorEntry["Investor"], "Pool" : pool, "Fund" : fundEntry["Fund"] ,
                                     "assetClass" : fundEntry["assetClass"], "subAssetClass" : fundEntry["subAssetClass"],
                                     "NAV" : fundInvestorNAV, "Monthly Gain" : fundInvestorGain , "Return" :  fundInvestorReturn * 100, 
@@ -4834,6 +5137,7 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
                                     "Classification" : fundEntry["Classification"], nameHier["Family Branch"]["local"] : investorEntry[nameHier["Family Branch"]["local"]],
                                     nameHier["Commitment"]["local"] : fundInvestorCommitment, nameHier["Unfunded"]["local"] : fundInvestorUnfunded, 
                                     "Calculation Type" : "Total Fund",
+                                    "IRR ITD" : fundInvestorIRR,
                                     nameHier["sleeve"]["local"] : fundList.get(fundEntry["Fund"])
                                     }
                     calculations.append(monthFundInvestorEntry) #add fund level data to calculations for use in aggregation and report generation
