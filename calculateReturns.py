@@ -11,6 +11,8 @@ import pandas as pd
 import time
 import copy
 import re
+import pyxirr
+from openpyxl import load_workbook
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Alignment, Font
 from openpyxl.utils import get_column_letter
@@ -18,10 +20,7 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, wait
 import queue
 import threading
-import pyxirr
 import logging, functools
-import numpy_financial as npf
-from scipy.optimize import fsolve
 from dateutil.relativedelta import relativedelta
 from multiprocessing import Pool, freeze_support, Manager
 from PyQt5.QtWidgets import (
@@ -30,12 +29,12 @@ from PyQt5.QtWidgets import (
     QRadioButton, QButtonGroup, QComboBox, QHBoxLayout,
     QTableWidget, QTableWidgetItem, QProgressBar, QTableView, QCheckBox, QMessageBox,
     QScrollArea, QFileDialog, QListWidgetItem, QListWidget, QDialog, QSizePolicy, QGridLayout,
-    QFrame, QTextEdit, QHeaderView, QDateEdit
+    QFrame, QTextEdit, QHeaderView, QDateEdit, QSplitter
 )
 from PyQt5.QtGui import QBrush, QColor, QDesktopServices
 from PyQt5.QtCore import Qt, QTimer, QAbstractTableModel, QModelIndex, pyqtSignal, QPoint, QUrl, QDate
 
-currentVersion = "1.1.4"
+currentVersion = "1.1.5"
 demoMode = True
 ownershipCorrect = True
 importInterval = relativedelta(hours=2)
@@ -121,19 +120,23 @@ nameHier = {
                 "FundClass" : {"dynLow" : "Fundclass" , "dynHigh" : "Fundclass"},
             }
 
+#TODO: make this database stored variable later
+assetClass1Order = ["Illiquid", "Liquid","Cash"]
+assetClass2Order = ["Direct Private Equity", "Private Equity", "Direct Real Assets", "Real Assets", "Public Equity", "Long/Short", "Absolute Return", "Fixed Income", "Cash"] 
 commitmentChangeTransactionTypes = ["Commitment", "Transfer of commitment", "Transfer of commitment (out)", "Secondary - Original commitment (by secondary seller)"]
 ignoreInvTranTypes = [""]
 headerOptions = ["Return","NAV", "Monthly Gain", "Ownership" , "MDdenominator", "Commitment", "Unfunded", "IRR ITD"]
 dataOptions = ["Investor","Family Branch","Classification", "dateTime"]
 tranAppHeaderOptions = ["Transaction Sum"]
 tranAppDataOptions = ["Investor","Family Branch", "dateTime"]
+assetLevelLinks = {1: {"Display" : "Asset Level 1", "Link" : "assetClass"}, 2: {"Display" : "Asset Level 2", "Link" : "subAssetClass"}, 3: {"Display" : "Asset Level 3", "Link" : "subAssetSleeve"}}
 displayLinks = {"assetClass" : "Asset Level 1", "subAssetClass" : "Asset Level 2" , "subAssetSleeve" : "Asset Level 3"}
 for link in displayLinks.copy(): #builds out in reverse so it can work both ways
     displayLinks[displayLinks.get(link)] = link
 balanceTypePriority = ["Actual", "Adjusted", "Manager Estimate"]
 yearOptions = (1,2,3,5,7,10,12,15,20)
 
-timeOptions = ["MTD","QTD","YTD", "ITD"] + [f"{y}YR" for y in yearOptions]
+timeOptions = ["MTD","QTD","YTD", "ITD", "IRR ITD"] + [f"{y}YR" for y in yearOptions]
 percent_headers = {option for option in timeOptions}
 for header in ("Return","Ownership"):
     percent_headers.add(header)
@@ -166,7 +169,8 @@ def calculate_xirr(cash_flows, dates, guess : float = None):
     except Exception as e:
         print(f"Skipping XIRR calculation due to Exception: {e} \n Cash flows: {cash_flows} \n Dates: {dates}")
         return None
-
+def descendingNavSort(input : dict):
+    return sorted(input.keys(), key=lambda x: float(input.get(x,0.0)) * -1)
 
 #-----------------------------Database Manager ---------------------------#
 class DatabaseManager:
@@ -218,14 +222,63 @@ class DatabaseManager:
                     PRIMARY KEY (dateTime, Investor, FamilyBranch, Classification)
                 )
             """)
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS options (
+                    grouping TEXT,
+                    id TEXT,
+                    value TEXT,
+                    PRIMARY KEY (grouping, id)
+                )
+                """)
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS benchmarkLinks (
+                    benchmark TEXT,
+                    asset TEXT,
+                    assetLevel INTEGER
+                )
+                """)
             self._conn.commit()
             
-            # Populate default box effects if table is empty
-
-
-    def fetch_all_records(self) -> list:
-        pass
-
+    def fetchOptions(self, grouping : str, update: bool = False):
+        if not hasattr(self, "options"):
+            self.options = {}
+        if not hasattr(self.options, grouping) or update:
+            with self._lock:
+                cursor = self._conn.cursor()
+                cursor.execute("SELECT * FROM options WHERE grouping = ?", (grouping,))
+                headers = [d[0] for d in cursor.description]
+                options = [dict(zip(headers, row)) for row in cursor.fetchall()]
+                self.options[grouping] = {row["id"] : row["value"] for row in options}
+                cursor.close()
+        return self.options[grouping]
+    def saveAsset3Visibility(self, visibility : list):
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute("DELETE FROM options WHERE grouping = ?", ("asset3Visibility",))
+            for vis in visibility:
+                cursor.execute("INSERT INTO options (grouping, id, value) VALUES (?, ?, ?)", ("asset3Visibility", vis, "hide"))
+            self._conn.commit()
+            cursor.close()
+        self.options["asset3Visibility"] = {vis : "hide" for vis in visibility}
+        logging.info(f"Saved asset3Visibility: {visibility}")
+        print(f"Saved asset3Visibility: {visibility}")
+    def fetchBenchmarkLinks(self, update: bool = False):
+        if not hasattr(self, "benchmarkLinks") or update:
+            with self._lock:
+                cursor = self._conn.cursor()
+                cursor.execute("SELECT * FROM benchmarkLinks")
+                headers = [d[0] for d in cursor.description]
+                self.benchmarkLinks = [dict(zip(headers, row)) for row in cursor.fetchall()]
+                cursor.close()
+        return self.benchmarkLinks
+    def fetchBenchmarks(self, update: bool = False):
+        if not hasattr(self, "benchmarks") or update:
+            with self._lock:
+                cursor = self._conn.cursor()
+                cursor.execute("SELECT DISTINCT [Index] FROM benchmarks")
+                self.benchmarks = [row[0] for row in cursor.fetchall()]
+                cursor.close()
+        return self.benchmarks
     def close(self) -> None:
         try:
             with self._lock:
@@ -241,11 +294,13 @@ class returnsApp(QWidget):
         self.setGeometry(100, 100, 1000, 600)
 
         os.makedirs(ASSETS_DIR, exist_ok=True)
+        self.db = DatabaseManager(DATABASE_PATH)
         self.start_index = start_index
         self.api_key = None
         self.filterCallLock = False
         self.cancel = False
         self.lock = threading.Lock()
+        self.db._lock = self.lock #attach the lock to the database manager
         self.tableWindows = {}
         self.dataTimeStart = datetime(2000,1,1)
         self.earliestChangeDate = datetime(datetime.now().year,datetime.now().month + 1,datetime.now().day)
@@ -451,7 +506,7 @@ class returnsApp(QWidget):
         optionsGrid = QGridLayout()
         optionsTitle = QLabel("Options")
         optionsTitle.setObjectName("titleBox")
-        optionsGrid.addWidget(optionsTitle,0,0,2,1)
+        optionsGrid.addWidget(optionsTitle,0,0,4,1)
         self.tableBtnGroup = QButtonGroup()
         self.complexTableBtn = QRadioButton("Complex Table")
         self.monthlyTableBtn = QRadioButton("Monthly Table")
@@ -501,7 +556,26 @@ class returnsApp(QWidget):
         optionsGrid.addWidget(self.exitedFundsBtn,1,6)
         self.headerSort = SortButtonWidget()
         self.headerSort.popup.popup_closed.connect(self.headerSortClosed)
-        optionsGrid.addWidget(self.headerSort,0,7,2,1)
+        optionsGrid.addWidget(self.headerSort,0,7)
+        self.sortStyle = QPushButton("Sort Style: NAV")
+        self.sortStyle.clicked.connect(self.sortStyleClicked)
+        optionsGrid.addWidget(self.sortStyle,1,7)
+        # Add a horizontal line across the optionsGrid after the top row of options
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setFrameShadow(QFrame.Sunken)
+        optionsGrid.addWidget(line, 2, 1, 1, optionsGrid.columnCount() - 1)
+        self.assetClass3Visibility = MultiSelectBox()
+        self.assetClass3Visibility.popup.closed.connect(self.assetClass3VisibilityChanged)
+        optionsGrid.addWidget(QLabel("Hidden Asset Level 3s:"),3,1)
+        optionsGrid.addWidget(self.assetClass3Visibility,4,1)
+        self.showBenchmarkLinksBtn = QCheckBox("Show Benchmark Links")
+        self.showBenchmarkLinksBtn.setChecked(True)
+        self.showBenchmarkLinksBtn.clicked.connect(self.buildReturnTable)
+        optionsGrid.addWidget(self.showBenchmarkLinksBtn,3,2)
+        self.linkBenchmarksBtn = QPushButton("Link Benchmarks")
+        self.linkBenchmarksBtn.clicked.connect(self.linkBenchmarks)
+        optionsGrid.addWidget(self.linkBenchmarksBtn,4,2)
         optionsBox.setLayout(optionsGrid)
         layout.addWidget(optionsBox)
 
@@ -699,16 +773,25 @@ class returnsApp(QWidget):
                 num_hier = 1
 
                 # 3) dynamic data columns minus "dataType"
-                all_cols = {
-                    k for row in data.values() for k in row.keys()
-                    if k != "dataType"
-                }
+                all_cols = list(self.filteredHeaders)
 
-                sorted_cols = self.orderColumns(all_cols)
+                sorted_cols = self.orderColumns(all_cols)                
 
-                # 4) create workbook
-                wb = Workbook()
-                ws = wb.active
+                # 4) create workbook or add sheet if already exists
+                if os.path.exists(path):
+                    wb = load_workbook(path)
+                    # Create a unique sheet name for export
+                    base_name = "Export"
+                    i = 1
+                    while True:
+                        sheet_name = f"{base_name}{i}"
+                        if sheet_name not in wb.sheetnames:
+                            break
+                        i += 1
+                    ws = wb.create_sheet(sheet_name)
+                else:
+                    wb = Workbook()
+                    ws = wb.active
 
                 rowStart = 3
                 # 5) header row
@@ -722,25 +805,27 @@ class returnsApp(QWidget):
                 for r, (row_name, row_dict) in enumerate(data.items(), start=rowStart + 1):
                     row_name, code = self.separateRowCode(row_name)
                     dtype = row_dict.get("dataType")
-                    level = hierarchy_levels.index(dtype) if dtype in hierarchy_levels else 0
+                    if dtype != "benchmark": #keeps benchmark as the previous hierarchy level
+                        level = hierarchy_levels.index(dtype) if dtype in hierarchy_levels else 0
+                        # fills
+                        data_color = "FFFFFF"
+                        if dtype != "Total Fund":
+                            depth      = code.count("::") if dtype != "Total" else code.count("::") - 1
+                            maxDepth   = max(len(self.sortHierarchy.checkedItems()),1) + 1
+                            data_color = darken_color(data_color,depth/maxDepth/3 + 2/3)
 
-                    # fills
-                    data_color = "FFFFFF"
-                    if dtype != "Total Fund":
-                        depth      = code.count("::") if dtype != "Total" else code.count("::") - 1
-                        maxDepth   = max(len(self.sortHierarchy.checkedItems()),1) + 1
-                        data_color = darken_color(data_color,depth/maxDepth/3 + 2/3)
-
-                    if r % 2 == 1:
-                        data_color = darken_color(data_color,0.93)
-                    header_color = darken_color(data_color, 0.9)
-                    data_fill   = PatternFill("solid", data_color, data_color)
-                    header_fill = PatternFill("solid", header_color, header_color)
+                        if r % 2 == 1:
+                            data_color = darken_color(data_color,0.93)
+                        header_color = darken_color(data_color, 0.9)
+                        data_fill   = PatternFill("solid", data_color, data_color)
+                        header_fill = PatternFill("solid", header_color, header_color)
 
                     data_start = 2
                     # spread header fill across hierarchy cols
                     cell = ws.cell(row=r, column=1, value=row_name)
                     cell.fill = header_fill
+                    if dtype == "benchmark":
+                        cell.font = Font(color="0000FF")
                     cell.alignment = Alignment(indent=level)
 
                     # data cells with proper formatting
@@ -748,6 +833,8 @@ class returnsApp(QWidget):
                         val = row_dict.get(colname, None)
                         cell = ws.cell(row=r, column=c, value=val)
                         cell.fill = data_fill
+                        if dtype == "benchmark":
+                            cell.font = Font(color="0000FF")
                         if isinstance(val, (int, float)):
                             if colname not in percent_headers:
                                 # show with commas, two decimals
@@ -794,6 +881,7 @@ class returnsApp(QWidget):
         self.sleeveFundLinks = {}
         self.cFundToFundLinks = {}
         self.pools = []
+        sleeves = set()
         funds = load_from_db("funds")
         if funds != []:
             consolidatorFunds = {}
@@ -801,6 +889,7 @@ class returnsApp(QWidget):
                 assetClass = row["assetClass"]
                 subAssetClass = row["subAssetClass"]
                 sleeve = row["sleeve"]
+                sleeves.add(sleeve)
                 if row.get("Fundpipelinestatus") is not None and "Z - Placeholder" in row.get("Fundpipelinestatus"):
                     consolidatorFunds[row["Name"]] = {"cFund" : row["Name"], "assetClass" : assetClass, "subAssetClass" : subAssetClass, "sleeve" : sleeve}
                     self.cFundToFundLinks[row["Name"]] = []
@@ -815,6 +904,7 @@ class returnsApp(QWidget):
                 if row.get("Parentfund") in consolidatorFunds:
                     self.consolidatedFunds[row["Name"]] = consolidatorFunds.get(row.get("Parentfund"))
                     self.cFundToFundLinks[row.get("Parentfund")].append(row["Name"])
+            self.fullLevelOptions["subAssetSleeve"] = list(sleeves)
         else:
             self.consolidatedFunds = {}
     def filterBtnUpdate(self, button, checked):
@@ -866,6 +956,10 @@ class returnsApp(QWidget):
         self.dataEndSelect.setCurrentText(monthList[-1])
         self.dataStartSelect.addItems(monthList)
         self.dataStartSelect.setCurrentText(monthList[0])
+    def linkBenchmarks(self,*_):
+        #open the link benchmarks window as its own window that is non blocking
+        self.linkBenchmarksWindow = linkBenchmarksWindow(parentSource=self)
+        self.linkBenchmarksWindow.show()
     def buildReturnTable(self, *_):
         self.buildTableLoadingBox.setVisible(True)
         self.buildTableLoadingBar.setValue(2)
@@ -917,9 +1011,12 @@ class returnsApp(QWidget):
                     return
                 data = load_from_db("calculations",condStatement, tuple(parameters), lock=self.lock)
                 output = {"Total##()##" : {}}
-                if self.benchmarkSelection.checkedItems() != []:
+                if self.benchmarkSelection.checkedItems() != [] or self.showBenchmarkLinksBtn.isChecked():
                     output = self.applyBenchmarks(output)
                 output , data = self.calculateUpperLevels(output,data)
+                for benchmark in self.pendingBenchmarks: #remove the benchmarks used only in benchmark links
+                    if benchmark not in self.benchmarkChoices and benchmark + self.buildCode([]) in output.keys():
+                        output.pop(benchmark + self.buildCode([]))
                 gui_queue.put(lambda: self.buildTableLoadingBar.setValue(4))
                 if cancelEvent.is_set(): #exit if new table build request is made
                     return
@@ -934,8 +1031,8 @@ class returnsApp(QWidget):
                     date = datetime.strftime(datetime.strptime(entry["dateTime"], "%Y-%m-%d %H:%M:%S"), "%B %Y")
                     Dtype = entry["Calculation Type"]
                     level = entry["rowKey"]
-
-                    if dataOutputType == "IRR ITD" and self.consolidateFundsBtn.isChecked() and entry.get("fundName") in self.consolidatedFunds:
+                    if dataOutputType == "IRR ITD" and ((self.consolidateFundsBtn.isChecked() and entry.get("Fund") in self.consolidatedFunds) or entry.get("Calculation Type") != "Total Fund"):
+                        #this only skips for monthly table
                         continue #cannot use IRR ITD for consolidated funds
                     
                     if level not in output.keys():
@@ -960,13 +1057,13 @@ class returnsApp(QWidget):
                             complexOutput[level]["dataType"] = Dtype
                         if headerOptions[0] not in complexOutput[level].keys() and headerOptions:
                             for option in headerOptions:
-                                if option == "IRR ITD" and self.consolidateFundsBtn.isChecked() and entry.get("fundName") in self.consolidatedFunds:
+                                if option == "IRR ITD" and ((self.consolidateFundsBtn.isChecked() and entry.get("Fund") in self.consolidatedFunds) or entry.get("Calculation Type") != "Total Fund"):
                                     continue #cannot use IRR ITD for consolidated funds
                                 complexOutput[level][option] = float(entry[option] if entry.get(option) not in (None,"None","") else 0)
                         else:
                             for option in headerOptions:
-                                if option not in ("Ownership", "IRR ITD") and option != "IRR ITD" and dataOutputType == "IRR ITD" and self.consolidateFundsBtn.isChecked() and entry.get("fundName") in self.consolidatedFunds:
-                                    continue #cannot use IRR ITD for consolidated funds
+                                if option not in ("Ownership", "IRR ITD"):
+                                    #do not sum IRR ITD or ownership in any scenario. Should only occur for consolidation anyways
                                     complexOutput[level][option] += float(entry[option] if entry.get(option) not in (None,"None","") else 0)
                         if entry.get("Ownership") not in (None,"None") and (self.filterDict["Investor"].checkedItems() != [] or self.filterDict["Family Branch"].checkedItems() != []):
                             if "Ownership" not in complexOutput[level].keys():
@@ -1087,21 +1184,18 @@ class returnsApp(QWidget):
                     complexOutput[level]["ITD"] = monthOutput[level]["ITD"]
             except Exception as e:
                 pass
-        # for level in monthOutput.keys():
-        #     if "dataType" not in complexOutput[level].keys():
-        #         complexOutput.pop(level)
-
-
-
-
 
         return complexOutput
     def applyBenchmarks(self, output):
-        benchmarkChoices = self.benchmarkSelection.checkedItems()
+        if self.showBenchmarkLinksBtn.isChecked(): #activate the benchmark links so they are all used if relevant
+            benchmarkLinks = self.db.fetchBenchmarkLinks()
+            self.pendingBenchmarks = set(link.get("benchmark") for link in benchmarkLinks)
+        self.benchmarkChoices = self.benchmarkSelection.checkedItems()
+        allBenchmarkChoices = set(set(self.benchmarkChoices) | set(self.pendingBenchmarks))
         code = self.buildCode([])
-        placeholders = ','.join('?' for _ in benchmarkChoices)
-        benchmarks = load_from_db("benchmarks",f"WHERE [Index] IN ({placeholders})",tuple(benchmarkChoices), lock=self.lock)
-        for idx, bench in enumerate(benchmarks):
+        placeholders = ','.join('?' for _ in allBenchmarkChoices)
+        benchmarks = load_from_db("benchmarks",f"WHERE [Index] IN ({placeholders})",tuple(allBenchmarkChoices), lock=self.lock)
+        for bench in benchmarks:
             name = bench["Index"] + code
             if (datetime.strptime(bench["Asofdate"], "%Y-%m-%dT%H:%M:%S") < datetime.strptime(self.dataStartSelect.currentText(), "%B %Y") or
                 datetime.strptime(bench["Asofdate"], "%Y-%m-%dT%H:%M:%S") > datetime.strptime(self.dataEndSelect.currentText(), "%B %Y") + relativedelta(months=1) ) :
@@ -1130,8 +1224,17 @@ class returnsApp(QWidget):
             code = f"##({"::".join(path)})##"
             return code
     def calculateUpperLevels(self, tableStructure,data):
-        
-        def buildLevel(levelName,levelIdx, struc,data,path : list):
+        def applyLinkedBenchmarks(struc,code, levelName, option):
+            for entry in benchmarkLinks:
+                if levelName == assetLevelLinks[entry.get("assetLevel")].get("Link") and option == entry.get("asset"):
+                    benchmark = entry.get("benchmark")
+                    if benchmark + self.buildCode([]) in struc.keys(): #pull the benchmark data in if it exists
+                        temp = struc[benchmark + self.buildCode([])]
+                        struc[benchmark + code] = temp.copy()
+                    else:
+                        struc[benchmark + code] = {} #place table space for that level selection. Will not populate if previous failed
+            return struc
+        def buildLevel(levelName,levelIdx, struc,data,path : list, insertedOption = None):
             levelIdx += 1
             entryTemplate = {"dateTime" : None, "Calculation Type" : "Total " + levelName, "Pool" : None, "Fund" : None ,
                                             "assetClass" : None, "subAssetClass" : None, "Investor" : None,
@@ -1146,7 +1249,14 @@ class returnsApp(QWidget):
             for entry in data: #all available data
                 if entry[levelName] not in options: #
                     options.append(entry[levelName])
-            options.sort()
+            if levelName == "subAssetClass":
+                # Sort options so those in assetClass2Order come first (in the given order),
+                # then anything else not in assetClass2Order appears after (sorted alphabetically)
+                options = [v for v in assetClass2Order if v in options] + sorted([v for v in options if v not in assetClass2Order])
+            elif levelName == "assetClass":
+                options = [v for v in assetClass1Order if v in options] + sorted([v for v in options if v not in assetClass1Order])
+            else:
+                options.sort()
             newTotalEntries = []
             if len(sortHierarchy) > levelIdx: #more hierarchy levels to parse
                 highTotals = [] #all total values made on the level
@@ -1158,11 +1268,21 @@ class returnsApp(QWidget):
                     name = option if levelName != "assetClass" or option != "Cash" else "Cash "
                     code = self.buildCode(tempPath)
                     struc[name + code] = {} #place table space for that level selection
+                    if self.showBenchmarkLinksBtn.isChecked():
+                        struc = applyLinkedBenchmarks(struc,code, levelName, option)
+                                
+                                
                     levelData = []
                     for entry in data: #separates out only relevant data
                         if entry[levelName] == option:
                             levelData.append(entry)
-                    struc, lowTotals, fullEntries = buildLevel(sortHierarchy[levelIdx],levelIdx,struc,levelData,tempPath)
+                    if len(sortHierarchy) > levelIdx + 1 and levelName == "subAssetClass" and sortHierarchy[levelIdx] == "subAssetSleeve" and option in self.db.fetchOptions("asset3Visibility").keys():
+                        #will skip the subAssetSleeve for hidden ones and send the entire section of data to the next level
+                        print(f"skipping for {option}")
+                        tempPath.append("hiddenLayer")
+                        struc, lowTotals, fullEntries = buildLevel(sortHierarchy[levelIdx + 1],levelIdx + 1,struc,levelData,tempPath)
+                    else:
+                        struc, lowTotals, fullEntries = buildLevel(sortHierarchy[levelIdx],levelIdx,struc,levelData,tempPath, insertedOption = option)
                     newTotalEntries.extend(fullEntries)
                     for total in lowTotals:
                         if total["dateTime"] not in highEntries.keys():
@@ -1192,23 +1312,33 @@ class returnsApp(QWidget):
             else: #occurs at level of fund parent
                 newEntriesLow = []
                 totalDataLow = []
+                if levelName == "subAssetSleeve" and sortHierarchy[levelIdx - 2] == "subAssetClass" and insertedOption in self.db.fetchOptions("asset3Visibility").keys():
+                    print(f"skipping for {insertedOption}")
+                    options = ["hiddenLayer"]
                 for option in options:
                     tempPath = path.copy()
                     tempPath.append(option)
                     totalEntriesLow = {}
                     name = option if levelName != "assetClass" or option != "Cash" else "Cash "
                     code = self.buildCode(tempPath)
-                    struc[name + code] =  {}
-                    levelData = []
-                    for entry in data: #separates out only relevant data
-                        if entry[levelName] == option:
-                            levelData.append(entry)
+                    if option != "hiddenLayer":
+                        struc[name + code] = {} #place table space for that level selection
+                        if self.showBenchmarkLinksBtn.isChecked():
+                            struc = applyLinkedBenchmarks(struc,code, levelName, option)
+                        levelData = []
+                        for entry in data: #separates out only relevant data
+                            if entry[levelName] == option:
+                                levelData.append(entry)
+                    else:
+                        levelData = data #dont filter the data for hidden layer
                     #gui_queue.put(lambda rows = levelData, name = option: self.openTableWindow(rows,f"data for: {name}"))
-                    nameList = []
+                    nameList = {}
                     investorsAccessed = {}
                     for entry in levelData:
                         fundName = entry["Fund"] if not self.consolidateFundsBtn.isChecked() or entry["Fund"] not in self.consolidatedFunds or entry["Fund"] in self.filterDict["Fund"].checkedItems() else self.consolidatedFunds.get(entry["Fund"]).get("cFund")
-                        nameList.append(fundName + code)
+                        nameList.setdefault(fundName + code,0.0)
+                        if "NAV" in self.sortStyle.text() and datetime.strptime(entry["dateTime"], "%Y-%m-%d %H:%M:%S") == datetime.strptime(self.dataEndSelect.currentText(),"%B %Y"):
+                            nameList[fundName + code] += float(entry.get("NAV",0.0)) if entry.get("NAV",0.0) not in (None,"None","" ,0) else 0.0
                         temp = entry.copy()
                         temp["rowKey"] = fundName + code
                         totalDataLow.append(temp)
@@ -1232,14 +1362,20 @@ class returnsApp(QWidget):
                                 elif investor not in investorsAccessed.get(entry["dateTime"], []): #accounts for family branch level to add the investor level ownerships
                                     totalEntriesLow[entry["dateTime"]][header] += float(entry[header])
                                     investorsAccessed[entry["dateTime"]].append(investor)
-                    for name in sorted(nameList):
-                        struc[name] = {}
+                    if "alphabetical" in self.sortStyle.text().lower():
+                        for name in sorted(nameList.keys()): #sort by alphabetical order
+                            struc[name] = {}
+                    else:
+                        for name in descendingNavSort(nameList): #sort by descending NAV
+                            struc[name] = {}
                     for month in totalEntriesLow.keys():
                         totalEntriesLow[month]["Return"] = totalEntriesLow[month]["Monthly Gain"] / totalEntriesLow[month]["MDdenominator"] * 100 if totalEntriesLow[month]["MDdenominator"] != 0 else 0
                         newEntriesLow.append(totalEntriesLow[month])
                 totalDataLow.extend(newEntriesLow)
                 return struc, newEntriesLow, totalDataLow
 
+        if self.showBenchmarkLinksBtn.isChecked():
+            benchmarkLinks = self.db.fetchBenchmarkLinks()
         sortHierarchy = self.sortHierarchy.checkedItems()
         levelIdx = 0
         tableStructure, highestEntries, newEntries = buildLevel(sortHierarchy[levelIdx],levelIdx,tableStructure,data, [])
@@ -1353,7 +1489,10 @@ class returnsApp(QWidget):
             exitFunc()
 
         executor.submit(processFilter)
-
+    def assetClass3VisibilityChanged(self):
+        hiddenItems = self.assetClass3Visibility.checkedItems()
+        self.db.saveAsset3Visibility(hiddenItems)
+        self.buildReturnTable()
     def updateMonths(self):
         start = self.dataTimeStart
         end = datetime.now()
@@ -1445,6 +1584,10 @@ class returnsApp(QWidget):
                 self.filterDict[filter["key"]].addItems(allOptions[filter["key"]])
                 self.fullLevelOptions[filter["key"]] = allOptions[filter["key"]]
         self.filterDict["Classification"].setCheckedItem("HFC")
+        self.assetClass3Visibility.addItems(self.fullLevelOptions["subAssetClass"])
+        hiddenItems = self.db.fetchOptions("asset3Visibility")
+        for item in hiddenItems.keys():
+            self.assetClass3Visibility.setCheckedItem(item)
         self.fundPoolLinks = fundPoolLink
         self.pullInvestorNames()
         self.pullBenchmarks()
@@ -2345,6 +2488,12 @@ class returnsApp(QWidget):
         header = re.sub(r'##\(.*\)##', '', label, flags=re.DOTALL)
         code = re.findall(r'##\(.*\)##', label, flags=re.DOTALL)[0]
         return header, code
+    def sortStyleClicked(self, *args):
+        if "NAV" in self.sortStyle.text():
+            self.sortStyle.setText("Sort Style: Alphabetical")
+        else:
+            self.sortStyle.setText("Sort Style: NAV")
+        self.buildReturnTable()
     def headerSortClosed(self):
         self.populateReturnsTable(self.currentTableData)
     def orderColumns(self,keys, exceptions = []):
@@ -2376,6 +2525,13 @@ class returnsApp(QWidget):
                 to_delete = [k for k,v in rows.items() if v["dataType"] == "Total " + f["key"]]
                 for k in to_delete:
                     rows.pop(k)
+        to_delete = []
+        for row in rows.keys():
+            row_label, _ = self.separateRowCode(row)
+            if row_label == "hiddenLayer":
+                to_delete.append(row)
+        for row in to_delete:
+            rows.pop(row)
         
         self.filteredReturnsTableData = copy.deepcopy(rows) #prevents removal of dataType key for data lookup
 
@@ -2409,7 +2565,7 @@ class returnsApp(QWidget):
         else:
             col_keys = self.headerSort.popup.get_checked_sorted_items()
             self.headerSort.setEnabled(True)
-
+        self.filteredHeaders = col_keys
         # 3) Resize & set horizontal headers (we no longer call setVerticalHeaderLabels)
         self.returnsTable.setRowCount(len(row_entries))
         self.returnsTable.setColumnCount(len(col_keys))
@@ -2421,30 +2577,37 @@ class returnsApp(QWidget):
             # pull & remove dataType for coloring
             dataType = row_dict.pop("dataType", "")
 
-            startColor = (160, 160, 160)
-            if dataType != "Total":
-                depth      = code.count("::") if dataType != "Total Fund" else code.count("::") + 1
-                # if len(re.findall(r'##\((.*?)\)##', code, flags=re.DOTALL)[0]) > 0:
-                #     depth -= 1
-                maxDepth   = max(len(self.sortHierarchy.checkedItems()),1)
-                cRange     = 255 - startColor[0]
-                ratio      = (depth / maxDepth) if maxDepth != 0 else 1
-                color = tuple(
-                    int(startColor[i] + cRange * ratio)
-                    for i in range(3)
-                )
-                bg = QColor(*color)
-            else:
-                bg =  QColor(*tuple(
-                    int(startColor[i] * 0.8)
-                    for i in range(3)
-                ))
+            if dataType != "benchmark": #benchmark will use previous rounds color
+                startColor = (160, 160, 160)
+                if dataType == "Total":
+                    bg =  QColor(*tuple(
+                        int(startColor[i] * 0.8)
+                        for i in range(3)
+                    ))
+                elif dataType == "benchmark":
+                    bg = QColor(*(182, 205, 245))
+                else:
+                    depth      = code.count("::") if dataType != "Total Fund" else code.count("::") + 1
+                    # if len(re.findall(r'##\((.*?)\)##', code, flags=re.DOTALL)[0]) > 0:
+                    #     depth -= 1
+                    maxDepth   = max(len(self.sortHierarchy.checkedItems()),1)
+                    cRange     = 255 - startColor[0]
+                    ratio      = (depth / maxDepth) if maxDepth != 0 else 1
+                    color = tuple(
+                        int(startColor[i] + cRange * ratio)
+                        for i in range(3)
+                    )
+                    bg = QColor(*color)
+            
+                
 
             # — vertical header: only show the fund, stash the code —
             hdr = QTableWidgetItem(fund_label)
             hdr.setData(Qt.UserRole, code)
             if bg:
                 hdr.setBackground(QBrush(bg))
+                if dataType == "benchmark":
+                    hdr.setBackground(QBrush(QColor("0000FF")))
             self.returnsTable.setVerticalHeaderItem(r, hdr)
 
             # — fill cells —
@@ -2468,6 +2631,8 @@ class returnsApp(QWidget):
                     item.setData(Qt.UserRole, v)
                 if bg:
                     item.setBackground(QBrush(bg))
+                if dataType == "benchmark":
+                    item.setForeground(QColor(0,0,255))
                 item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 self.returnsTable.setItem(r, c, item)
         self.buildTableLoadingBox.setVisible(False)
@@ -2479,8 +2644,8 @@ class returnsApp(QWidget):
         else:
             headers = list(keys)
 
-        calcTableModel = DictListModel(rows,headers, self)
-        table.setModel(calcTableModel)
+        self.calcTableModel = DictListModel(rows,headers, self)
+        table.setModel(self.calcTableModel)
 
 def submitAPIcall(self, fn, *args, **kwargs):
     fut = APIexecutor.submit(fn, *args, **kwargs)
@@ -2901,9 +3066,22 @@ class transactionApp(QWidget):
 
                 sorted_cols = self.orderColumns(all_cols)
 
-                # 4) create workbook
-                wb = Workbook()
-                ws = wb.active
+                # 4) create workbook or add sheet if already exists
+                if os.path.exists(path):
+                    wb = load_workbook(path)
+                    # Create a unique sheet name for export
+                    import datetime
+                    base_name = "Export"
+                    i = 1
+                    while True:
+                        sheet_name = f"{base_name}{i}"
+                        if sheet_name not in wb.sheetnames:
+                            break
+                        i += 1
+                    ws = wb.create_sheet(sheet_name)
+                else:
+                    wb = Workbook()
+                    ws = wb.active
 
                 rowStart = 4
                 # 5) header row
@@ -2922,15 +3100,61 @@ class transactionApp(QWidget):
                     level = hierarchy_levels.index(dtype) if dtype in hierarchy_levels else 0
 
                     # fills
-                    data_color = "FFFFFF"
-                    if dtype != "Total Pool":
-                        depth      = code.count("::") if dtype != "Total" else code.count("::") - 1
-                        maxDepth   = max(len(self.sortHierarchy.checkedItems()),1) + 1
-                        data_color = darken_color(data_color,depth/maxDepth/3 + 2/3)
+                    # Default: light gray
+                    data_color = "A0A0A0"
+                    header_color = data_color
 
+                    # Reproduce the main table cell & header coloring logic from lines 2567-2586
+                    if dtype == "Total":
+                        # "Total" rows: shade startColor darker (0.8)
+                        data_color = "CDCDCD"  # A0A0A0 at 80% gray
+                        header_color = "B7B7B7"  # slightly darker for headers
+                    elif dtype == "benchmark":
+                        # "benchmark" rows: a blue as in GUI
+                        data_color = "B6CDF5"
+                        header_color = "A3B8DB"  # a harder blue for headers
+                    else:
+                        # hierarchy coloring as in the GUI
+                        base_rgb = (160,160,160)
+                        # In gui: 'depth = code.count("::") if dataType != "Total Fund" else code.count("::") + 1'
+                        # But "Total Fund" doesn't exist here; treat as "else"
+                        if dtype != "Total Fund":
+                            depth = code.count("::")
+                        else:
+                            depth = code.count("::") + 1
+                        maxDepth = max(len(self.sortHierarchy.checkedItems()),1)
+                        cRange = 255 - base_rgb[0]
+                        ratio = (depth / maxDepth) if maxDepth != 0 else 1
+                        def clamp(x): return max(0,min(255,int(x)))
+                        def rgb_to_hex(rgb):
+                            return "".join(f"{clamp(x):02X}" for x in rgb)
+                        # Table: color = int(startColor[i] + cRange * ratio)
+                        color_rgb = tuple(
+                            clamp(base_rgb[i] + cRange * ratio)
+                            for i in range(3)
+                        )
+                        data_color = rgb_to_hex(color_rgb)
+                        # Header: make it "harder" (darker) by multiplying ratio by 1.08 (max 1.0)
+                        header_ratio = min(ratio * 1.08, 1.0)
+                        header_rgb = tuple(
+                            clamp(base_rgb[i] + cRange * header_ratio)
+                            for i in range(3)
+                        )
+                        header_color = rgb_to_hex(header_rgb)
+
+                    # Even/odd row striping: darken data color a bit for odd rows
                     if r % 2 == 1:
-                        data_color = darken_color(data_color,0.93)
-                    header_color = darken_color(data_color, 0.9)
+                        def hex_to_rgb(h): return tuple(int(h[i:i+2],16) for i in (0,2,4))
+                        cur_rgb = hex_to_rgb(data_color)
+                        data_color = rgb_to_hex(tuple(
+                            int(x*0.93) for x in cur_rgb
+                        ))
+                        # Make header match "hardness": use the same darkening factor, but even slightly darker
+                        header_rgb = hex_to_rgb(header_color)
+                        header_color = rgb_to_hex(tuple(
+                            int(x*0.91) for x in header_rgb
+                        ))
+
                     data_fill   = PatternFill("solid", data_color, data_color)
                     header_fill = PatternFill("solid", header_color, header_color)
 
@@ -4346,6 +4570,174 @@ class transactionApp(QWidget):
         calcTableModel = DictListModel(rows,headers, self)
         table.setModel(calcTableModel)
 
+class linkBenchmarksWindow(QWidget):
+    def __init__(self, parent=None, flags=Qt.WindowFlags(), parentSource=None):
+        super().__init__(parent, flags)
+        self.parent = parentSource
+        self.setWindowTitle("Link Benchmarks")
+        self.resize(800, 500)
+        self.setStyleSheet(self.parent.appStyle)
+        self.setObjectName("mainPage")
+        self._benchmarks = []
+        self._links = []
+        self.asset_levels = [("Level 1", 1), ("Level 2", 2), ("Level 3", 3)]
+        self.selected_asset_level = None
+        self.selected_asset = None
+        self.selected_benchmark = None
+
+        self.init_ui()
+
+    def init_ui(self):
+        mainLayout = QVBoxLayout(self)
+        splitter = QSplitter(Qt.Horizontal)
+
+        # --- Left: Benchmark Links Table ---
+        leftWidget = QWidget()
+        leftLayout = QVBoxLayout(leftWidget)
+        self.linksTable = QTableWidget()
+        self.linksTable.setColumnCount(4)
+        self.linksTable.setHorizontalHeaderLabels(['Benchmark', 'Asset', 'Level', 'Delete'])
+        self.linksTable.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        leftLayout.addWidget(QLabel("Current Benchmark Links:"))
+        leftLayout.addWidget(self.linksTable)
+        splitter.addWidget(leftWidget)
+
+        # --- Right: Add Benchmark Link ---
+        rightWidget = QWidget()
+        rightLayout = QVBoxLayout(rightWidget)
+        rightLayout.addWidget(QLabel("Add Benchmark Link:"))
+        
+        # Asset Class Level ComboBox
+        self.assetLevelCombo = QComboBox()
+        self.assetLevelCombo.addItem("")  # blank/default
+        for label, num in self.asset_levels:
+            self.assetLevelCombo.addItem(label, num)
+        self.assetLevelCombo.currentIndexChanged.connect(self.updateAssetCombo)
+        rightLayout.addWidget(QLabel("Asset Class Level:"))
+        rightLayout.addWidget(self.assetLevelCombo)
+
+        # Asset ComboBox - will be populated depending on above
+        self.assetCombo = QComboBox()
+        self.assetCombo.addItem("")  # blank
+        rightLayout.addWidget(QLabel("Asset:"))
+        rightLayout.addWidget(self.assetCombo)
+
+        # Benchmark ComboBox - will be populated
+        self.benchmarkCombo = QComboBox()
+        self.benchmarkCombo.addItem("")  # blank
+        rightLayout.addWidget(QLabel("Benchmark:"))
+        rightLayout.addWidget(self.benchmarkCombo)
+
+        # Confirm Button
+        self.confirmBtn = QPushButton("Confirm Link")
+        self.confirmBtn.clicked.connect(self.addBenchmarkLink)
+        rightLayout.addWidget(self.confirmBtn)
+        rightLayout.addStretch()
+        splitter.addWidget(rightWidget)
+
+        mainLayout.addWidget(splitter)
+        self.setLayout(mainLayout)
+
+        self.refreshBenchmarks()
+        self.refreshLinks()
+
+    def refreshLinks(self):
+        links = self.parent.db.fetchBenchmarkLinks()
+        self._links = links
+        self.linksTable.setRowCount(len(links))
+        for row, link in enumerate(links):
+            self.linksTable.setItem(row, 0, QTableWidgetItem(str(link.get("benchmark", ""))))
+            self.linksTable.setItem(row, 1, QTableWidgetItem(str(link.get("asset", ""))))
+            self.linksTable.setItem(row, 2, QTableWidgetItem(str(link.get("assetLevel", ""))))
+            # Delete button
+            btn = QPushButton("Delete")
+            btn.clicked.connect(lambda _, r=row: self.deleteLink(r))
+            self.linksTable.setCellWidget(row, 3, btn)
+
+    def refreshBenchmarks(self):
+        # try to fetch all benchmarks for use in the Benchmark combobox
+        try:
+            if hasattr(self.parent.db, "fetchBenchmarks"):
+                benchmarks = self.parent.db.fetchBenchmarks()
+            else:
+                benchmarks = []  # fallback - maybe empty or stub
+        except Exception as e:
+            print(f"Failed to fetch benchmarks: {e}")
+            benchmarks = []
+        self._benchmarks = benchmarks
+        self.updateBenchmarkCombo()
+
+    def updateBenchmarkCombo(self):
+        self.benchmarkCombo.clear()
+        self.benchmarkCombo.addItem("")
+        for b in self._benchmarks:
+            # Assume b is a string or has a 'benchmark' key
+            if isinstance(b, str):
+                self.benchmarkCombo.addItem(b)
+            elif isinstance(b, dict) and "benchmark" in b:
+                self.benchmarkCombo.addItem(b["benchmark"])
+            else:
+                self.benchmarkCombo.addItem(str(b))
+
+    def updateAssetCombo(self):
+        self.assetCombo.clear()
+        self.assetCombo.addItem("")
+        asset_level_num = self.assetLevelCombo.currentData()
+        asset_key = None
+        if asset_level_num == 1:
+            asset_key = "assetClass"
+        elif asset_level_num == 2:
+            asset_key = "subAssetClass"
+        elif asset_level_num == 3:
+            asset_key = "subAssetSleeve"
+        all_opts = getattr(self.parent, "fullLevelOptions", {})
+        options = all_opts.get(asset_key, [])
+        # Remove duplicates and blank/None values
+        assets = sorted({opt for opt in options if opt not in (None,"", "None")})
+        self.assetCombo.addItems(assets)
+
+    def deleteLink(self, row):
+        if row < 0 or row >= len(self._links):
+            return
+        link = self._links[row]
+        try:
+            with self.parent.lock:
+                cursor = self.parent.db._conn.cursor()
+                cursor.execute(
+                    "DELETE FROM benchmarkLinks WHERE benchmark = ? AND asset = ? AND assetLevel = ?",
+                    (link["benchmark"], link["asset"], link["assetLevel"])
+                )
+                self.parent.db._conn.commit()
+            self.parent.db.fetchBenchmarkLinks(update=True)
+            QMessageBox.information(self, "Success", f"Deleted link: {link['benchmark']} to {link['asset']} at level {link['assetLevel']}.")
+        except Exception as e:
+            QMessageBox.warning(self, "Delete Error", f"Error deleting link: {e}")
+        self.refreshLinks()
+
+    def addBenchmarkLink(self):
+        # Get selections
+        level_idx = self.assetLevelCombo.currentIndex()
+        asset = self.assetCombo.currentText().strip()
+        benchmark = self.benchmarkCombo.currentText().strip()
+        if level_idx <= 0 or not asset or not benchmark:
+            QMessageBox.warning(self, "Incomplete", "Please select asset class level, asset, and benchmark.")
+            return
+        asset_level = self.assetLevelCombo.currentData()
+        try:
+            with self.parent.lock:
+                cursor = self.parent.db._conn.cursor()
+                cursor.execute(
+                    "INSERT OR REPLACE INTO benchmarkLinks (benchmark, asset, assetLevel) VALUES (?, ?, ?)",
+                    (benchmark, asset, asset_level)
+                )
+                self.parent.db._conn.commit()
+            QMessageBox.information(self, "Success", f"Linked {benchmark} to {asset} at level {asset_level}.")
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Failed to save link: {e}")
+        self.parent.db.fetchBenchmarkLinks(update=True)
+        self.refreshLinks()
+        self.parent.buildReturnTable()
+
 class exportWindow(QWidget):
     def __init__(self, parent=None, flags=Qt.WindowFlags(), parentSource=None):
         super().__init__(parent, flags)
@@ -4487,7 +4879,28 @@ class exportWindow(QWidget):
         # Write to Excel
         try:
             df = pd.DataFrame(rows, columns=columns)
-            df.to_excel(path, index=False)
+
+            if os.path.exists(path):
+                wb = load_workbook(path)
+                # Generate a unique sheet name
+                base_name = "Export"
+                i = 1
+                while True:
+                    sheet_name = f"{base_name}{i}"
+                    if sheet_name not in wb.sheetnames:
+                        break
+                    i += 1
+                # Write DataFrame to the new sheet
+                ws = wb.create_sheet(sheet_name)
+                for col_idx, col_name in enumerate(df.columns, 1):
+                    ws.cell(row=1, column=col_idx, value=col_name)
+                for row_idx, row in enumerate(df.itertuples(index=False), 2):
+                    for col_idx, value in enumerate(row, 1):
+                        ws.cell(row=row_idx, column=col_idx, value=value)
+                wb.save(path)
+            else:
+                df.to_excel(path, index=False)
+
             QMessageBox.information(self, "Success", f"Data exported to {path}")
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Failed to export to Excel: {e}")
@@ -4576,6 +4989,7 @@ def save_to_db(table, rows, action = "", query = "",inputs = None, keys = None, 
             cur.close()
         if lock is not None:
             lock.release()
+        return True
     except Exception as e:
         print(f"DB save failed. closing connections {e}, {e.args}") 
         try:
@@ -4584,6 +4998,7 @@ def save_to_db(table, rows, action = "", query = "",inputs = None, keys = None, 
             cur.close()
         except:
             pass
+        return False
 def load_from_db(table, condStatement = "",parameters = None, cursor = None, lock = None, db = None):
     try:
         dbPath = db if db else DATABASE_PATH
@@ -4747,7 +5162,6 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
                     allPoolTransactions[transaction["Target name"]] = [transaction,]
                 else:
                     allPoolTransactions[transaction["Target name"]].append(transaction)
-
             poolGainSum = 0
             poolNAV = 0
             poolMDdenominator = 0
@@ -4868,14 +5282,6 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
                     endEntry[0][nameHier["Value"]["dynLow"]] = str(NAV)
                 startEntry = startEntry[0]
                 endEntry = endEntry[0]
-                if fund not in IRRtrack and not noStartValue: #populate with initial investment if it does not appear first from a cashflow
-                    IRRtrack[fund] = {"cashFlows" : [], "dates" : []}
-                    IRRtrack[fund]["cashFlows"].append(float(startEntry[nameHier["Value"]["dynLow"]]) * -1) #negative because it is an initial investment
-                    IRRtrack[fund]["dates"].append(datetime.strptime(month["accountStart"], "%Y-%m-%dT%H:%M:%S"))
-                    if fund not in monthFundIRRtrack:
-                        monthFundIRRtrack[fund] = {"cashFlows" : [], "dates" : []}
-                    monthFundIRRtrack[fund]["cashFlows"].append(float(startEntry[nameHier["Value"]["dynLow"]]) * -1)
-                    monthFundIRRtrack[fund]["dates"].append(datetime.strptime(month["accountStart"], "%Y-%m-%dT%H:%M:%S"))
                 fundTransactions = allPoolTransactions.get(fund,[]) 
                 cashFlowSum = 0
                 weightedCashFlow = 0
@@ -4895,11 +5301,11 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
                         if fund not in IRRtrack:
                             IRRtrack[fund] = {"cashFlows" : [], "dates" : []}
                         IRRtrack[fund]["cashFlows"].append(float(transaction[nameHier["CashFlow"]["dynLow"]]))
-                        IRRtrack[fund]["dates"].append(datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S"))
+                        IRRtrack[fund]["dates"].append(datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S") - relativedelta(days=backDate))
                         if fund not in monthFundIRRtrack:
                             monthFundIRRtrack[fund] = {"cashFlows" : [], "dates" : []}
                         monthFundIRRtrack[fund]["cashFlows"].append(float(transaction[nameHier["CashFlow"]["dynLow"]]))
-                        monthFundIRRtrack[fund]["dates"].append(datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S"))
+                        monthFundIRRtrack[fund]["dates"].append(datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S") - relativedelta(days=backDate))
                     elif transaction["TransactionType"] in commitmentChangeTransactionTypes and transaction.get("TransactionType") not in (None,"None"):
                         commitment += float(transaction[nameHier["Commitment"]["dynLow"]])
                         unfunded += float(transaction[nameHier["Commitment"]["dynLow"]])
@@ -4916,9 +5322,6 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
                     fundNAV = float(endEntry[nameHier["Value"]["dynLow"]])
                     fundReturn = fundGain/fundMDdenominator * 100 if fundMDdenominator != 0 else 0
                     if fund in IRRtrack:
-                        #print(f"IRR input for {fund} in {month['Month']} in {pool}:")
-                        #print([*IRRtrack[fund]["cashFlows"], fundNAV])
-                        #print([*IRRtrack[fund]["dates"], datetime.strptime(month["endDay"], "%Y-%m-%dT%H:%M:%S")])
                         IRRitd = calculate_xirr([*IRRtrack[fund]["cashFlows"], fundNAV], [*IRRtrack[fund]["dates"], datetime.strptime(month["endDay"], "%Y-%m-%dT%H:%M:%S")])
                     else:
                         IRRitd = None
@@ -4963,7 +5366,7 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
                                     nameHier["Unfunded"]["local"] : unfunded}
                     if fund not in (None,"None"): #removing blank funds (found duplicate of Monogram in 'HF Direct Investments Pool, LLC - PE (2021)' with most None values)
                         calculations.append(monthFundEntry) #append to calculations for use in report generation and aggregation
-                        fundEntryList.append(monthFundEntry) #fund data stored on its own for investor calculations
+                        fundEntryList.append([monthFundEntry, float(startEntry[nameHier["Value"]["dynLow"]])]) #fund data stored on its own for investor calculations
 
 
                 except Exception as e:
@@ -5042,8 +5445,6 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
                 tempInvestorDict["ExposureAssetClassSub-assetClass(E)"] = startEntry["ExposureAssetClassSub-assetClass(E)"]
                 tempInvestorDict[nameHier["Family Branch"]["local"]] = startEntry[nameHier["Family Branch"]["dynHigh"]]
                 if tempInvestorDict["startVal"] == 0 and investorCashFlowSum == 0:
-                    if investor == "Anne H. Colquitt 2017 GRAT" and month["Month"] == "July 2022" and pool == "HF Direct Investments Pool, LLC - PE (2022)":
-                        print("exit 1")
                     continue #ignore investors with no value
                 EOM = investorEndEntries.get(investor,[])
                 if len(EOM) > 0:
@@ -5055,6 +5456,7 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
                     investorMDdenominatorSum += investorMDdenominator
                 tempInvestorDicts[investor] = tempInvestorDict #store investor calculations for secondary iteration for fund level data
             monthPoolEntryInvestorList = [] #stores investor data for third iteration (not needed to be split, but remnant from old logic.)
+            ownershipAdjustDict = {}
             for investor in tempInvestorDicts.keys():
                 # second investor iteration to find the gain, return,ownership, and NAV values at pool level (i think it is not needed to be split, but remnant from old logic.)
                 EOMcheck = investorEndEntries.get(investor,[])
@@ -5089,10 +5491,15 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
                 ownershipPerc = investorEOM/poolNAV * 100 if poolNAV != 0 else 0
                 monthPoolEntryInvestor["Ownership"] = ownershipPerc
                 poolOwnershipSum += ownershipPerc
-                monthPoolEntryInvestorList.append(monthPoolEntryInvestor)
-                inputs = (investorEOM,"Calculated_R", investor,pool, month["endDay"])
-                
-                
+                inputs = [investorEOM,"Calculated_R", investor,pool, month["endDay"]]
+                ownershipAdjustDict[investor] = [monthPoolEntryInvestor,inputs, EOMcheck]
+            for data, inputs, EOMcheck in ownershipAdjustDict.values(): #run through to adjust ownerships if they did not total properly to 100%
+                data["Ownership"] = data["Ownership"] * 100 /  poolOwnershipSum if poolOwnershipSum != 0 and ownershipCorrect else data["Ownership"]
+                investorEOM = data["Ownership"] / 100 * poolNAV
+                data["NAV"] = investorEOM
+                monthPoolEntryInvestorList.append(data)
+                inputs[0] = investorEOM
+                inputs = tuple(inputs)
                 if len(EOMcheck) > 0: #only update the database for the investor if they have account balances
                     if round(float(EOMcheck[0].get(nameHier["Value"]["dynHigh"],0))) != round(investorEOM): #don't push an update if the values are the same
                         update_high.append(inputs)
@@ -5102,9 +5509,11 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
                                     if lst["Source name"] == investor and lst["Target name"] == pool and lst["Date"] == month["endDay"]:
                                         lst[nameHier["Value"]["dynHigh"]] = investorEOM
             for investorEntry in monthPoolEntryInvestorList:
+                investor = investorEntry["Investor"]
                 #final (3rd) investor level iteration to use the pool level results for the investor to calculate the fund level information
-                for fundEntry in fundEntryList:
-                    investorOwnership = investorEntry["Ownership"] * 100 /  poolOwnershipSum if poolOwnershipSum != 0 and ownershipCorrect else investorEntry["Ownership"]
+                for fundEntry, fundStartValue in fundEntryList:
+                    fund = fundEntry["Fund"]
+                    investorOwnership = investorEntry["Ownership"] # * 100 /  poolOwnershipSum if poolOwnershipSum != 0 and ownershipCorrect else investorEntry["Ownership"]
                     fundInvestorNAV = investorOwnership / 100 * fundEntry["NAV"]
                     fundInvestorGain = fundEntry["Monthly Gain"] / monthPoolEntry["Monthly Gain"] * investorEntry["Monthly Gain"] if monthPoolEntry["Monthly Gain"] != 0 else 0
                     fundInvestorMDdenominator = investorEntry["MDdenominator"] / monthPoolEntry["MDdenominator"] * fundEntry["MDdenominator"] if monthPoolEntry["MDdenominator"] != 0 else 0
@@ -5112,22 +5521,26 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
                     fundInvestorOwnership = fundInvestorNAV /  fundEntry["NAV"] if fundEntry["NAV"] != 0 else 0
                     fundInvestorCommitment = fundEntry[nameHier["Commitment"]["local"]] * fundInvestorOwnership
                     fundInvestorUnfunded = fundEntry[nameHier["Unfunded"]["local"]] * fundInvestorOwnership
-                    if investorEntry["MDdenominator"] != 0 and investorMDdenominatorSum != 0:
+
+                    if investorEntry["MDdenominator"] != 0 and investorMDdenominatorSum != 0: 
                         if investor not in IRRinvestorTrack:
                             IRRinvestorTrack[investor] = {}
-                        if fundEntry["Fund"] not in IRRinvestorTrack[investor]:
-                            IRRinvestorTrack[investor][fundEntry["Fund"]] = {"cashFlows" : [], "dates" : []}
+                        if fund not in IRRinvestorTrack[investor]:
+                            IRRinvestorTrack[investor][fund] = {"cashFlows" : [], "dates" : []}
+                            if fundStartValue != 0:
+                                #if fund start value is not zero, the investment is not new, but the investor is being added
+                                #apply ownership to previous fund NAV to get faux starting value for IRR
+                                investorStartValue = fundStartValue * investorEntry["Ownership"] / 100
+                                IRRinvestorTrack[investor][fund]["cashFlows"].append(investorStartValue * -1)
+                                IRRinvestorTrack[investor][fund]["dates"].append(datetime.strptime(month["accountStart"], "%Y-%m-%dT%H:%M:%S"))
                         cashflows = monthFundIRRtrack.get(fundEntry["Fund"], {}).get("cashFlows", [])
                         dates = monthFundIRRtrack.get(fundEntry["Fund"], {}).get("dates", [])
                         for cashflow, date in zip(cashflows, dates):
                             adjustedCashflow = cashflow * investorEntry["MDdenominator"] / investorMDdenominatorSum #ratio the cashflow to their MDdenominator
-                            IRRinvestorTrack[investor][fundEntry["Fund"]]["cashFlows"].append(adjustedCashflow)
-                            IRRinvestorTrack[investor][fundEntry["Fund"]]["dates"].append(date)
+                            IRRinvestorTrack[investor][fund]["cashFlows"].append(adjustedCashflow)
+                            IRRinvestorTrack[investor][fund]["dates"].append(date)
                     if investorEntry["Investor"] in IRRinvestorTrack and fundEntry["Fund"] in IRRinvestorTrack[investorEntry["Investor"]]:
-                        #print(f"IRR input for {investorEntry['Investor']} in {month['Month']} in {pool}:")
-                        #print([*IRRinvestorTrack[investorEntry["Investor"]]["cashFlows"], fundInvestorNAV])
-                        #print([*IRRinvestorTrack[investorEntry["Investor"]]["dates"], datetime.strptime(month["endDay"], "%Y-%m-%dT%H:%M:%S")])
-                        fundInvestorIRR = calculate_xirr([*IRRinvestorTrack[investorEntry["Investor"]][fundEntry["Fund"]]["cashFlows"], fundInvestorNAV], [*IRRinvestorTrack[investorEntry["Investor"]][fundEntry["Fund"]]["dates"], datetime.strptime(month["endDay"], "%Y-%m-%dT%H:%M:%S")])
+                        fundInvestorIRR = calculate_xirr([*IRRinvestorTrack[investorEntry["Investor"]][fund]["cashFlows"], fundInvestorNAV], [*IRRinvestorTrack[investorEntry["Investor"]][fund]["dates"], datetime.strptime(month["endDay"], "%Y-%m-%dT%H:%M:%S")])
                     else:
                         fundInvestorIRR = None
                     monthFundInvestorEntry = {"dateTime" : month["dateTime"], "Investor" : investorEntry["Investor"], "Pool" : pool, "Fund" : fundEntry["Fund"] ,
@@ -5138,7 +5551,7 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
                                     nameHier["Commitment"]["local"] : fundInvestorCommitment, nameHier["Unfunded"]["local"] : fundInvestorUnfunded, 
                                     "Calculation Type" : "Total Fund",
                                     "IRR ITD" : fundInvestorIRR,
-                                    nameHier["sleeve"]["local"] : fundList.get(fundEntry["Fund"])
+                                    nameHier["sleeve"]["local"] : fundList.get(fund)
                                     }
                     calculations.append(monthFundInvestorEntry) #add fund level data to calculations for use in aggregation and report generation
             #end of months loop
@@ -5233,18 +5646,23 @@ def processPoolTransactions(poolData : dict,selfData : dict, statusQueue, dbQueu
         return []
             
 def calculateBackdate(transaction,noStartValue = False):
-        if transaction.get(nameHier["Transaction Time"]["dynLow"]) not in (None,"None"):
-            time = transaction.get(nameHier["Transaction Time"]["dynLow"])
-            if time == "End of day":
-                #don't backdate if transaction was at the end of the day
-                backDate = 0
-            else:
-                backDate = 1 #backdate if beginning of day
-        elif datetime.strptime(transaction.get("Date"), "%Y-%m-%dT%H:%M:%S").day == 1 and noStartValue:
-            backDate = 1
+    time = transaction.get(nameHier["Transaction Time"]["dynLow"])
+    monthDay = datetime.strptime(transaction.get("Date"), "%Y-%m-%dT%H:%M:%S").day
+    if noStartValue:
+        if time not in (None,"None") and time.lower() == "end of day":
+            backDate = 0 #"no start value and end of day"
         else:
-            backDate = 0
-        return backDate
+            backDate = 1 #"no start value and not end of day"
+    elif time in (None,"None"):
+        if monthDay == 1:
+            backDate = 1 #"First day of month"
+        else:
+            backDate = 0#"No timing and not first day of month"
+    elif time.lower() == "end of day":
+        backDate = 0#"End of day"
+    else:
+        backDate = 1 #"Beginning of day"
+    return backDate
 
 def exportTableToExcel(self, rows, headers = None):
     # 1) prompt user
@@ -5482,9 +5900,20 @@ class underlyingDataWindow(QWidget):
                 all_cols = self.allCols
 
 
-                # 4) create workbook
-                wb = Workbook()
-                ws = wb.active
+                if os.path.exists(path):
+                    wb = load_workbook(path)
+                    # Create a unique sheet name for export
+                    base_name = "Export"
+                    i = 1
+                    while True:
+                        sheet_name = f"{base_name}{i}"
+                        if sheet_name not in wb.sheetnames:
+                            break
+                        i += 1
+                    ws = wb.create_sheet(sheet_name)
+                else:
+                    wb = Workbook()
+                    ws = wb.active
 
                 rowStart = 1
                 for idx, colname in enumerate(all_cols, start=1):
@@ -5492,10 +5921,7 @@ class underlyingDataWindow(QWidget):
 
 
                 # 7) populate rows
-                for r, row_dict in enumerate(data, start=rowStart + 1):
-
-
-        
+                for r, row_dict in enumerate(data, start=rowStart + 1):        
                     # data cells with proper formatting
                     for c, colname in enumerate(all_cols, start=1):
                         val = row_dict.get(colname, None)
@@ -5544,7 +5970,7 @@ class underlyingDataWindow(QWidget):
             if selection not in timeOptions or selection == "MTD": #MTD timeframe
                 tranStart = endTime.replace(day = 1)
                 accountStart = tranStart - relativedelta(days= 1)
-            elif selection == "ITD":
+            elif selection in ("ITD","IRR ITD"):
                 tranStart = self.parent.dataTimeStart
                 accountStart = self.parent.dataTimeStart
             else:
@@ -5585,6 +6011,8 @@ class underlyingDataWindow(QWidget):
                 query = "WHERE"
                 inputs = []
                 for hierIdx, tier in enumerate(hier):
+                    if tier == "hiddenLayer":
+                        continue #hidden layer should not affect the query
                     for filter in self.parent.filterOptions:
                         dynName = filter.get("dynNameHigh")
                         if hierSelections[hierIdx] == filter["key"] and dynName is not None:
@@ -5632,6 +6060,8 @@ class underlyingDataWindow(QWidget):
                 query = "WHERE"
                 inputs = []
                 for hierIdx, tier in enumerate(hier):
+                    if tier == "hiddenLayer":
+                        continue #hidden layer should not affect the query
                     for filter in self.parent.filterOptions:
                         dynName = filter.get("dynNameHigh")
                         if hierSelections[hierIdx] == filter["key"] and dynName is not None:
@@ -5675,6 +6105,8 @@ class underlyingDataWindow(QWidget):
             query = "WHERE"
             inputs = []
             for hierIdx, tier in enumerate(hier): #iterate through each tier down to selection
+                if tier == "hiddenLayer":
+                        continue #hidden layer should not affect the query
                 for filter in self.parent.filterOptions: #iterate through filter to find the matching keys
                     dynName = filter.get("dynNameLow")
                     if hierSelections[hierIdx] == filter["key"] and dynName is not None: #matching filter key
