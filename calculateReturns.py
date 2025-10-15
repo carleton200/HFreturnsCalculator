@@ -34,7 +34,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtGui import QBrush, QColor, QDesktopServices
 from PyQt5.QtCore import Qt, QTimer, QAbstractTableModel, QModelIndex, pyqtSignal, QPoint, QUrl, QDate
 
-currentVersion = "1.1.5"
+currentVersion = "1.1.6"
 demoMode = True
 ownershipCorrect = True
 importInterval = relativedelta(hours=2)
@@ -125,7 +125,7 @@ assetClass1Order = ["Illiquid", "Liquid","Cash"]
 assetClass2Order = ["Direct Private Equity", "Private Equity", "Direct Real Assets", "Real Assets", "Public Equity", "Long/Short", "Absolute Return", "Fixed Income", "Cash"] 
 commitmentChangeTransactionTypes = ["Commitment", "Transfer of commitment", "Transfer of commitment (out)", "Secondary - Original commitment (by secondary seller)"]
 ignoreInvTranTypes = [""]
-headerOptions = ["Return","NAV", "Monthly Gain", "Ownership" , "MDdenominator", "Commitment", "Unfunded", "IRR ITD"]
+headerOptions = ["Return","NAV", "Monthly Gain", "Ownership" , "MDdenominator", "Commitment", "Unfunded", "IRR ITD", "%"]
 dataOptions = ["Investor","Family Branch","Classification", "dateTime"]
 tranAppHeaderOptions = ["Transaction Sum"]
 tranAppDataOptions = ["Investor","Family Branch", "dateTime"]
@@ -1099,6 +1099,13 @@ class returnsApp(QWidget):
                             output[rowKey][strDate] = returnVal
                             if self.tableBtnGroup.checkedButton().text() == "Complex Table" and strDate == self.dataEndSelect.currentText():
                                 complexOutput[rowKey]["Return"] = returnVal
+                if self.tableBtnGroup.checkedButton().text() == "Complex Table":
+                    for rowKey in complexOutput:
+                        complexOutput[rowKey]["%"] = (complexOutput[rowKey].get("NAV",0.0) / complexOutput["Total##()##"].get("NAV",0.0) * 100 if complexOutput["Total##()##"]["NAV"] != 0 else 0 )if complexOutput[rowKey].get("NAV",0.0) != 0 else None
+                else:
+                    for rowKey in output:
+                        output[rowKey]["%"] = (output[rowKey]["NAV"] / output["Total##()##"].get("NAV",0.0) * 100 if output["Total##()##"].get("NAV",0.0) != 0 else 0 ) if output[rowKey].get("NAV",0.0) != 0 else None
+                
                 gui_queue.put(lambda: self.buildTableLoadingBar.setValue(5))
                 if cancelEvent.is_set(): #exit if new table build request is made
                     return
@@ -2503,7 +2510,7 @@ class returnsApp(QWidget):
             dates = sorted(dates, reverse=True)
             keys = [d.strftime("%B %Y") for d in dates]
         elif mode == "Complex Table":
-            newOrder = ["NAV", "Commitment", "Unfunded","MTD","QTD","YTD"] + [f"{y}YR" for y in yearOptions] + ["ITD"]
+            newOrder = ["%", "NAV", "Commitment", "Unfunded","MTD","QTD","YTD"] + [f"{y}YR" for y in yearOptions] + ["ITD"]
             ordered = [h for h in newOrder if h in keys]
             ordered += [h for h in keys if h not in newOrder and h not in exceptions]
             keys = ordered
