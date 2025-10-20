@@ -35,7 +35,7 @@ from PyQt5.QtGui import QBrush, QColor, QDesktopServices
 from PyQt5.QtCore import Qt, QTimer, QAbstractTableModel, QModelIndex, pyqtSignal, QPoint, QUrl, QDate
 
 currentVersion = "1.1.6"
-demoMode = True
+demoMode = False
 ownershipCorrect = True
 importInterval = relativedelta(hours=2)
 
@@ -814,8 +814,6 @@ class returnsApp(QWidget):
                             maxDepth   = max(len(self.sortHierarchy.checkedItems()),1) + 1
                             data_color = darken_color(data_color,depth/maxDepth/3 + 2/3)
 
-                        if r % 2 == 1:
-                            data_color = darken_color(data_color,0.93)
                         header_color = darken_color(data_color, 0.9)
                         data_fill   = PatternFill("solid", data_color, data_color)
                         header_fill = PatternFill("solid", header_color, header_color)
@@ -1101,10 +1099,12 @@ class returnsApp(QWidget):
                                 complexOutput[rowKey]["Return"] = returnVal
                 if self.tableBtnGroup.checkedButton().text() == "Complex Table":
                     for rowKey in complexOutput:
-                        complexOutput[rowKey]["%"] = (complexOutput[rowKey].get("NAV",0.0) / complexOutput["Total##()##"].get("NAV",0.0) * 100 if complexOutput["Total##()##"]["NAV"] != 0 else 0 )if complexOutput[rowKey].get("NAV",0.0) != 0 else None
+                        if complexOutput[rowKey].get("NAV",0.0) != 0:
+                            complexOutput[rowKey]["%"] = complexOutput[rowKey].get("NAV",0.0) / complexOutput["Total##()##"].get("NAV",0.0) * 100 if complexOutput["Total##()##"]["NAV"] != 0 else 0
                 else:
                     for rowKey in output:
-                        output[rowKey]["%"] = (output[rowKey]["NAV"] / output["Total##()##"].get("NAV",0.0) * 100 if output["Total##()##"].get("NAV",0.0) != 0 else 0 ) if output[rowKey].get("NAV",0.0) != 0 else None
+                        if output[rowKey].get("NAV",0.0) != 0:
+                            output[rowKey]["%"] = output[rowKey]["NAV"] / output["Total##()##"].get("NAV",0.0) * 100 if output["Total##()##"].get("NAV",0.0) != 0 else 0
                 
                 gui_queue.put(lambda: self.buildTableLoadingBar.setValue(5))
                 if cancelEvent.is_set(): #exit if new table build request is made
@@ -2529,6 +2529,9 @@ class returnsApp(QWidget):
         rows = copy.deepcopy(origRows) #prevents alteration of self.returnsTableData
         for f in self.filterOptions:
             if f["key"] not in self.filterBtnExclusions and not self.filterRadioBtnDict[f["key"]].isChecked():
+                for k,v in rows.items():
+                    if "dataType" not in v.keys():
+                        print(f"No dataType found for: {v}")
                 to_delete = [k for k,v in rows.items() if v["dataType"] == "Total " + f["key"]]
                 for k in to_delete:
                     rows.pop(k)
@@ -4301,7 +4304,7 @@ class transactionApp(QWidget):
                 complete = 0
                 total = 0
                 for line in statusLines:
-                    complete += line.get("completed",0)
+                    complete += line.get("completed",0) if line.get("status") != "Completed" else line.get("total",0)
                     total += line.get("total",0)
                     if line["status"] == "Failed":
                         failed.append(line)
@@ -5110,6 +5113,11 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
         earliestChangeDate = poolData.get("earliestChangeDate") #earliest date for new data from last API pull
         pool = poolData.get("poolName")
         cache = poolData.get("cache") #dataset of all relevant transactions and account balances for the pool
+        if not cache:
+            print(f"No data found for pool {pool}, so skipping calculations")
+            logging.warning(f"No data found for pool {pool}, so skipping calculations")
+            statusQueue.put((pool,1,"Completed")) #allows the completion of calculations
+            return []
         newMonths = []
 
         insert_low = [] #lists to store any database changes to do once calculations are complete
@@ -5498,15 +5506,8 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
                 ownershipPerc = investorEOM/poolNAV * 100 if poolNAV != 0 else 0
                 monthPoolEntryInvestor["Ownership"] = ownershipPerc
                 poolOwnershipSum += ownershipPerc
-                inputs = [investorEOM,"Calculated_R", investor,pool, month["endDay"]]
-                ownershipAdjustDict[investor] = [monthPoolEntryInvestor,inputs, EOMcheck]
-            for data, inputs, EOMcheck in ownershipAdjustDict.values(): #run through to adjust ownerships if they did not total properly to 100%
-                data["Ownership"] = data["Ownership"] * 100 /  poolOwnershipSum if poolOwnershipSum != 0 and ownershipCorrect else data["Ownership"]
-                investorEOM = data["Ownership"] / 100 * poolNAV
-                data["NAV"] = investorEOM
-                monthPoolEntryInvestorList.append(data)
-                inputs[0] = investorEOM
-                inputs = tuple(inputs)
+                monthPoolEntryInvestorList.append(monthPoolEntryInvestor)
+                inputs = (investorEOM,"Calculated_R", investor,pool, month["endDay"])
                 if len(EOMcheck) > 0: #only update the database for the investor if they have account balances
                     if round(float(EOMcheck[0].get(nameHier["Value"]["dynHigh"],0))) != round(investorEOM): #don't push an update if the values are the same
                         update_high.append(inputs)
@@ -5520,7 +5521,7 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
                 #final (3rd) investor level iteration to use the pool level results for the investor to calculate the fund level information
                 for fundEntry, fundStartValue in fundEntryList:
                     fund = fundEntry["Fund"]
-                    investorOwnership = investorEntry["Ownership"] # * 100 /  poolOwnershipSum if poolOwnershipSum != 0 and ownershipCorrect else investorEntry["Ownership"]
+                    investorOwnership = investorEntry["Ownership"] * 100 /  poolOwnershipSum if poolOwnershipSum != 0 and ownershipCorrect else investorEntry["Ownership"]
                     fundInvestorNAV = investorOwnership / 100 * fundEntry["NAV"]
                     fundInvestorGain = fundEntry["Monthly Gain"] / monthPoolEntry["Monthly Gain"] * investorEntry["Monthly Gain"] if monthPoolEntry["Monthly Gain"] != 0 else 0
                     fundInvestorMDdenominator = investorEntry["MDdenominator"] / monthPoolEntry["MDdenominator"] * fundEntry["MDdenominator"] if monthPoolEntry["MDdenominator"] != 0 else 0
