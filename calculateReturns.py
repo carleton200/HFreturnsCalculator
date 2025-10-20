@@ -35,7 +35,7 @@ from PyQt5.QtGui import QBrush, QColor, QDesktopServices
 from PyQt5.QtCore import Qt, QTimer, QAbstractTableModel, QModelIndex, pyqtSignal, QPoint, QUrl, QDate
 
 currentVersion = "1.1.6"
-demoMode = True
+demoMode = False
 ownershipCorrect = True
 importInterval = relativedelta(hours=2)
 
@@ -119,7 +119,7 @@ nameHier = {
                 "Classification" : {"local" : "Classification" , "dynLow" : "Target nameExposureHFClassificationLevel2"},
                 "FundClass" : {"dynLow" : "Fundclass" , "dynHigh" : "Fundclass"},
             }
-
+mainTableNames = ["positions_low", "positions_high", "transactions_low", "transactions_high"]
 #TODO: make this database stored variable later
 assetClass1Order = ["Illiquid", "Liquid","Cash"]
 assetClass2Order = ["Direct Private Equity", "Private Equity", "Direct Real Assets", "Real Assets", "Public Equity", "Long/Short", "Absolute Return", "Fixed Income", "Cash"] 
@@ -211,15 +211,7 @@ class DatabaseManager:
                     Unfunded TEXT,
                     IRRITD TEXT,
                     Classification TEXT,
-                    Return REAL,
-                    NAV REAL,
-                    MonthlyGain REAL,
-                    Ownership REAL,
-                    MDdenominator REAL,
-                    Commitment REAL,
-                    Unfunded REAL,
-                    IRRITD REAL,
-                    PRIMARY KEY (dateTime, Investor, FamilyBranch, Classification)
+                    PRIMARY KEY (dateTime, Investor, Pool, Fund)
                 )
             """)
             self._conn.execute("""
@@ -675,9 +667,10 @@ class returnsApp(QWidget):
                 #pull data if in a new month or 1 days have elapsed
                 executor.submit(self.pullData)
             elif self.lastImportDB[0]["lastImport"] != self.lastImportDB[0].get("lastCalculation", "None"):
+                #TODO: remove this functionality. Import should equal calculations and nothing else. Except maybe testing
                 self.earliestChangeDate = datetime.strptime(self.lastImportDB[0].get("changeDate"), "%B %d, %Y @ %I:%M %p")
                 self.processFunds()
-                self.calculateReturn()
+                self.pullData()
             else:
                 calculations = load_from_db("calculations")
                 self.processFunds()
@@ -685,7 +678,7 @@ class returnsApp(QWidget):
                     self.populate(self.calculationTable,calculations)
                     self.buildReturnTable()
                 else:
-                    self.calculateReturn()
+                    self.pullData()
     def watchForUpdateTime(self):
         try:
             print("Checking for update required.")
@@ -1661,6 +1654,9 @@ class returnsApp(QWidget):
             gui_queue.put(lambda: QMessageBox.warning(self,"API Failure", "API connection has failed. Server is down or API key is bad. \n Previous calculations are left in place for viewing."))
             return
         def checkNewestData(table, rows):
+            #iterate through the freshly imported rows, check if they match with the previous data. 
+            #inputs: table name, rows of newly imported data
+            #outputs: newImportedRows, oldDatabaseRows, self.earliestChangeDate is updated if a new earliest change date is found
             def buildKey(record):
                 value = record[nameHier["Value"]["dynHigh"] if "position" in table else nameHier["CashFlow"]["dynLow"]]
                 value = 0 if value is None or value == "None" else value
@@ -1674,7 +1670,6 @@ class returnsApp(QWidget):
             try:
                 diffCount = 0
                 differences = []
-                newRows = []
                 previous = load_from_db(table) or []
 
                 # Build a set of tuple‐keys for the old data
@@ -1689,10 +1684,13 @@ class returnsApp(QWidget):
                     value = 0 if value is None or value == "None" else value
                     key = buildKey(rec)
                     newRecords.add(key)
+                    if table == "positions_low": #updates new data to have required fields
+                        rec[nameHier["Unfunded"]["local"]] = 0
+                        rec[nameHier["Commitment"]["local"]] = 0
+                        rec[nameHier["sleeve"]["local"]] = None
                     if key in oldRecords:
                         continue
                     diffCount += 1
-                    newRows.append(rec)
                     differences.append(rec)
                     differences.append({"Source name" : key[0],"Target name" : key[1],nameHier["Value"]["dynLow"] : key[2],"Date" : key[3]})
                     # parse the date for comparison
@@ -1703,18 +1701,15 @@ class returnsApp(QWidget):
                     if dt < self.poolChangeDates.get(rec.get(poolTag),datetime.now()): 
                         self.poolChangeDates[rec.get(poolTag)] = dt # sets each pool value to earliest and instantiates if not existing
                 for oldRec in oldRecords:
-                    if oldRec not in newRecords: #find if a new record no longer exists in the old. Means old data is removed and must be redone
-                        self.foundRetroChange = True
-                        self.poolChangeDates["active"] = False
-                        print(f"Retroactive changes found in {table}. Resetting whole table.")
-                        break
-                
-                if earliest and not self.foundRetroChange:
-                    if earliest < self.earliestChangeDate:
+                    #find if a new record no longer exists in the old. Means old data is altered and must be redone from that timeframe
+                    if oldRec not in newRecords: 
+                        dt = datetime.strptime(oldRec[3], "%Y-%m-%dT%H:%M:%S")
+                        if earliest is None or dt < earliest:
+                            earliest = dt
+
+                with earlyChangeDateLock:
+                    if earliest and earliest < self.earliestChangeDate:
                         self.earliestChangeDate = earliest
-                if self.foundRetroChange: #push full api data and reset calc date to redo all data
-                    self.earliestChangeDate =  self.dataTimeStart
-                    return rows, False
                 print(f"Differences in {table} : {diffCount} of {len(rows)}")
                 if diffCount > 0 and not demoMode:
                     def openWindow():
@@ -1722,11 +1717,13 @@ class returnsApp(QWidget):
                         self.tableWindows[table] = window
                         window.show()
                     gui_queue.put(lambda: openWindow())
-                return newRows, True
+                return {"old": previous, "new": rows}
             except Exception as e:
+                print(traceback.format_exc())
                 print(f"Error searching old data: {e}")
         try:
             self.earliestChangeDate = datetime(datetime.now().year,datetime.now().month + 1,datetime.now().day)
+            earlyChangeDateLock = threading.Lock()
             gui_queue.put(lambda: self.apiLoadingBarBox.setVisible(True))
             gui_queue.put(lambda: self.importButton.setEnabled(False))
             self.updateMonths()
@@ -1735,6 +1732,7 @@ class returnsApp(QWidget):
             self.complete = float(0)
             totalCalls = float(6)
             self.pullInvestorNames()
+            importedTables = {}
             apiData = {
                 "tranCols": "Investment in, Investing Entity, Transaction Type, Effective date, Asset Class (E), Sub-asset class (E), HF Classification, Remaining commitment change, Transaction timing, Amount in system currency, Cash flow change (USD), Parent investor",
                 "tranName": "InvestmentTransaction",
@@ -1753,6 +1751,9 @@ class returnsApp(QWidget):
                 self.foundRetroChange = False
             else:
                 skipCalculations = False
+            accountTranTableFutures = []
+            #key for the table naming convention {i : {j : table name}}
+            tableNameKey = {1 : {0 : "positions_low", 1 : "positions_high"}, 0 : {0 : "transactions_low", 1 : "transactions_high"}}
             for i in range(2):
                 cols_key = 'accountCols' if i == 1 else 'tranCols'
                 name_key = 'accountName' if i == 1 else 'tranName'
@@ -1986,52 +1987,14 @@ class returnsApp(QWidget):
                                     print(f"Error: {response.json()}")
                                 except:
                                     pass
-                        if i == 1:
-                            if j == 0:
-                                if skipCalculations: #separate out only new rows to alter db
-                                    rows, good = checkNewestData('positions_low',rows)
-                                for row in rows:
-                                    row[nameHier["Unfunded"]["local"]] = 0
-                                    row[nameHier["Commitment"]["local"]] = 0
-                                    row[nameHier["sleeve"]["local"]] = None
-                                if skipCalculations and good:
-                                    save_to_db('positions_low', rows, action="add", lock=self.lock)
-                                else:
-                                    save_to_db('positions_low', rows, lock=self.lock)
-                            else:
-                                if skipCalculations: #separate out only new rows to alter db
-                                    rows, good = checkNewestData('positions_high',rows)
-                                    if good:
-                                        save_to_db('positions_high', rows, action="add", lock=self.lock)
-                                    else:
-                                        save_to_db('positions_high', rows, lock=self.lock)
-                                else:
-                                    save_to_db('positions_high', rows, lock=self.lock)
-                        else:
-                            if j == 0:
-                                if skipCalculations: #separate out only new rows to alter db
-                                    rows, good = checkNewestData('transactions_low',rows)
-                                    if good:
-                                        save_to_db('transactions_low', rows, action="add", lock=self.lock)
-                                    else:
-                                        save_to_db('transactions_low', rows, lock=self.lock)
-                                else:
-                                    save_to_db('transactions_low', rows, lock=self.lock)
-                            else:
-                                if skipCalculations: #separate out only new rows to alter db
-                                    rows, good = checkNewestData('transactions_high',rows)
-                                    if good:
-                                        save_to_db('transactions_high', rows, action="add", lock=self.lock)
-                                    else:
-                                        save_to_db('transactions_high', rows, lock=self.lock)
-                                else:
-                                    save_to_db('transactions_high', rows, lock=self.lock)
+                        tables = checkNewestData(tableNameKey[i][j],rows)
                         with completeLock:
                             self.complete += 1
                         frac = self.complete/totalCalls
                         gui_queue.put(lambda val = frac: self.apiLoadingBar.setValue(int(val * 100)))
+                        return tableNameKey[i][j],tables
                     try:
-                        submitAPIcall(self,bgPullData)
+                        accountTranTableFutures.append(APIexecutor.submit(bgPullData))
                     except Exception as e:
                         print(f"Failure to run background thread API call: {e} \n {e.args}")
             fundPayload = {
@@ -2141,7 +2104,32 @@ class returnsApp(QWidget):
                 frac = self.complete/totalCalls
                 gui_queue.put(lambda val = frac: self.apiLoadingBar.setValue(int(val * 100)))
             submitAPIcall(self,bgBenchPull)
-
+            wait(accountTranTableFutures)
+            for future in accountTranTableFutures:
+                #must be careful. There are a maximum of 5 threads but there are 6 calls, and 2 are waited for after
+                table, tableData = future.result()
+                if not skipCalculations:
+                    importedTables[table] = tableData["new"] #all calculations are from scratch anyways, so use the new data
+                else:
+                    mergedTable = []
+                    poolTag = "Target name" if "high" in table else "Source name"
+                    for rec in tableData["new"]:
+                        pool = rec[poolTag]
+                        if self.poolChangeDates.get("active",False): #if active, specifiy date by pool
+                            changeDate = self.poolChangeDates.get(pool,datetime.now())
+                        else:
+                            changeDate = self.earliestChangeDate
+                        if changeDate >= datetime.strptime(rec["Date"], "%Y-%m-%dT%H:%M:%S"): #new data past the editing date
+                            mergedTable.append(rec)
+                    for rec in tableData["old"]:
+                        pool = rec[poolTag]
+                        if self.poolChangeDates.get("active",False): #if active, specifiy date by pool
+                            changeDate = self.poolChangeDates.get(pool,datetime.now())
+                        else:
+                            changeDate = self.earliestChangeDate
+                        if changeDate < datetime.strptime(rec["Date"], "%Y-%m-%dT%H:%M:%S"): #old data before the editing date to be kept
+                            mergedTable.append(rec)
+                    importedTables[table] = mergedTable
             wait(self.apiFutures)
             if skipCalculations:
                 print("Earliest change: ", self.earliestChangeDate)
@@ -2150,10 +2138,6 @@ class returnsApp(QWidget):
                     for pool in self.poolChangeDates:
                         print(f"        {pool} : {self.poolChangeDates.get(pool)}")
             gui_queue.put(lambda: self.apiLoadingBar.setValue(100))
-            
-            while not gui_queue.empty(): #wait to assure database has been updated in main thread before continuing
-                time.sleep(0.2)
-            
 
 
             currentTime = datetime.now().strftime("%B %d, %Y @ %I:%M %p")
@@ -2163,19 +2147,20 @@ class returnsApp(QWidget):
             self.lastImportDB[0]["changeDate"] = changeDate
             self.lastImportLabel.setText(f"Last Data Import: {currentTime}")
             gui_queue.put(lambda: self.apiLoadingBarBox.setVisible(False))
-            gui_queue.put(lambda: self.calculateReturn())
+            gui_queue.put(lambda: self.calculateReturn(importedTables))
         except Exception as e:
-            QMessageBox.warning(self,"Error Importing Data", f"Error pulling data from dynamo: {e} , {e.args}")
+            print(traceback.format_exc())
+            trace = traceback.format_exc() if traceback.format_exc() and not demoMode else ""
+            gui_queue.put(lambda error = e: QMessageBox.warning(self,"Error Importing Data", f"Error pulling data from dynamo: {error} , {error.args} \n \n {trace}"))
         gui_queue.put(lambda: self.importButton.setEnabled(True))
         gui_queue.put(lambda: self.apiLoadingBarBox.setVisible(False))
     def openTableWindow(self, rows, name = "Table"):
         window = tableWindow(parentSource=self,all_rows=rows,table=name)
         self.tableWindows[name] = window
         window.show()
-    def calculateReturn(self):
+    def calculateReturn(self, dynImportData : dict):
         def initalizeCalc():
             try:
-                calculationStart = datetime.now()
                 gui_queue.put(lambda: self.importButton.setEnabled(False))
                 gui_queue.put(lambda: self.calculationLoadingBox.setVisible(True))
                 self.updateMonths()
@@ -2216,8 +2201,9 @@ class returnsApp(QWidget):
                 self.initializeProgressDB()
 
                 # ------------------- build data cache ----------------------
-                tables = ["positions_low", "transactions_low", "positions_high", "transactions_high", "calculations"]
-                table_rows = {t: load_from_db(t,lock=self.lock) for t in tables}
+                tables = ["positions_low", "transactions_low", "positions_high", "transactions_high"]
+                table_rows = {t: dynImportData[t] for t in tables}
+                table_rows["calculations"] = load_from_db("calculations",lock=self.lock)
                 cache = {}
                 for table, rows in table_rows.items():
                     for row in rows:
@@ -2247,7 +2233,7 @@ class returnsApp(QWidget):
                         if pool.get("poolName") in self.poolChangeDates or idx == 0: #if there is a date to calculate from. Needs at least one pool to run (idx 0)
                             runPools.append(pool)
                         else: #otherwise, get the calculations and avoid building a worker thread for nothing
-                            for month in cache.get(pool.get("poolName")).get("calculations", {}):
+                            for month in cache.get(pool.get("poolName"),{}).get("calculations", {}):
                                 self.cachedPoolCalculations.extend(cache.get(pool.get("poolName")).get("calculations", {}).get(month)) #add all calculations for the pool
                     self.pools = runPools #only run calculatable pools
                 for idx, pool in enumerate(self.pools):
@@ -2443,14 +2429,18 @@ class returnsApp(QWidget):
     def calcCompletion(self):
         try:
             print("Checking worker completion...")
-            executor.submit(self.updateWorkerDB)
+            #executor.submit(self.updateWorkerDB) #removing this functionality
             self.pool.join()
             print("All workers finished")
             
             calculations = []
+            allDynTables = {table: [] for table in mainTableNames}
             for fut in self.futures:
                 try:
-                    calculations.extend(fut.get())
+                    calcs, dynTables = fut.get()
+                    calculations.extend(calcs)
+                    for table in dynTables:
+                        allDynTables[table].extend(dynTables[table])
                 except Exception as e:
                     print(f"Error appending calculations: {e}")
             calculations.extend(self.cachedPoolCalculations)
@@ -2459,7 +2449,11 @@ class returnsApp(QWidget):
                 for key in row.keys():
                     if key not in keys:
                         keys.append(key)
+            print("Updating database...")
             save_to_db("calculations",calculations, keys=keys, lock=self.lock)
+            for table in mainTableNames:
+                save_to_db(table, allDynTables[table], lock=self.lock)
+            print("Database updated.")
             try:
                 apiPullTime = self.lastImportDB[0].get("lastImport")
                 save_to_db(None,None,query="UPDATE history SET [lastCalculation] = ?", inputs=(apiPullTime,), action="replace", lock=self.lock)
@@ -5112,12 +5106,6 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
         cache = poolData.get("cache") #dataset of all relevant transactions and account balances for the pool
         newMonths = []
 
-        insert_low = [] #lists to store any database changes to do once calculations are complete
-        update_low = []
-        insert_high = []
-        update_high = []
-
-
         if not noCalculations: #if there are calculations, find all months before the data pull, and then pull those calculations
             for month in months:
                 #if the calculations for the month have already been complete, pull the old data
@@ -5339,15 +5327,11 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
                                             "Balancetype" : "Calculated_R", "ExposureAssetClass" : assetClass, "ExposureAssetClassSub-assetClass(E)" : subAssetClass,
                                             nameHier["Commitment"]["local"] : commitment, nameHier["Unfunded"]["local"] : unfunded,
                                             nameHier["sleeve"]["local"] : fundList.get(fund,None), nameHier["Classification"]["dynLow"] : fundClassification}
-                        insert_low.append(fundEOMentry)
                         # update cache for subsequent months
                         for m in newMonths:
                             if m["accountStart"] <= month["endDay"] <= m["endDay"]:
                                 cache.setdefault("positions_low", {}).setdefault(m["dateTime"], []).append(fundEOMentry)
                     else: #update database and cache with the calculated commitment, unfunded, and sleeve (asset lvl 3)
-                        query = f"UPDATE positions_low SET [{nameHier['Commitment']["local"]}] = ? , [{nameHier['Unfunded']["local"]}] = ?, [{nameHier["sleeve"]["local"]}] = ? WHERE [Source name] = ? AND [Target name] = ? AND [Date] = ?"
-                        inputs = (commitment,unfunded,fundList.get(fund),pool,fund,month["endDay"])
-                        update_low.append(inputs)
                         # update cache for all months referencing this date
                         for m in newMonths:
                             if m["accountStart"] <= month["endDay"] <= m["endDay"]:
@@ -5498,23 +5482,21 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
                 ownershipPerc = investorEOM/poolNAV * 100 if poolNAV != 0 else 0
                 monthPoolEntryInvestor["Ownership"] = ownershipPerc
                 poolOwnershipSum += ownershipPerc
-                inputs = [investorEOM,"Calculated_R", investor,pool, month["endDay"]]
-                ownershipAdjustDict[investor] = [monthPoolEntryInvestor,inputs, EOMcheck]
-            for data, inputs, EOMcheck in ownershipAdjustDict.values(): #run through to adjust ownerships if they did not total properly to 100%
+                ownershipAdjustDict[investor] = [monthPoolEntryInvestor, EOMcheck]
+            for data, EOMcheck in ownershipAdjustDict.values(): #run through to adjust ownerships if they did not total properly to 100%
                 data["Ownership"] = data["Ownership"] * 100 /  poolOwnershipSum if poolOwnershipSum != 0 and ownershipCorrect else data["Ownership"]
                 investorEOM = data["Ownership"] / 100 * poolNAV
                 data["NAV"] = investorEOM
                 monthPoolEntryInvestorList.append(data)
-                inputs[0] = investorEOM
-                inputs = tuple(inputs)
                 if len(EOMcheck) > 0: #only update the database for the investor if they have account balances
                     if round(float(EOMcheck[0].get(nameHier["Value"]["dynHigh"],0))) != round(investorEOM): #don't push an update if the values are the same
-                        update_high.append(inputs)
                         for m in newMonths:
-                            if m["accountStart"] <= month["endDay"] <= m["endDay"]:
+                            if m["accountStart"] <= month["endDay"] <= m["endDay"]: #access the both the current month and next month
                                 for lst in cache.get("positions_high", {}).get(m["dateTime"], []):
                                     if lst["Source name"] == investor and lst["Target name"] == pool and lst["Date"] == month["endDay"]:
+                                        #access the EOM current month and BOM next month as endDay hits both of those
                                         lst[nameHier["Value"]["dynHigh"]] = investorEOM
+                                        lst["Balancetype"] = "Calculated_R"
             for investorEntry in monthPoolEntryInvestorList:
                 investor = investorEntry["Investor"]
                 #final (3rd) investor level iteration to use the pool level results for the investor to calculate the fund level information
@@ -5563,22 +5545,14 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
                     calculations.append(monthFundInvestorEntry) #add fund level data to calculations for use in aggregation and report generation
             #end of months loop
         #commands to add database updates to the queues
-        if insert_low:
-            dbInputs = {"type" : "insert", "data" : ["positions_low", insert_low, "add"]}
-            dbQueue.put(dbInputs)
-        if update_low:
-            query = f"UPDATE positions_low SET [{nameHier['Commitment']['local']}] = ?, [{nameHier['Unfunded']['local']}] = ?, [{nameHier['sleeve']['local']}] = ? WHERE [Source name] = ? AND [Target name] = ? AND [Date] = ?"
-            dbInputs = {"type" : "update", "data" : [query, update_low]}
-            dbQueue.put(dbInputs)
-        if insert_high:
-            dbInputs = {"type" : "insert", "data" : ["positions_high", insert_high, "add"]}
-            dbQueue.put(dbInputs)
-        if update_high: #inputs = (investorEOM, investor,pool, month["endDay"])
-            query = f"UPDATE positions_high SET [{nameHier['Value']['dynHigh']}] = ?, [Balancetype] = ? WHERE [Source name] = ? AND [Target name] = ? AND [Date] = ?"
-            dbInputs = {"type" : "update", "data" : [query, update_high]}
-            dbQueue.put(dbInputs)
+        dynTables = {}
+        
+        for table in mainTableNames:
+            dynTables[table] = []
+            for month in cache.get(table, {}).keys():
+                dynTables[table].extend(cache.get(table, {}).get(month, []))
         statusQueue.put((pool,len(newMonths),"Completed")) #push completed status update to the main thread
-        return calculations
+        return calculations, dynTables
     except Exception as e: #halt operations for failure or force close/cancel
         statusQueue.put((pool,len(newMonths),"Failed"))
         print(f"Worker for {poolData.get("poolName")} failed.")
@@ -5591,7 +5565,7 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
             pass
         logging.error(e)
         print("\n")
-        return []
+        return [], {}
 def processPoolTransactions(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
     #Function to take all the information for one pool, calculate all relevant information, and return a list of the calculations
     #Inputs:
