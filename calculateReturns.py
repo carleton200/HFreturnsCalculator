@@ -34,8 +34,8 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtGui import QBrush, QColor, QDesktopServices
 from PyQt5.QtCore import Qt, QTimer, QAbstractTableModel, QModelIndex, pyqtSignal, QPoint, QUrl, QDate
 
-currentVersion = "1.1.6"
-demoMode = False
+currentVersion = "1.1.7"
+demoMode = True
 ownershipCorrect = True
 importInterval = relativedelta(hours=2)
 
@@ -171,7 +171,39 @@ def calculate_xirr(cash_flows, dates, guess : float = None):
         return None
 def descendingNavSort(input : dict):
     return sorted(input.keys(), key=lambda x: float(input.get(x,0.0)) * -1)
+def accountBalanceKey(accEntry):
+    try:
+        key = accEntry["Date"] + "_" + accEntry["Source name"] + "_" + accEntry["Target name"]
+        for accountField in ("Balancetype"):
+            key += accEntry.get(accountField, "") if accEntry.get(accountField, "") is not None else ""
+    except:
+        print(f"Failed for entry: {accEntry}")
+        raise
+    return key
+def annualizeITD(cumITD, monthCount):
+    if monthCount < 12: #ITD for less than a year is essentially YTD style
+        return (cumITD - 1) * 100
+    annualITD = (cumITD ** (12/monthCount)) - 1 if cumITD > 0 else -9.99
+    return annualITD * 100
 
+def calculateBackdate(transaction,noStartValue = False):
+    time = transaction.get(nameHier["Transaction Time"]["dynLow"])
+    monthDay = datetime.strptime(transaction.get("Date"), "%Y-%m-%dT%H:%M:%S").day
+    if noStartValue:
+        if time not in (None,"None") and time.lower() == "end of day":
+            backDate = 0 #"no start value and end of day"
+        else:
+            backDate = 1 #"no start value and not end of day"
+    elif time in (None,"None"):
+        if monthDay == 1:
+            backDate = 1 #"First day of month"
+        else:
+            backDate = 0#"No timing and not first day of month"
+    elif time.lower() == "end of day":
+        backDate = 0#"End of day"
+    else:
+        backDate = 1 #"Beginning of day"
+    return backDate
 #-----------------------------Database Manager ---------------------------#
 class DatabaseManager:
     """Thread-safe SQLite database manager.
@@ -656,6 +688,7 @@ class returnsApp(QWidget):
         if self.lastImportDB is None:
             print("No previous import found")
             #pull data is there is no data pulled yet
+            self.importButton.setEnabled(False)
             executor.submit(lambda: self.pullData())
         else:
             lastImportString = self.lastImportDB[0]["lastImport"]
@@ -665,12 +698,8 @@ class returnsApp(QWidget):
             if lastImport.month != now.month or now > (lastImport + importInterval):
                 print(f"Reimporting due to time elapsing. \n     Last import: {lastImport}\n    Current time: {now}")
                 #pull data if in a new month or 1 days have elapsed
+                self.importButton.setEnabled(False)
                 executor.submit(self.pullData)
-            elif self.lastImportDB[0]["lastImport"] != self.lastImportDB[0].get("lastCalculation", "None"):
-                #TODO: remove this functionality. Import should equal calculations and nothing else. Except maybe testing
-                self.earliestChangeDate = datetime.strptime(self.lastImportDB[0].get("changeDate"), "%B %d, %Y @ %I:%M %p")
-                self.processFunds()
-                self.pullData()
             else:
                 calculations = load_from_db("calculations")
                 self.processFunds()
@@ -678,10 +707,10 @@ class returnsApp(QWidget):
                     self.populate(self.calculationTable,calculations)
                     self.buildReturnTable()
                 else:
-                    self.pullData()
+                    executor.submit(self.pullData)
     def watchForUpdateTime(self):
         try:
-            print("Checking for update required.")
+            print("Checking if update required.")
             lastImportString = self.lastImportDB[0]["lastImport"]
             lastImport = datetime.strptime(lastImportString, "%B %d, %Y @ %I:%M %p")  
             now = datetime.now()
@@ -712,7 +741,7 @@ class returnsApp(QWidget):
         tranApp.show()
         self.tranApp = tranApp
     def cancelCalc(self, *_):
-        _ = updateStatus("DummyFail",99,lock=self.lock, status="Failed")
+        _ = updateStatus(self,"DummyFail",99, status="Failed")
         self.cancel = True
     def viewUnderlyingData(self,*_):
         row = self.returnsTable.currentRow()
@@ -733,6 +762,7 @@ class returnsApp(QWidget):
         except Exception as e:
             print(f"Error in data viewing window: {e} {traceback.format_exc()}")
     def exportCurrentTable(self,*_):
+        #excel export for the returns app excel export
         # helper to darken a 6-digit hex color by a given factor
         def darken_color(hex_color, factor=0.01):
             h = hex_color.strip("#")
@@ -807,9 +837,7 @@ class returnsApp(QWidget):
                             maxDepth   = max(len(self.sortHierarchy.checkedItems()),1) + 1
                             data_color = darken_color(data_color,depth/maxDepth/3 + 2/3)
 
-                        if r % 2 == 1:
-                            data_color = darken_color(data_color,0.93)
-                        header_color = darken_color(data_color, 0.9)
+                        header_color = data_color
                         data_fill   = PatternFill("solid", data_color, data_color)
                         header_fill = PatternFill("solid", header_color, header_color)
 
@@ -817,6 +845,7 @@ class returnsApp(QWidget):
                     # spread header fill across hierarchy cols
                     cell = ws.cell(row=r, column=1, value=row_name)
                     cell.fill = header_fill
+                    cell.font = Font(bold=True)
                     if dtype == "benchmark":
                         cell.font = Font(color="0000FF")
                     cell.alignment = Alignment(indent=level)
@@ -935,6 +964,8 @@ class returnsApp(QWidget):
         self.poolChangeDates = {"active" : False}
         executor.submit(self.pullData)
     def beginImport(self, *_):
+        self.importButton.setEnabled(False)
+        print("Initiating import...")
         executor.submit(self.pullData)
     def updateMonthOptions(self):
         start = self.dataTimeStart
@@ -1094,11 +1125,12 @@ class returnsApp(QWidget):
                                 complexOutput[rowKey]["Return"] = returnVal
                 if self.tableBtnGroup.checkedButton().text() == "Complex Table":
                     for rowKey in complexOutput:
-                        complexOutput[rowKey]["%"] = (complexOutput[rowKey].get("NAV",0.0) / complexOutput["Total##()##"].get("NAV",0.0) * 100 if complexOutput["Total##()##"]["NAV"] != 0 else 0 )if complexOutput[rowKey].get("NAV",0.0) != 0 else None
+                        if complexOutput[rowKey].get("NAV",0.0) != 0:
+                            complexOutput[rowKey]["%"] = complexOutput[rowKey].get("NAV",0.0) / complexOutput["Total##()##"].get("NAV",0.0) * 100 if complexOutput["Total##()##"]["NAV"] != 0 else 0
                 else:
                     for rowKey in output:
-                        output[rowKey]["%"] = (output[rowKey]["NAV"] / output["Total##()##"].get("NAV",0.0) * 100 if output["Total##()##"].get("NAV",0.0) != 0 else 0 ) if output[rowKey].get("NAV",0.0) != 0 else None
-                
+                        if output[rowKey].get("NAV",0.0) != 0:
+                            output[rowKey]["%"] = output[rowKey]["NAV"] / output["Total##()##"].get("NAV",0.0) * 100 if output["Total##()##"].get("NAV",0.0) != 0 else 0                
                 gui_queue.put(lambda: self.buildTableLoadingBar.setValue(5))
                 if cancelEvent.is_set(): #exit if new table build request is made
                     return
@@ -1132,27 +1164,23 @@ class returnsApp(QWidget):
         self.buildTableFuture = future
     def calculateComplexTable(self,monthOutput,complexOutput):
         endTime = datetime.strptime(self.dataEndSelect.currentText(),"%B %Y")
-        MTDtime = datetime.strftime(endTime,"%B %Y")
+        MTDtime = [datetime.strftime(endTime,"%B %Y"),]
         QTDtimes = [datetime.strftime(endTime - relativedelta(months=i),"%B %Y") for i in range(int((endTime.month)) % 3 if (int(endTime.month)) % 3 != 0 else 3)]
         YTDtimes = [datetime.strftime(endTime - relativedelta(months=i),"%B %Y") for i in range(int((endTime.month)) % 12 if (int(endTime.month)) % 12 != 0 else 12)]
         YR_times = {}
+        timeSections = {"MTD" : MTDtime, "QTD" : QTDtimes, "YTD" : YTDtimes}
         for yr in yearOptions:
             YR_times[yr] = [datetime.strftime(endTime - relativedelta(months=i),"%B %Y") for i in range(12 * yr)]
         for level in monthOutput.keys():
-            if MTDtime in monthOutput[level].keys():
-                complexOutput[level]["MTD"] = monthOutput[level][MTDtime]
-            if all(month in monthOutput[level].keys() for month in QTDtimes):
-                complexOutput[level]["QTD"] = 1
-                for month in QTDtimes:
-                    complexOutput[level]["QTD"] *= (1 + float(monthOutput[level][month]) / 100)
-                complexOutput[level]["QTD"] = (complexOutput[level]["QTD"] -1) * 100
-            if all(month in monthOutput[level].keys() for month in YTDtimes):
-                complexOutput[level]["YTD"] = 1
-                for month in YTDtimes:
-                    complexOutput[level]["YTD"] *= (1 + float(monthOutput[level][month]) / 100)
-                complexOutput[level]["YTD"] = (complexOutput[level]["YTD"] -1) * 100
+            for timeFrame, monthOpts in timeSections.items():
+                complexOutput[level][timeFrame] = 1
+                for monthO in monthOpts:
+                    complexOutput[level][timeFrame] *= (1 + float(monthOutput[level][monthO]) / 100) if monthO in monthOutput[level] else 1
+                complexOutput[level][timeFrame] = (complexOutput[level][timeFrame] - 1) * 100
             for yearKey in YR_times.keys():
-                if all(month in monthOutput[level].keys() for month in YR_times[yearKey]):
+                if (all(month in monthOutput[level].keys() for month in YR_times[yearKey]) and 
+                    not any(complexOutput[level].get("NAV",1) == 0 and float(monthOutput[level][month]) == 0 for month in YR_times[yearKey])):
+                    #dont calculate if it includes empty fund times
                     headerKey = f"{yearKey}YR"
                     complexOutput[level][headerKey] = 1
                     for month in YR_times[yearKey]:
@@ -1161,7 +1189,7 @@ class returnsApp(QWidget):
             try:
                 if monthOutput[level].get("dataType","") != "benchmark":
                     monthCount = 0
-                    if MTDtime in monthOutput[level].keys():
+                    if MTDtime[0] in monthOutput[level].keys():
                         #only runs ITD if it is a current fund (MTD month exists)
                         ITDmonths = list(monthOutput[level].keys())
                         ITDmonths = [m for m in ITDmonths if m != "dataType"]
@@ -1173,10 +1201,19 @@ class returnsApp(QWidget):
                             #ITDmonths = ITDmonths[1:] #remove first month?? 
                             complexOutput[level]["ITD"] = 1
                             for month in ITDmonths:
-                                if month != "dataType" and datetime.strptime(month,"%B %Y") <= datetime.strptime(self.dataEndSelect.currentText(),"%B %Y"):
+                                if (month != "dataType" and datetime.strptime(month,"%B %Y") <= datetime.strptime(self.dataEndSelect.currentText(),"%B %Y")):
+                                    #and not (complexOutput[level].get("NAV",1) == 0 and float(monthOutput[level][month]) == 0)): 
+                                    #skip if there is no value and no return, should mean the fund was empty so it should not factor in to ITD
                                     monthCount += 1
-                                    complexOutput[level]["ITD"] *= (1 + float(monthOutput[level][month]) / 100 )
-                            complexOutput[level]["ITD"] = ((complexOutput[level]["ITD"] ** (12/int(monthCount)) ) - 1 ) * 100 if complexOutput[level]["ITD"] > 0 else -1 * ((abs(complexOutput[level]["ITD"]) ** (1/int(monthCount)) ) - 1)* 100
+                                    if (1 + float(monthOutput[level][month]) / 100 ) < 0:
+                                        #if a negative value breaks the ITD calculation, flag it with -999%
+                                        complexOutput[level]["ITD"] = -1.999 #displays -999% as a flag
+                                        monthCount = 14 #results in annualization checking for negative
+                                        break
+                                    else:
+                                        complexOutput[level]["ITD"] *= (1 + float(monthOutput[level][month]) / 100 )
+                            complexOutput[level]["ITD"] = annualizeITD(complexOutput[level]["ITD"],monthCount)
+                            
                         else:
                             #ITD is just the previous month if no more months are found
                             complexOutput[level]["ITD"] = monthOutput[level][MTDtime]
@@ -1657,7 +1694,7 @@ class returnsApp(QWidget):
             #iterate through the freshly imported rows, check if they match with the previous data. 
             #inputs: table name, rows of newly imported data
             #outputs: newImportedRows, oldDatabaseRows, self.earliestChangeDate is updated if a new earliest change date is found
-            def buildKey(record):
+            def buildKey(record): #TODO: check for transactions of the same value in the same source to target. Could ignore new ones
                 value = record[nameHier["Value"]["dynHigh"] if "position" in table else nameHier["CashFlow"]["dynLow"]]
                 value = 0 if value is None or value == "None" else value
                 key = (
@@ -1680,6 +1717,10 @@ class returnsApp(QWidget):
                 newRecords = set()
                 earliest = None
                 for rec in rows:
+                    poolTag = "Target name" if "high" in table else "Source name"
+                    if not any(rec.get(poolTag) == pool.get('poolName') for pool in self.pools):
+                        continue #dont allow the import of non pool related data yet 
+                        #TODO: eventually build to handle these skips where it would be investor directly to a fund
                     value = rec[nameHier["Value"]["dynHigh"] if "position" in table else nameHier["CashFlow"]["dynLow"]]
                     value = 0 if value is None or value == "None" else value
                     key = buildKey(rec)
@@ -1695,17 +1736,17 @@ class returnsApp(QWidget):
                     differences.append({"Source name" : key[0],"Target name" : key[1],nameHier["Value"]["dynLow"] : key[2],"Date" : key[3]})
                     # parse the date for comparison
                     dt = datetime.strptime(rec['Date'], "%Y-%m-%dT%H:%M:%S")
-                    if earliest is None or dt < earliest:
-                        earliest = dt
-                    poolTag = "Target name" if "high" in table else "Source name"
-                    if dt < self.poolChangeDates.get(rec.get(poolTag),datetime.now()): 
-                        self.poolChangeDates[rec.get(poolTag)] = dt # sets each pool value to earliest and instantiates if not existing
+                    if earliest is None or dt < earliest: #sets overall values to earliest
+                        earliest = dt.replace(day=1)
+                    with earlyChangeDateLock:
+                        if dt < self.poolChangeDates.get(rec.get(poolTag),datetime.now()): 
+                            self.poolChangeDates[rec.get(poolTag)] =  dt.replace(day=1) # sets each pool value to earliest and instantiates if not existing
                 for oldRec in oldRecords:
                     #find if a new record no longer exists in the old. Means old data is altered and must be redone from that timeframe
                     if oldRec not in newRecords: 
                         dt = datetime.strptime(oldRec[3], "%Y-%m-%dT%H:%M:%S")
                         if earliest is None or dt < earliest:
-                            earliest = dt
+                            earliest = dt.replace(day=1)
 
                 with earlyChangeDateLock:
                     if earliest and earliest < self.earliestChangeDate:
@@ -1747,7 +1788,7 @@ class returnsApp(QWidget):
             calculationsTest = load_from_db("calculations")
             if calculationsTest != []:
                 skipCalculations = True
-                self.poolChangeDates["active"] = True
+                self.poolChangeDates = {"active" : True}
                 self.foundRetroChange = False
             else:
                 skipCalculations = False
@@ -1987,6 +2028,8 @@ class returnsApp(QWidget):
                                     print(f"Error: {response.json()}")
                                 except:
                                     pass
+                        if len(rows) == 0: #prevents bad calculations from missing data. Appears if partial re-calculation but new data is corrupted
+                            raise RuntimeError("API import did not function properly. Try again.")
                         tables = checkNewestData(tableNameKey[i][j],rows)
                         with completeLock:
                             self.complete += 1
@@ -1995,6 +2038,8 @@ class returnsApp(QWidget):
                         return tableNameKey[i][j],tables
                     try:
                         accountTranTableFutures.append(APIexecutor.submit(bgPullData))
+                    except RuntimeError:
+                        raise
                     except Exception as e:
                         print(f"Failure to run background thread API call: {e} \n {e.args}")
             fundPayload = {
@@ -2113,21 +2158,19 @@ class returnsApp(QWidget):
                 else:
                     mergedTable = []
                     poolTag = "Target name" if "high" in table else "Source name"
+                    if not self.poolChangeDates.get("active",False): #if inactive, use generic starting date
+                        changeDate = self.earliestChangeDate
                     for rec in tableData["new"]:
                         pool = rec[poolTag]
                         if self.poolChangeDates.get("active",False): #if active, specifiy date by pool
                             changeDate = self.poolChangeDates.get(pool,datetime.now())
-                        else:
-                            changeDate = self.earliestChangeDate
-                        if changeDate >= datetime.strptime(rec["Date"], "%Y-%m-%dT%H:%M:%S"): #new data past the editing date
+                        if changeDate < datetime.strptime(rec["Date"], "%Y-%m-%dT%H:%M:%S"): #new data past the editing date
                             mergedTable.append(rec)
                     for rec in tableData["old"]:
                         pool = rec[poolTag]
                         if self.poolChangeDates.get("active",False): #if active, specifiy date by pool
                             changeDate = self.poolChangeDates.get(pool,datetime.now())
-                        else:
-                            changeDate = self.earliestChangeDate
-                        if changeDate < datetime.strptime(rec["Date"], "%Y-%m-%dT%H:%M:%S"): #old data before the editing date to be kept
+                        if changeDate >= datetime.strptime(rec["Date"], "%Y-%m-%dT%H:%M:%S"): #old data before the editing date to be kept
                             mergedTable.append(rec)
                     importedTables[table] = mergedTable
             wait(self.apiFutures)
@@ -2140,14 +2183,12 @@ class returnsApp(QWidget):
             gui_queue.put(lambda: self.apiLoadingBar.setValue(100))
 
 
-            currentTime = datetime.now().strftime("%B %d, %Y @ %I:%M %p")
-            changeDate = datetime.strftime(self.earliestChangeDate, "%B %d, %Y @ %I:%M %p")
-            save_to_db(None,None,query="UPDATE history SET [lastImport] = ?, [changeDate] = ?", inputs=(currentTime,changeDate), action="replace", lock=self.lock)
-            self.lastImportDB[0]["lastImport"] = currentTime
-            self.lastImportDB[0]["changeDate"] = changeDate
-            self.lastImportLabel.setText(f"Last Data Import: {currentTime}")
+            self.apiCallTime = datetime.now().strftime("%B %d, %Y @ %I:%M %p")
             gui_queue.put(lambda: self.apiLoadingBarBox.setVisible(False))
+            gui_queue.put(lambda: self.calculationLoadingBox.setVisible(True)) #secondary early change to make it appear faster if running slow
             gui_queue.put(lambda: self.calculateReturn(importedTables))
+        except RuntimeError as e:
+            gui_queue.put(lambda error = e: QMessageBox.warning(self,"Error Importing Data", f"Error pulling data from dynamo: {error} , {error.args}"))
         except Exception as e:
             print(traceback.format_exc())
             trace = traceback.format_exc() if traceback.format_exc() and not demoMode else ""
@@ -2181,24 +2222,19 @@ class returnsApp(QWidget):
                 if self.earliestChangeDate > datetime.now() and not noCalculations:
                     #if no new data exists, use old calculations
                     calculations = load_from_db("calculations")
-                    keys = []
-                    for row in calculations:
-                        for key in row.keys():
-                            if key not in keys:
-                                keys.append(key)
+                    keys = list({key for row in calculations for key in row.keys()})
                     gui_queue.put( lambda: self.populate(self.calculationTable,calculations,keys = keys))
                     gui_queue.put( lambda: self.buildReturnTable())
                     gui_queue.put(lambda: self.calculationLoadingBox.setVisible(False))
                     gui_queue.put(lambda: self.importButton.setEnabled(True))
-                    apiPullTime = self.lastImportDB[0].get("lastImport")
-                    save_to_db(None,None,query="UPDATE history SET [lastCalculation] = ?", inputs=(apiPullTime,), action="replace", lock=self.lock)
-                    self.lastImportDB[0]["lastCalculation"] = apiPullTime
+                    save_to_db(None,None,query="UPDATE history SET [lastImport] = ?", inputs=(self.apiCallTime,), action="replace", lock=self.lock)
+                    self.lastImportLabel.setText(f"Last Data Import: {self.apiCallTime}")
+                    self.lastImportDB[0]['lastImport'] = self.apiCallTime
                     print("Calculations skipped.")
                     return
                 
                 # proces pool section----------------------------------------------------------------
-                save_to_db("progress",None,action="reset", lock=self.lock)
-                self.initializeProgressDB()
+                self.workerProgress = {}
 
                 # ------------------- build data cache ----------------------
                 tables = ["positions_low", "transactions_low", "positions_high", "transactions_high"]
@@ -2211,30 +2247,35 @@ class returnsApp(QWidget):
                             poolKey = row.get("Source name")
                         elif table in ("positions_high", "transactions_high"):
                             poolKey = row.get("Target name")
-                        else:
+                        elif table == "calculations":
                             poolKey = row.get("Pool")
                         if poolKey is None:
                             continue
-                        for m in months:
-                            if table == "calculations":
-                                if row.get("dateTime") != m["dateTime"]:
-                                    continue
-                            else:
+                        if table == "calculations":
+                            cache.setdefault(poolKey, {}).setdefault(table, {}).setdefault(row["dateTime"], []).append(row)
+                        else:
+                            for m in months: #find the month the account balance or transaction belongs in
                                 start = m["accountStart"] if table in ("positions_low", "positions_high") else m["tranStart"]
                                 date = row.get("Date")
                                 if not (start <= date <= m["endDay"]):
                                     continue
-                            cache.setdefault(poolKey, {}).setdefault(table, {}).setdefault(m["dateTime"], []).append(row)
-                
+                                cache.setdefault(poolKey, {}).setdefault(table, {}).setdefault(m["dateTime"], []).append(row)
+                self.cachedDynTables = {table : [] for table in mainTableNames}
                 self.cachedPoolCalculations = []
                 if self.poolChangeDates.get("active",False): #iterate through pools that have custom calculation dates
                     runPools = []
                     for idx, pool in enumerate(self.pools):
-                        if pool.get("poolName") in self.poolChangeDates or idx == 0: #if there is a date to calculate from. Needs at least one pool to run (idx 0)
+                        if pool.get("poolName") in self.poolChangeDates or (idx == 0 and not any(pool.get("poolName") in self.poolChangeDates for pool in self.pools)): 
+                            #if there is a date to calculate from. Needs at least one pool to run (idx 0) if none
                             runPools.append(pool)
                         else: #otherwise, get the calculations and avoid building a worker thread for nothing
-                            for month in cache.get(pool.get("poolName"),{}).get("calculations", {}):
-                                self.cachedPoolCalculations.extend(cache.get(pool.get("poolName")).get("calculations", {}).get(month)) #add all calculations for the pool
+                            self.cachedPoolCalculations.extend([calcRow for month in  cache.get(pool.get("poolName"),{}).get("calculations", {}) for calcRow in cache.get(pool.get("poolName"),{}).get("calculations", {}).get(month)])
+                            for table in mainTableNames: #add the dynTable data to maintain the pool data and add it again after calculations
+                                if "positions_" in table: #remove the duplicate account balances (EOM = next BOM)
+                                    uniqueBalances = {accountBalanceKey(dynRow): dynRow for month in  cache.get(pool.get("poolName"),{}).get(table, {}) for dynRow in cache.get(pool.get("poolName"),{}).get(table, {}).get(month)}
+                                    self.cachedDynTables[table].extend([entry for _,entry in uniqueBalances.items()])
+                                else:
+                                    self.cachedDynTables[table].extend([dynRow for month in  cache.get(pool.get("poolName"),{}).get(table, {}) for dynRow in cache.get(pool.get("poolName"),{}).get(table, {}).get(month)])
                     self.pools = runPools #only run calculatable pools
                 for idx, pool in enumerate(self.pools):
                     self.pools[idx]["cache"] = cache.get(pool.get("poolName"))
@@ -2252,7 +2293,7 @@ class returnsApp(QWidget):
                                 newMonths.append(month)
                     else:
                         newMonths = months
-                    _ = updateStatus(pool.get("poolName"),len(newMonths),self.lock,status="Initialization")
+                    _ = updateStatus(self, pool.get("poolName"),len(newMonths), status="Initialization")
                 def initializeWorkerPool():
                     self.manager = Manager()
                     self.lock = self.manager.Lock()
@@ -2285,20 +2326,6 @@ class returnsApp(QWidget):
                 # maybe also:
                 print(traceback.format_exc())
         executor.submit(initalizeCalc)
-    def initializeProgressDB(self):
-        with self.lock:
-            conn = sqlite3.connect(DATABASE_PATH)
-            c = conn.cursor()
-            c.execute("""
-                CREATE TABLE IF NOT EXISTS progress (
-                    pool STRING PRIMARY KEY,
-                    completed INTEGER NOT NULL,
-                    total INTEGER NOT NULL,
-                    status STRING NOT NULL
-                )
-            """)
-            conn.commit()
-            conn.close()
     def watch_db(self):
         conn = sqlite3.connect(DATABASE_PATH)
         c = conn.cursor()
@@ -2308,17 +2335,17 @@ class returnsApp(QWidget):
                 count += 1 #count to allow the loading bar to take the lock and update
                 vars = self.workerStatusQueue.get()
                 try:
-                    failed = updateStatus(vars[0],vars[1],self.lock,status=vars[2],connection=conn)
+                    failed = updateStatus(self, vars[0],vars[1],status=vars[2])
                     if failed:
                         self.calcFailedFlag = failed
                 except Exception as e:
                     trace = traceback.format_exc()
                     print(f"Error occured while attempting to run background worker status update: {e}. \n traceback: \n {trace}")
             try:
-                with self.lock:
-                    c.execute("SELECT * FROM progress")
-                    cols = [d[0] for d in c.description]
-                    statusLines = [dict(zip(cols, row)) for row in c.fetchall()]
+                if self.workerProgress == {}:
+                    QMessageBox.warning(self,"Calculation Issue", "Progress tracking has been deleted early. Calculations are being halted. This may result from multi clicking 'Reimport Data' before it can process.")
+                    self.workerProgress = {"DummyFail" : {'pool' : 'dummyFail', 'completed' : 0, 'total' : 99, 'status' : "Failure"}}
+                statusLines = [entry for _, entry in self.workerProgress.items()]
                 failed = []
                 completed = []
                 complete = 0
@@ -2348,50 +2375,6 @@ class returnsApp(QWidget):
                 print(traceback.format_exc())
                 pass
             time.sleep(calculationPingTime * 0.01)
-        conn.close()
-    def updateWorkerDB(self):
-        try:
-            time.sleep(8) #give time for calculations to be saved first in other thread
-            conn = sqlite3.connect(DATABASE_PATH)
-            cursor = conn.cursor()
-        except:
-            print("connection failed")
-        dbFailure = False
-        maxFails = 4
-        print("Initiating background database updates...")
-        while True:
-            try:
-                results = self.workerDBqueue.get_nowait()  # non-blocking, safe for fixed queues
-                data = results.get("data")
-                failCount = 0
-                while True:
-                    try:
-                        if results.get("type") == "insert":
-                            save_to_db(data[0], data[1], action=data[2], connection=conn, lock=self.lock)
-                            break
-                        elif results.get("type") == "update":
-                            with self.lock:
-                                cursor.executemany(data[0], data[1])
-                                conn.commit()
-                                break
-                        else:
-                            print(f"\n\n Database data was not handled correctly: {results} \n\n")
-                            break
-                    except:
-                        failCount += 1
-                        print(f"Error updating database. Attempt {failCount} of {maxFails}")
-                        if failCount > maxFails:
-                            print("Error occured in delayed database updates. Calculation date will be reset")
-                            dbFailure = True
-                            break
-            except queue.Empty:
-                break  # all done; queue drained
-            except Exception as e:
-                print(f"Error occurred updating database from worker threads: {e}, {e.args}")
-        print("Background database updates complete")
-        if dbFailure: #will force a recalculation on the next opening since the database won't be accurate
-            save_to_db(None,None,query="UPDATE history SET [lastCalculation] = ?", inputs=("Database Failure",), action="replace", lock=self.lock)
-            self.lastImportDB[0]["lastCalculation"] = "Database Failure"
         conn.close()
     def update_from_queue(self):
         if self.queue:
@@ -2429,7 +2412,6 @@ class returnsApp(QWidget):
     def calcCompletion(self):
         try:
             print("Checking worker completion...")
-            #executor.submit(self.updateWorkerDB) #removing this functionality
             self.pool.join()
             print("All workers finished")
             
@@ -2442,29 +2424,30 @@ class returnsApp(QWidget):
                     for table in dynTables:
                         allDynTables[table].extend(dynTables[table])
                 except Exception as e:
+                    print(traceback.format_exc())
                     print(f"Error appending calculations: {e}")
             calculations.extend(self.cachedPoolCalculations)
-            keys = []
-            for row in calculations:
-                for key in row.keys():
-                    if key not in keys:
-                        keys.append(key)
+            for table in dynTables: #add dynamo table data in for pools that were not calculated again
+                allDynTables[table].extend(self.cachedDynTables[table])
+            keys = list({key for row in calculations for key in row.keys()})
             print("Updating database...")
             save_to_db("calculations",calculations, keys=keys, lock=self.lock)
             for table in mainTableNames:
                 save_to_db(table, allDynTables[table], lock=self.lock)
             print("Database updated.")
             try:
-                apiPullTime = self.lastImportDB[0].get("lastImport")
-                save_to_db(None,None,query="UPDATE history SET [lastCalculation] = ?", inputs=(apiPullTime,), action="replace", lock=self.lock)
-            except:
-                print("failed to update last calculation time")
+                save_to_db(None,None,query="UPDATE history SET [lastImport] = ?", inputs=(self.apiCallTime,), action="replace", lock=self.lock)
+                self.lastImportLabel.setText(f"Last Data Import: {self.apiCallTime}")
+                self.lastImportDB[0]['lastImport'] = self.apiCallTime
+            except Exception as e:
+                QMessageBox.warning(self,"Warning",f"Failed to update internal data for last import time. Data will likely reimport soon: {e} {e.args}")
+                print(f"failed to update last import time {e} {e.args}")
             gui_queue.put( lambda: self.populate(self.calculationTable,calculations,keys = keys))
             gui_queue.put( lambda: self.buildReturnTable())
             gui_queue.put(lambda: self.calculationLoadingBox.setVisible(False))
             gui_queue.put(lambda: self.importButton.setEnabled(True))
             print("Calculations complete.")
-            save_to_db("progress",None,action="reset", lock=self.lock)
+            self.workerProgress = {}
         except:
             gui_queue.put(lambda: self.calculationLoadingBox.setVisible(False))
             gui_queue.put(lambda: self.importButton.setEnabled(True))
@@ -2605,6 +2588,10 @@ class returnsApp(QWidget):
             # — vertical header: only show the fund, stash the code —
             hdr = QTableWidgetItem(fund_label)
             hdr.setData(Qt.UserRole, code)
+            if dataType not in  ("Total Fund","benchmark"):
+                font = hdr.font()
+                font.setBold(True)
+                hdr.setFont(font)
             if bg:
                 hdr.setBackground(QBrush(bg))
                 if dataType == "benchmark":
@@ -2983,6 +2970,7 @@ class transactionApp(QWidget):
         if lastImportDB is None:
             print("No previous import found")
             #pull data is there is no data pulled yet
+            self.importButton.setEnabled(False)
             executor.submit(lambda: self.pullData())
         else:
             lastImportString = lastImportDB[0]["lastImport"]
@@ -2992,6 +2980,7 @@ class transactionApp(QWidget):
             if lastImport.month != now.month or now > (lastImport + relativedelta(hours=2)):
                 print(f"Reimporting due to two hour data gap. \n     Last import: {lastImport}\n    Current time: {now}")
                 #pull data if in a new month or 1 days have elapsed
+                self.importButton.setEnabled(False)
                 executor.submit(self.pullData)
             elif lastImportDB[0]["lastImport"] != lastImportDB[0].get("lastCalculation", "None"):
                 self.earliestChangeDate = datetime.strptime(lastImportDB[0].get("changeDate"), "%B %d, %Y @ %I:%M %p")
@@ -3006,7 +2995,7 @@ class transactionApp(QWidget):
                 else:
                     self.calculateReturn()
     def cancelCalc(self, *_):
-        _ = updateStatus("DummyFail",99,lock=self.lock, status="Failed", db=TRAN_DATABASE_PATH)
+        _ = updateStatus(self,"DummyFail",99, status="Failed")
         self.cancel = True
     def viewUnderlyingData(self,*_):
         row = self.returnsTable.currentRow()
@@ -4181,8 +4170,7 @@ class transactionApp(QWidget):
                     return
                 
                 # proces pool section----------------------------------------------------------------
-                save_to_db("progress",None,action="reset", db=TRAN_DATABASE_PATH)
-                self.initializeProgressDB()
+                self.workerProgress = {}
 
                 # ------------------- build data cache ----------------------
                 tables = [ "transactions_low", "transactions_high", "calculations"]
@@ -4224,7 +4212,7 @@ class transactionApp(QWidget):
                                 newMonths.append(month)
                     else:
                         newMonths = months
-                    _ = updateStatus(pool.get("poolName"),len(newMonths),threading.Lock(),status="Initialization", db=TRAN_DATABASE_PATH)
+                    _ = updateStatus(self,pool.get("poolName"),len(newMonths),status="Initialization")
                 def initializeWorkerPool():
                     self.manager = Manager()
                     self.lock = self.manager.Lock()
@@ -4257,19 +4245,6 @@ class transactionApp(QWidget):
                 # maybe also:
                 print(traceback.format_exc())
         executor.submit(initalizeCalc)
-    def initializeProgressDB(self):
-        conn = sqlite3.connect(TRAN_DATABASE_PATH)
-        c = conn.cursor()
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS progress (
-                pool STRING PRIMARY KEY,
-                completed INTEGER NOT NULL,
-                total INTEGER NOT NULL,
-                status STRING NOT NULL
-            )
-        """)
-        conn.commit()
-        conn.close()
     def watch_db(self):
         conn = sqlite3.connect(TRAN_DATABASE_PATH)
         c = conn.cursor()
@@ -4279,17 +4254,14 @@ class transactionApp(QWidget):
                 count += 1 #count to allow the loading bar to take the lock and update
                 vars = self.workerStatusQueue.get()
                 try:
-                    failed = updateStatus(vars[0],vars[1],self.lock,status=vars[2],connection=conn, db=TRAN_DATABASE_PATH)
+                    failed = updateStatus(self, vars[0],vars[1],status=vars[2])
                     if failed:
                         self.calcFailedFlag = failed
                 except Exception as e:
                     trace = traceback.format_exc()
                     print(f"Error occured while attempting to run background worker status update: {e}. \n traceback: \n {trace}")
             try:
-                with self.lock:
-                    c.execute("SELECT * FROM progress")
-                    cols = [d[0] for d in c.description]
-                    statusLines = [dict(zip(cols, row)) for row in c.fetchall()]
+                statusLines = [entry for _, entry in self.workerProgress.items()]
                 failed = []
                 completed = []
                 complete = 0
@@ -4424,7 +4396,7 @@ class transactionApp(QWidget):
             gui_queue.put(lambda: self.calculationLoadingBox.setVisible(False))
             gui_queue.put(lambda: self.importButton.setEnabled(True))
             print("Calculations complete.")
-            save_to_db("progress",None,action="reset", lock=self.lock, db=TRAN_DATABASE_PATH)
+            self.workerProgress = {}
         except:
             gui_queue.put(lambda: self.calculationLoadingBox.setVisible(False))
             gui_queue.put(lambda: self.importButton.setEnabled(True))
@@ -4823,6 +4795,7 @@ class exportWindow(QWidget):
         main_layout.addWidget(self.confirm_btn, alignment=Qt.AlignRight)
 
     def export_to_excel(self):
+        #Export to excel function for the calculations view page
         # Build WHERE clause from filters
         filters = []
         values = []
@@ -5054,37 +5027,19 @@ def load_from_db(table, condStatement = "",parameters = None, cursor = None, loc
                 cur.close()
         except:
             pass
-def updateStatus(pool,totalLoops, lock, status = "Working", connection = None, db = None):
-    failure = False
-    dbPath = db if db else DATABASE_PATH
+def updateStatus(self, pool,totalLoops, status = "Working"):
     try:
-        
-        with lock:
-            if connection is None:
-                conn = sqlite3.connect(dbPath)
-            else:
-                conn = connection
-            c = conn.cursor()
-
-            c.execute("SELECT status FROM progress WHERE status = ?",("Failed",))
-            failed = c.fetchall()
-            if len(failed) > 0:
-                failure = True
-            # Update or insert progress for this worker
-            if status in ("Working","Initialization") or pool == "DummyFail":
-                c.execute("""
-                    INSERT INTO progress (pool, completed, total,status)
-                    VALUES (?, -1, ?,?)
-                    ON CONFLICT(pool) DO UPDATE SET completed = completed + 1, status = ?
-                """, (pool, totalLoops,status,status))
-            elif status == "Completed":
-                c.execute("UPDATE progress SET completed = completed + 1, status = ? WHERE pool = ?", (status,pool))
-            else:
-                c.execute("UPDATE progress SET status = ? WHERE pool = ?", (status,pool))
-
-            conn.commit()
-            if connection is None:
-                conn.close()
+        failure = any(self.workerProgress.get(progKey).get("status") == "Failed" for progKey in self.workerProgress)
+        if status == "Initialization":
+            self.workerProgress[pool] = {'pool' : pool, 'completed' : -1, 'total' : totalLoops, 'status' : status}
+        elif status == "Working":
+            self.workerProgress[pool]["completed"] += 1
+            self.workerProgress[pool]["status"] = status
+        elif status == "Completed":
+            self.workerProgress[pool]["completed"] += 1
+            self.workerProgress[pool]["status"] = status
+        else:
+            self.workerProgress[pool]["status"] = status
     except Exception as e:
         print(f"Error updating status: {e}")
     return failure
@@ -5104,6 +5059,11 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
         earliestChangeDate = poolData.get("earliestChangeDate") #earliest date for new data from last API pull
         pool = poolData.get("poolName")
         cache = poolData.get("cache") #dataset of all relevant transactions and account balances for the pool
+        if not cache:
+            print(f"No data found for pool {pool}, so skipping calculations")
+            logging.warning(f"No data found for pool {pool}, so skipping calculations")
+            statusQueue.put((pool,1,"Completed")) #allows the completion of calculations
+            return [], {}
         newMonths = []
 
         if not noCalculations: #if there are calculations, find all months before the data pull, and then pull those calculations
@@ -5122,7 +5082,7 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
             statusQueue.put((pool,len(newMonths),"Working")) #puts to queue to update loading bar status. Allows computations to continue
             if failed.value: #if other workers failed, halt the process
                 print(f"Exiting worker {pool} due to other failure...")
-                return []
+                return [], {}
             totalDays = int(datetime.strptime(month["endDay"], "%Y-%m-%dT%H:%M:%S").day  - datetime.strptime(month["tranStart"], "%Y-%m-%dT%H:%M:%S").day) + 1 #total days in month for MD den
             poolFunds = cache.get("positions_low", {}).get(month["dateTime"], []) #account balances for the pool
             #find MD denominator for each investor
@@ -5276,6 +5236,8 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
                             NAV += float(entry.get(nameHier["Value"]["dynLow"])) #adds values to the first index
                     endEntry[0][nameHier["Value"]["dynLow"]] = str(NAV)
                 startEntry = startEntry[0]
+                if startEntry.get(nameHier["Value"]["dynLow"]) == 0:
+                    noStartValue = True
                 endEntry = endEntry[0]
                 fundTransactions = allPoolTransactions.get(fund,[]) 
                 cashFlowSum = 0
@@ -5310,7 +5272,7 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
                     if endEntry[nameHier["Value"]["dynLow"]] in (None, "None"):
                         endEntry[nameHier["Value"]["dynLow"]] = 0
                     if createFinalValue:
-                        #implies there is no gain (cash account)
+                        #implies there is no gain (Cash account with no interest?)
                         endEntry[nameHier["Value"]["dynLow"]] = float(startEntry[nameHier["Value"]["dynLow"]]) + cashFlowSum    
                     fundGain = (float(endEntry[nameHier["Value"]["dynLow"]]) - float(startEntry[nameHier["Value"]["dynLow"]]) - cashFlowSum)
                     fundMDdenominator = float(startEntry[nameHier["Value"]["dynLow"]]) + weightedCashFlow
@@ -5409,7 +5371,20 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
                 tempInvestorDict = {}
                 startEntry_cache = investorStartEntries.get(investor)
                 if startEntry_cache: #use starting entry
-                    startEntry = startEntry_cache[0]
+                    if len(startEntry_cache) > 1:
+                        # Choose the balance where Balancetype is the highest of the list, otherwise just the first
+                        type_precedence = ["Calculated_R", "Actual", "Adjusted"] # Define type precedence
+                        # Sort entries by type precedence and then fall back to first
+                        def type_rank(entry):
+                            btype = entry.get("Balancetype", "")
+                            if btype in type_precedence:
+                                return type_precedence.index(btype)
+                            else:
+                                return len(type_precedence)
+                        # Get the entry with the minimum rank
+                        startEntry = sorted(startEntry_cache, key=type_rank)[0]
+                    else:
+                        startEntry = startEntry_cache[0]
                     noStartValue = False
                 else: #if no starting entry, take necessary variables and zero out the value
                     end_cache = investorEndEntries.get(investor)
@@ -5482,27 +5457,24 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
                 ownershipPerc = investorEOM/poolNAV * 100 if poolNAV != 0 else 0
                 monthPoolEntryInvestor["Ownership"] = ownershipPerc
                 poolOwnershipSum += ownershipPerc
-                ownershipAdjustDict[investor] = [monthPoolEntryInvestor, EOMcheck]
-            for data, EOMcheck in ownershipAdjustDict.values(): #run through to adjust ownerships if they did not total properly to 100%
-                data["Ownership"] = data["Ownership"] * 100 /  poolOwnershipSum if poolOwnershipSum != 0 and ownershipCorrect else data["Ownership"]
-                investorEOM = data["Ownership"] / 100 * poolNAV
-                data["NAV"] = investorEOM
-                monthPoolEntryInvestorList.append(data)
+                monthPoolEntryInvestorList.append([monthPoolEntryInvestor, EOMcheck])
+            for investorEntry, EOMcheck in monthPoolEntryInvestorList:
+                investor = investorEntry["Investor"]
+                investorEOM = investorEntry["NAV"]
+                investorOwnership = investorEntry["Ownership"] * 100 /  poolOwnershipSum if poolOwnershipSum != 0 and ownershipCorrect else investorEntry["Ownership"]
                 if len(EOMcheck) > 0: #only update the database for the investor if they have account balances
+                    #update cache for the following month's calculations
                     if round(float(EOMcheck[0].get(nameHier["Value"]["dynHigh"],0))) != round(investorEOM): #don't push an update if the values are the same
                         for m in newMonths:
                             if m["accountStart"] <= month["endDay"] <= m["endDay"]: #access the both the current month and next month
                                 for lst in cache.get("positions_high", {}).get(m["dateTime"], []):
                                     if lst["Source name"] == investor and lst["Target name"] == pool and lst["Date"] == month["endDay"]:
                                         #access the EOM current month and BOM next month as endDay hits both of those
-                                        lst[nameHier["Value"]["dynHigh"]] = investorEOM
+                                        lst[nameHier["Value"]["dynHigh"]] = investorEOM #this does not represent adjusted values
                                         lst["Balancetype"] = "Calculated_R"
-            for investorEntry in monthPoolEntryInvestorList:
-                investor = investorEntry["Investor"]
                 #final (3rd) investor level iteration to use the pool level results for the investor to calculate the fund level information
                 for fundEntry, fundStartValue in fundEntryList:
                     fund = fundEntry["Fund"]
-                    investorOwnership = investorEntry["Ownership"] # * 100 /  poolOwnershipSum if poolOwnershipSum != 0 and ownershipCorrect else investorEntry["Ownership"]
                     fundInvestorNAV = investorOwnership / 100 * fundEntry["NAV"]
                     fundInvestorGain = fundEntry["Monthly Gain"] / monthPoolEntry["Monthly Gain"] * investorEntry["Monthly Gain"] if monthPoolEntry["Monthly Gain"] != 0 else 0
                     fundInvestorMDdenominator = investorEntry["MDdenominator"] / monthPoolEntry["MDdenominator"] * fundEntry["MDdenominator"] if monthPoolEntry["MDdenominator"] != 0 else 0
@@ -5549,8 +5521,12 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
         
         for table in mainTableNames:
             dynTables[table] = []
-            for month in cache.get(table, {}).keys():
-                dynTables[table].extend(cache.get(table, {}).get(month, []))
+            if "positions_" in table: #removes duplicates by requiring a balance key
+                uniqueBalances = {accountBalanceKey(entry): entry for monthL in cache.get(table, {}) for entry in cache.get(table, {}).get(monthL, [])}
+                dynTables[table].extend([entry for _,entry in uniqueBalances.items()])
+            else:
+                for monthL in cache.get(table, {}).keys():
+                    dynTables[table].extend(cache.get(table, {}).get(monthL, []))
         statusQueue.put((pool,len(newMonths),"Completed")) #push completed status update to the main thread
         return calculations, dynTables
     except Exception as e: #halt operations for failure or force close/cancel
@@ -5626,26 +5602,10 @@ def processPoolTransactions(poolData : dict,selfData : dict, statusQueue, dbQueu
         print("\n")
         return []
             
-def calculateBackdate(transaction,noStartValue = False):
-    time = transaction.get(nameHier["Transaction Time"]["dynLow"])
-    monthDay = datetime.strptime(transaction.get("Date"), "%Y-%m-%dT%H:%M:%S").day
-    if noStartValue:
-        if time not in (None,"None") and time.lower() == "end of day":
-            backDate = 0 #"no start value and end of day"
-        else:
-            backDate = 1 #"no start value and not end of day"
-    elif time in (None,"None"):
-        if monthDay == 1:
-            backDate = 1 #"First day of month"
-        else:
-            backDate = 0#"No timing and not first day of month"
-    elif time.lower() == "end of day":
-        backDate = 0#"End of day"
-    else:
-        backDate = 1 #"Beginning of day"
-    return backDate
+
 
 def exportTableToExcel(self, rows, headers = None):
+    #Excel export for the generic table window
     # 1) prompt user
     path, _ = QFileDialog.getSaveFileName(
         self, "Save as…", "", "Excel Files (*.xlsx)"
@@ -5738,7 +5698,8 @@ class simpleMonthSelector(QWidget):
             month, year = item.split(" ")
             months.add(month)
             years.add(year)
-        self.monthSelect.addItems(sorted(months))
+        month_order = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
+        self.monthSelect.addItems([m for m in month_order if m in months])
         self.yearSelect.addItems(sorted(years))
         self.changeLock = False
     def setCurrentText(self,text):

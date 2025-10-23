@@ -1,10 +1,14 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 from pathlib import Path
+pip freeze >> requirements.txt
 assets = [
     ('assets/Acc_Tran.db', 'assets'),
     ('assets/tranCalc.db', 'assets'),
     ('assets/helpInfo.txt', 'assets'),
+    ('calculateReturns.py','sourceCode'),
+    ('calculateReturns.spec','sourceCode'),
+    ('requirements.txt','sourceCode'),
 ]
 
 a = Analysis(
