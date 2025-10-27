@@ -4,6 +4,7 @@ import json
 import subprocess
 import traceback
 import sqlite3
+from pandas.core.apply import com
 import requests
 import calendar
 import warnings
@@ -34,7 +35,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtGui import QBrush, QColor, QDesktopServices
 from PyQt5.QtCore import Qt, QTimer, QAbstractTableModel, QModelIndex, pyqtSignal, QPoint, QUrl, QDate
 
-currentVersion = "1.1.7"
+currentVersion = "1.1.8"
 demoMode = True
 ownershipCorrect = True
 importInterval = relativedelta(hours=2)
@@ -129,7 +130,11 @@ headerOptions = ["Return","NAV", "Monthly Gain", "Ownership" , "MDdenominator", 
 dataOptions = ["Investor","Family Branch","Classification", "dateTime"]
 tranAppHeaderOptions = ["Transaction Sum"]
 tranAppDataOptions = ["Investor","Family Branch", "dateTime"]
-assetLevelLinks = {1: {"Display" : "Asset Level 1", "Link" : "assetClass"}, 2: {"Display" : "Asset Level 2", "Link" : "subAssetClass"}, 3: {"Display" : "Asset Level 3", "Link" : "subAssetSleeve"}}
+assetLevelLinks = {1: {"Display" : "Asset Level 1", "Link" : "assetClass"}, 
+                    2: {"Display" : "Asset Level 2", "Link" : "subAssetClass"}, 
+                    3: {"Display" : "Asset Level 3", "Link" : "subAssetSleeve"},
+                    0 : {"Display" : "Total Portfolio" , "Link" : "Total"},
+                    -1 : {"Link" : "Family Branch"}}
 displayLinks = {"assetClass" : "Asset Level 1", "subAssetClass" : "Asset Level 2" , "subAssetSleeve" : "Asset Level 3"}
 for link in displayLinks.copy(): #builds out in reverse so it can work both ways
     displayLinks[displayLinks.get(link)] = link
@@ -142,6 +147,7 @@ for header in ("Return","Ownership"):
     percent_headers.add(header)
 
 calculationPingTime = 2
+ownershipFlagTolerance = 0.001
 #-------------------------------- Common functions --------------------------------
 warnings.simplefilter("error",RuntimeWarning)
 def calculate_xirr(cash_flows, dates, guess : float = None):
@@ -243,6 +249,7 @@ class DatabaseManager:
                     Unfunded TEXT,
                     IRRITD TEXT,
                     Classification TEXT,
+                    onwershipAdjust TEXT,
                     PRIMARY KEY (dateTime, Investor, Pool, Fund)
                 )
             """)
@@ -314,7 +321,7 @@ class DatabaseManager:
 class returnsApp(QWidget):
     def __init__(self, start_index=0):
         super().__init__()
-        self.setWindowTitle('Returns Calculator')
+        self.setWindowTitle('CRSPR')
         self.setGeometry(100, 100, 1000, 600)
 
         os.makedirs(ASSETS_DIR, exist_ok=True)
@@ -426,7 +433,7 @@ class returnsApp(QWidget):
         headerLayout.addWidget(self.lastImportLabel)
         if ownershipCorrect:
             headerLayout.addStretch()
-            headerLayout.addWidget(QLabel("                              Notice: \n Investor ownership has automatic corrections due to Dynamo issues"))
+            headerLayout.addWidget(QLabel("                              Notice: \n Yellow highlights on NAV or monthly table indicate \n the values or sub-group values are affected by investor ownership corrections"))
         headerLayout.addStretch()
         headerLayout.addWidget(QLabel(f"Version: {currentVersion}"))
         self.helpBtn = QPushButton("Help")
@@ -530,7 +537,7 @@ class returnsApp(QWidget):
         optionsGrid = QGridLayout()
         optionsTitle = QLabel("Options")
         optionsTitle.setObjectName("titleBox")
-        optionsGrid.addWidget(optionsTitle,0,0,4,1)
+        optionsGrid.addWidget(optionsTitle,0,0,5,1)
         self.tableBtnGroup = QButtonGroup()
         self.complexTableBtn = QRadioButton("Complex Table")
         self.monthlyTableBtn = QRadioButton("Monthly Table")
@@ -722,14 +729,14 @@ class returnsApp(QWidget):
             print("Background watch failed")
 
     def helpClicked(self,*_):
-        #try:
+        try:
             with open(HELP_PATH, 'r', encoding='utf-8') as f:
                 text = f.read()
             helpMessage = displayWindow(parentSource=self, text=text, title="Help Page")
             helpMessage.show()
             self.helpPage = helpMessage
-        # except:
-        #     QMessageBox.warning(self,"Error","Error opening help page.")
+        except:
+            QMessageBox.warning(self,"Error","Error opening help page.")
     def exportCalculations(self,*_):
         window = exportWindow(parentSource=self)
         window.show()
@@ -954,7 +961,7 @@ class returnsApp(QWidget):
             if reloadRequired or self.currentTableData is None:
                 self.buildReturnTable()
             else:
-                self.populateReturnsTable(self.currentTableData)
+                self.populateReturnsTable(self.currentTableData, self.currentTableFlags)
     def resetData(self,*_):
         if not self.testAPIconnection():
             QMessageBox.warning(self,"API Failure", "API connection has failed. Server is down or API key is bad. \n Previous calculations are left in place for viewing.")
@@ -991,6 +998,7 @@ class returnsApp(QWidget):
             self.processFunds()
         def buildTable(cancelEvent):
             try:
+                startTime = datetime.now()
                 print("Building return table...")
                 self.currentTableData = None #resets so a failed build won't be used
                 
@@ -1033,11 +1041,16 @@ class returnsApp(QWidget):
                 gui_queue.put(lambda: self.buildTableLoadingBar.setValue(3))
                 if cancelEvent.is_set(): #exit if new table build request is made
                     return
+                print(f"Processed filters. Elapsed: {(datetime.now() - startTime).total_seconds()}")
                 data = load_from_db("calculations",condStatement, tuple(parameters), lock=self.lock)
+                print(f"Loaded calculations. Elapsed: {(datetime.now() - startTime).total_seconds()}")
                 output = {"Total##()##" : {}}
+                flagOutput = {"Total##()##" : {}}
                 if self.benchmarkSelection.checkedItems() != [] or self.showBenchmarkLinksBtn.isChecked():
                     output = self.applyBenchmarks(output)
+                print(f"Applied benchmarks. Elapsed: {(datetime.now() - startTime).total_seconds()}")
                 output , data = self.calculateUpperLevels(output,data)
+                print(f"Calculated Upper levels. Elapsed: {(datetime.now() - startTime).total_seconds()}")
                 for benchmark in self.pendingBenchmarks: #remove the benchmarks used only in benchmark links
                     if benchmark not in self.benchmarkChoices and benchmark + self.buildCode([]) in output.keys():
                         output.pop(benchmark + self.buildCode([]))
@@ -1045,7 +1058,7 @@ class returnsApp(QWidget):
                 if cancelEvent.is_set(): #exit if new table build request is made
                     return
                 complexOutput = copy.deepcopy(output)
-                multiPoolFunds = {}
+                multiData = {}
                 dataOutputType = self.returnOutputType.currentText()
                 for entry in data:
                     if (datetime.strptime(entry["dateTime"], "%Y-%m-%d %H:%M:%S") >  datetime.strptime(self.dataEndSelect.currentText(),"%B %Y") or 
@@ -1058,20 +1071,18 @@ class returnsApp(QWidget):
                     if dataOutputType == "IRR ITD" and ((self.consolidateFundsBtn.isChecked() and entry.get("Fund") in self.consolidatedFunds) or entry.get("Calculation Type") != "Total Fund"):
                         #this only skips for monthly table
                         continue #cannot use IRR ITD for consolidated funds
-                    
                     if level not in output.keys():
                         output[level] = {}
                     if entry.get(dataOutputType) not in (None,"None",""):
+                        flagOutput.setdefault(level,{}).setdefault(date,False)
+                        flagOutput[level][date] = entry.get("ownershipAdjust",'False') == 'True' or flagOutput.setdefault(level,{}).setdefault(date,False)
                         if date not in output[level].keys():
                             #creates value if not exists. If it is not return percent, sums the values
                             output[level][date] = float(entry.get(dataOutputType))
                         elif dataOutputType not in ("Return", "Ownership"):
                             output[level][date] += float(entry.get(dataOutputType))
                         else: #should only reach here if two calculations exist of the same exact row which needs special handling of the return
-                            if level not in multiPoolFunds:
-                                multiPoolFunds[level] = [entry,]
-                            else:
-                                multiPoolFunds[level].append(entry)
+                            multiData.setdefault(level,{})
                     if "dataType" not in output[level].keys():
                         output[level]["dataType"] = Dtype
                     if self.tableBtnGroup.checkedButton().text() == "Complex Table" and date == self.dataEndSelect.currentText():
@@ -1079,6 +1090,8 @@ class returnsApp(QWidget):
                             complexOutput[level] = {}
                         if "dataType" not in complexOutput[level].keys():
                             complexOutput[level]["dataType"] = Dtype
+                        flagOutput.setdefault(level,{}).setdefault("NAV",False)
+                        flagOutput[level]["NAV"] = entry.get("ownershipAdjust",'False') == 'True' or flagOutput.setdefault(level,{}).setdefault("NAV",False)
                         if headerOptions[0] not in complexOutput[level].keys() and headerOptions:
                             for option in headerOptions:
                                 if option == "IRR ITD" and ((self.consolidateFundsBtn.isChecked() and entry.get("Fund") in self.consolidatedFunds) or entry.get("Calculation Type") != "Total Fund"):
@@ -1096,12 +1109,14 @@ class returnsApp(QWidget):
                                 complexOutput[level]["Ownership"] += float(entry["Ownership"])
                             # else:
                             #     complexOutput[level]["Ownership"] += float(entry["Ownership"])
-                if multiPoolFunds and dataOutputType == "Return": #must iterate through data again to correct for returns of multi pool funds
-                    multiData = {}
-                    for rowKey in multiPoolFunds: #instantiate multiData with the row
-                        multiData[rowKey] = {}
-                        # date = multiPoolFunds.get(rowKey).get("dateTime")
-                        # multiData[rowKey][date] = {"MDdenominator" : 0, "Monthly Gain" : 0}
+                for tableStruc in (output,complexOutput): 
+                    #remove bad table entries with no dataType (means data was somehow irrelevant. (ex: fund starts after the selected range))
+                    keys = tableStruc.keys()
+                    pops = [key for key in keys if "dataType" not in tableStruc[key]]
+                    for pop in pops:
+                        tableStruc.pop(pop)
+                print(f"Organized Tables step 1. Elapsed: {(datetime.now() - startTime).total_seconds()}")
+                if multiData and dataOutputType == "Return": #must iterate through data again to correct for returns of multi pool funds
                     for entry in data:
                         if (datetime.strptime(entry["dateTime"], "%Y-%m-%d %H:%M:%S") >  datetime.strptime(self.dataEndSelect.currentText(),"%B %Y") or 
                             datetime.strptime(entry["dateTime"], "%Y-%m-%d %H:%M:%S") <  datetime.strptime(self.dataStartSelect.currentText(),"%B %Y")):
@@ -1123,6 +1138,7 @@ class returnsApp(QWidget):
                             output[rowKey][strDate] = returnVal
                             if self.tableBtnGroup.checkedButton().text() == "Complex Table" and strDate == self.dataEndSelect.currentText():
                                 complexOutput[rowKey]["Return"] = returnVal
+                print(f"Organized tables step 2. Elapsed: {(datetime.now() - startTime).total_seconds()}")
                 if self.tableBtnGroup.checkedButton().text() == "Complex Table":
                     for rowKey in complexOutput:
                         if complexOutput[rowKey].get("NAV",0.0) != 0:
@@ -1135,19 +1151,19 @@ class returnsApp(QWidget):
                 if cancelEvent.is_set(): #exit if new table build request is made
                     return
                 if self.tableBtnGroup.checkedButton().text() == "Complex Table":
+                    print(f"Initiating complex table calculations... Elapsed: {(datetime.now() - startTime).total_seconds()}")
                     output = self.calculateComplexTable(output,complexOutput)
+                    print(f"Completed complex table calculations. Elapsed: {(datetime.now() - startTime).total_seconds()}")
                 gui_queue.put(lambda: self.buildTableLoadingBar.setValue(6))
                 if cancelEvent.is_set(): #exit if new table build request is made
                     return
-                outputKeys = output.keys()
-                deleteKeys = []
-                for key in outputKeys:
-                    if len(output[key].keys()) == 0:
-                        deleteKeys.append(key)
+                deleteKeys = [key for key in output.keys() if len(output[key].keys()) == 0]
                 for key in deleteKeys:
                     output.pop(key)
-                gui_queue.put(lambda: self.populateReturnsTable(output))
+                print(f"Populating table. Elapsed: {(datetime.now() - startTime).total_seconds()}")
+                gui_queue.put(lambda: self.populateReturnsTable(output,flagStruc=flagOutput))
                 self.currentTableData = output
+                self.currentTableFlags = flagOutput
             except Exception as e:
                 tracebackMsg = traceback.format_exc()
                 gui_queue.put(lambda error = e: QMessageBox.warning(self, "Error building returns table", f"Error: {error}. {error.args}. Data entry: \n  \n Traceback:  \n {tracebackMsg}"))
@@ -1172,6 +1188,8 @@ class returnsApp(QWidget):
         for yr in yearOptions:
             YR_times[yr] = [datetime.strftime(endTime - relativedelta(months=i),"%B %Y") for i in range(12 * yr)]
         for level in monthOutput.keys():
+            if level not in complexOutput:
+                continue #occurs when complexOutput filtered out a row such as hiddenLayer. so ignore
             for timeFrame, monthOpts in timeSections.items():
                 complexOutput[level][timeFrame] = 1
                 for monthO in monthOpts:
@@ -1315,7 +1333,6 @@ class returnsApp(QWidget):
                             levelData.append(entry)
                     if len(sortHierarchy) > levelIdx + 1 and levelName == "subAssetClass" and sortHierarchy[levelIdx] == "subAssetSleeve" and option in self.db.fetchOptions("asset3Visibility").keys():
                         #will skip the subAssetSleeve for hidden ones and send the entire section of data to the next level
-                        print(f"skipping for {option}")
                         tempPath.append("hiddenLayer")
                         struc, lowTotals, fullEntries = buildLevel(sortHierarchy[levelIdx + 1],levelIdx + 1,struc,levelData,tempPath)
                     else:
@@ -1331,6 +1348,8 @@ class returnsApp(QWidget):
                                 highEntries[total["dateTime"]][levelName] = total[levelName] if total[levelName] != "Cash" or levelName != "assetClass" else "Cash "
                                 if levelName == "subAssetClass":
                                     highEntries[total["dateTime"]]["assetClass"] = total["assetClass"] if total["assetClass"] != "Cash" else "Cash "
+                        if highEntries[total["dateTime"]].get("ownershipAdjust", 'False') == 'False' and total.get('ownershipAdjust','False') == 'True':
+                            highEntries[total["dateTime"]]["ownershipAdjust"] = 'True'
                         for header in headerOptions:
                             if header not in ("Ownership", "IRR ITD"):
                                 highEntries[total["dateTime"]][header] += float(total[header])
@@ -1350,22 +1369,18 @@ class returnsApp(QWidget):
                 newEntriesLow = []
                 totalDataLow = []
                 if levelName == "subAssetSleeve" and sortHierarchy[levelIdx - 2] == "subAssetClass" and insertedOption in self.db.fetchOptions("asset3Visibility").keys():
-                    print(f"skipping for {insertedOption}")
                     options = ["hiddenLayer"]
                 for option in options:
                     tempPath = path.copy()
                     tempPath.append(option)
                     totalEntriesLow = {}
-                    name = option if levelName != "assetClass" or option != "Cash" else "Cash "
+                    name = option if not(levelName == "assetClass" and option == "Cash") else "Cash " #adds a space to cash L1 for differentiation
                     code = self.buildCode(tempPath)
                     if option != "hiddenLayer":
                         struc[name + code] = {} #place table space for that level selection
                         if self.showBenchmarkLinksBtn.isChecked():
                             struc = applyLinkedBenchmarks(struc,code, levelName, option)
-                        levelData = []
-                        for entry in data: #separates out only relevant data
-                            if entry[levelName] == option:
-                                levelData.append(entry)
+                        levelData = [entry for entry in data if entry[levelName] == option] #separates out only relevant data
                     else:
                         levelData = data #dont filter the data for hidden layer
                     #gui_queue.put(lambda rows = levelData, name = option: self.openTableWindow(rows,f"data for: {name}"))
@@ -1388,6 +1403,8 @@ class returnsApp(QWidget):
                                 totalEntriesLow[entry["dateTime"]][levelName] = entry[levelName] if entry[levelName] != "Cash" or levelName != "assetClass" else "Cash "
                                 if levelName == "subAssetClass":
                                     totalEntriesLow[entry["dateTime"]]["assetClass"] = entry["assetClass"] if entry["assetClass"] != "Cash" else "Cash "
+                        if totalEntriesLow[entry["dateTime"]].get("ownershipAdjust", 'False') == 'False' and entry.get('ownershipAdjust','False') == 'True':
+                            totalEntriesLow[entry["dateTime"]]["ownershipAdjust"] = 'True'
                         for header in headerOptions:
                             if header not in ("Ownership", "IRR ITD") and entry.get(header) not in (None,"None",""):
                                 totalEntriesLow[entry["dateTime"]][header] += float(entry[header])
@@ -1413,6 +1430,7 @@ class returnsApp(QWidget):
 
         if self.showBenchmarkLinksBtn.isChecked():
             benchmarkLinks = self.db.fetchBenchmarkLinks()
+            tableStructure = applyLinkedBenchmarks(tableStructure,self.buildCode("Total"), "Total", "Total") #apply benchmark links to total
         sortHierarchy = self.sortHierarchy.checkedItems()
         levelIdx = 0
         tableStructure, highestEntries, newEntries = buildLevel(sortHierarchy[levelIdx],levelIdx,tableStructure,data, [])
@@ -1429,6 +1447,8 @@ class returnsApp(QWidget):
                         trueTotalEntries[total["dateTime"]][header] = 0
                 for label in dataOptions:
                     trueTotalEntries[total["dateTime"]][label] = total[label]
+            if trueTotalEntries[total["dateTime"]].get("ownershipAdjust", 'False') == 'False' and total.get('ownershipAdjust','False') == 'True':
+                trueTotalEntries[total["dateTime"]]["ownershipAdjust"] = 'True'
             for header in headerOptions:
                 if header not in ("Ownership", "IRR ITD"):
                     trueTotalEntries[total["dateTime"]][header] += float(total[header])
@@ -2479,7 +2499,7 @@ class returnsApp(QWidget):
             self.sortStyle.setText("Sort Style: NAV")
         self.buildReturnTable()
     def headerSortClosed(self):
-        self.populateReturnsTable(self.currentTableData)
+        self.populateReturnsTable(self.currentTableData, self.currentTableFlags)
     def orderColumns(self,keys, exceptions = []):
         mode = self.tableBtnGroup.checkedButton().text()
         if mode == "Monthly Table":
@@ -2492,7 +2512,7 @@ class returnsApp(QWidget):
             ordered += [h for h in keys if h not in newOrder and h not in exceptions]
             keys = ordered
         return keys
-    def populateReturnsTable(self, origRows: dict):
+    def populateReturnsTable(self, origRows: dict, flagStruc : dict = {}):
         self.buildTableLoadingBar.setValue(7)
         mode = self.tableBtnGroup.checkedButton().text()
         if not origRows:
@@ -2506,6 +2526,9 @@ class returnsApp(QWidget):
         rows = copy.deepcopy(origRows) #prevents alteration of self.returnsTableData
         for f in self.filterOptions:
             if f["key"] not in self.filterBtnExclusions and not self.filterRadioBtnDict[f["key"]].isChecked():
+                for k,v in rows.items():
+                    if "dataType" not in v:
+                        print(f"Bad row. Key: {k} \n       row: {v}")
                 to_delete = [k for k,v in rows.items() if v["dataType"] == "Total " + f["key"]]
                 for k in to_delete:
                     rows.pop(k)
@@ -2524,10 +2547,10 @@ class returnsApp(QWidget):
         row_entries = []
         for fund_label, row_dict in rows.items():
             row_label, code = self.separateRowCode(fund_label)
-            row_entries.append((row_label, code, row_dict))
+            row_entries.append((row_label, code, row_dict, fund_label))
 
         # 2) Determine columns exactly as before, using cleanedRows for header order
-        cleaned = {fund: d.copy() for fund, _, d in row_entries}
+        cleaned = {fund: d.copy() for fund, _, d, _ in row_entries}
         for d in cleaned.values():
             d.pop("dataType", None)
 
@@ -2555,21 +2578,22 @@ class returnsApp(QWidget):
         self.returnsTable.setColumnCount(len(col_keys))
         self.returnsTable.setHorizontalHeaderLabels(col_keys)
 
-
+        bg = None
         # 4) Populate each row
-        for r, (fund_label, code, row_dict) in enumerate(row_entries):
+        for r, (fund_label, code, row_dict, rowKey) in enumerate(row_entries):
             # pull & remove dataType for coloring
             dataType = row_dict.pop("dataType", "")
-
             if dataType != "benchmark": #benchmark will use previous rounds color
                 startColor = (160, 160, 160)
                 if dataType == "Total":
-                    bg =  QColor(*tuple(
+                    color = tuple(
                         int(startColor[i] * 0.8)
                         for i in range(3)
-                    ))
+                    )
+                    bg =  QColor(*color)
                 elif dataType == "benchmark":
-                    bg = QColor(*(182, 205, 245))
+                    color = (182, 205, 245)
+                    bg = QColor(*color)
                 else:
                     depth      = code.count("::") if dataType != "Total Fund" else code.count("::") + 1
                     # if len(re.findall(r'##\((.*?)\)##', code, flags=re.DOTALL)[0]) > 0:
@@ -2618,7 +2642,11 @@ class returnsApp(QWidget):
                     # store raw number for sorting or later retrieval
                     item.setData(Qt.UserRole, v)
                 if bg:
-                    item.setBackground(QBrush(bg))
+                    if flagStruc.get(rowKey,{}).get(col,False):
+                        colorL = (color[0], color[1], int(color[2] * 0.8))
+                        item.setBackground(QBrush(QColor(*colorL))) #yellow tints the cell for ownership adjustment
+                    else:
+                        item.setBackground(QBrush(bg))
                 if dataType == "benchmark":
                     item.setForeground(QColor(0,0,255))
                 item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
@@ -4551,7 +4579,7 @@ class linkBenchmarksWindow(QWidget):
         self.resize(800, 500)
         self.setStyleSheet(self.parent.appStyle)
         self.setObjectName("mainPage")
-        self._benchmarks = []
+        self._benchmarks = [{},]
         self._links = []
         self.asset_levels = [("Level 1", 1), ("Level 2", 2), ("Level 3", 3)]
         self.selected_asset_level = None
@@ -4561,58 +4589,94 @@ class linkBenchmarksWindow(QWidget):
         self.init_ui()
 
     def init_ui(self):
-        mainLayout = QVBoxLayout(self)
-        splitter = QSplitter(Qt.Horizontal)
+        try:
+            mainLayout = QVBoxLayout(self)
+            splitter = QSplitter(Qt.Horizontal)
 
-        # --- Left: Benchmark Links Table ---
-        leftWidget = QWidget()
-        leftLayout = QVBoxLayout(leftWidget)
-        self.linksTable = QTableWidget()
-        self.linksTable.setColumnCount(4)
-        self.linksTable.setHorizontalHeaderLabels(['Benchmark', 'Asset', 'Level', 'Delete'])
-        self.linksTable.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        leftLayout.addWidget(QLabel("Current Benchmark Links:"))
-        leftLayout.addWidget(self.linksTable)
-        splitter.addWidget(leftWidget)
+            # --- Left: Benchmark Links Table ---
+            leftWidget = QWidget()
+            leftLayout = QVBoxLayout(leftWidget)
+            self.linksTable = QTableWidget()
+            self.linksTable.setColumnCount(4)
+            self.linksTable.setHorizontalHeaderLabels(['Benchmark', 'Asset', 'Level', 'Delete'])
+            self.linksTable.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+            leftLayout.addWidget(QLabel("Current Benchmark Links:"))
+            leftLayout.addWidget(self.linksTable)
+            splitter.addWidget(leftWidget)
 
-        # --- Right: Add Benchmark Link ---
-        rightWidget = QWidget()
-        rightLayout = QVBoxLayout(rightWidget)
-        rightLayout.addWidget(QLabel("Add Benchmark Link:"))
-        
-        # Asset Class Level ComboBox
-        self.assetLevelCombo = QComboBox()
-        self.assetLevelCombo.addItem("")  # blank/default
-        for label, num in self.asset_levels:
-            self.assetLevelCombo.addItem(label, num)
-        self.assetLevelCombo.currentIndexChanged.connect(self.updateAssetCombo)
-        rightLayout.addWidget(QLabel("Asset Class Level:"))
-        rightLayout.addWidget(self.assetLevelCombo)
+            # --- Right Side: Vertically Split ---
+            rightWidget = QWidget()
+            rightVSplitter = QSplitter(Qt.Vertical)
 
-        # Asset ComboBox - will be populated depending on above
-        self.assetCombo = QComboBox()
-        self.assetCombo.addItem("")  # blank
-        rightLayout.addWidget(QLabel("Asset:"))
-        rightLayout.addWidget(self.assetCombo)
+            # --- Top half: Add Benchmark Link ---
+            topWidget = QWidget()
+            topLayout = QVBoxLayout(topWidget)
+            topLayout.addWidget(QLabel("Add Benchmark Link:"))
 
-        # Benchmark ComboBox - will be populated
-        self.benchmarkCombo = QComboBox()
-        self.benchmarkCombo.addItem("")  # blank
-        rightLayout.addWidget(QLabel("Benchmark:"))
-        rightLayout.addWidget(self.benchmarkCombo)
+            # Asset Class Level ComboBox
+            self.assetLevelCombo = QComboBox()
+            self.assetLevelCombo.addItem("")  # blank/default
+            for label, num in self.asset_levels:
+                self.assetLevelCombo.addItem(label, num)
+            self.assetLevelCombo.currentIndexChanged.connect(self.updateAssetCombo)
+            topLayout.addWidget(QLabel("Asset Class Level:"))
+            topLayout.addWidget(self.assetLevelCombo)
 
-        # Confirm Button
-        self.confirmBtn = QPushButton("Confirm Link")
-        self.confirmBtn.clicked.connect(self.addBenchmarkLink)
-        rightLayout.addWidget(self.confirmBtn)
-        rightLayout.addStretch()
-        splitter.addWidget(rightWidget)
+            # Asset ComboBox - will be populated depending on above
+            self.assetCombo = QComboBox()
+            self.assetCombo.addItem("")  # blank
+            topLayout.addWidget(QLabel("Asset:"))
+            topLayout.addWidget(self.assetCombo)
 
-        mainLayout.addWidget(splitter)
-        self.setLayout(mainLayout)
+            # Benchmark ComboBox - will be populated
+            self.benchmarkCombo = QComboBox()
+            self.benchmarkCombo.addItem("")  # blank
+            topLayout.addWidget(QLabel("Benchmark:"))
+            topLayout.addWidget(self.benchmarkCombo)
 
-        self.refreshBenchmarks()
-        self.refreshLinks()
+            # Confirm Button
+            self.confirmBtn = QPushButton("Confirm Link")
+            self.confirmBtn.clicked.connect(self.addBenchmarkLink)
+            topLayout.addWidget(self.confirmBtn)
+            topLayout.addStretch()
+
+            # --- Bottom half: Table Element Benchmark Link ---
+            bottomWidget = QWidget()
+            bottomLayout = QVBoxLayout(bottomWidget)
+            bottomLayout.addWidget(QLabel("Add Table Element Benchmark Link:"))
+
+            # Table Element ComboBox
+            self.tableElementCombo = QComboBox()
+            self.tableElementCombo.addItem("")  # blank (populate later)
+            bottomLayout.addWidget(QLabel("Total Portfolio or Family Branch:"))
+            bottomLayout.addWidget(self.tableElementCombo)
+
+            # Table Benchmark ComboBox
+            self.tableBenchmarkCombo = QComboBox()
+            self.tableBenchmarkCombo.addItem("")  # blank (populate later)
+            bottomLayout.addWidget(QLabel("Benchmark:"))
+            bottomLayout.addWidget(self.tableBenchmarkCombo)
+
+            # Confirm Button
+            self.tableConfirmBtn = QPushButton("Confirm Table Element Link")
+            self.tableConfirmBtn.clicked.connect(self.addTableElementBenchmarkLink) # Connect to your logic
+            bottomLayout.addWidget(self.tableConfirmBtn)
+            bottomLayout.addStretch()
+
+            rightVSplitter.addWidget(topWidget)
+            rightVSplitter.addWidget(bottomWidget)
+            splitter.addWidget(rightVSplitter)
+
+            mainLayout.addWidget(splitter)
+            self.setLayout(mainLayout)
+
+            self.refreshBenchmarks()
+            self.refreshLinks()
+            self.updateTableElementCombo()
+        except Exception as e:
+            print(f"Error initializing benchmark window: {e} {e.args}")
+            logging.error(f"Error initializing benchmark window: {e} {e.args}")
+            QMessageBox.critical(self.parent, "Error initializing benchmark window", f"Error initializing benchmark window: {e} {e.args}")
 
     def refreshLinks(self):
         links = self.parent.db.fetchBenchmarkLinks()
@@ -4633,7 +4697,7 @@ class linkBenchmarksWindow(QWidget):
             if hasattr(self.parent.db, "fetchBenchmarks"):
                 benchmarks = self.parent.db.fetchBenchmarks()
             else:
-                benchmarks = []  # fallback - maybe empty or stub
+                benchmarks = {}  # fallback - maybe empty or stub
         except Exception as e:
             print(f"Failed to fetch benchmarks: {e}")
             benchmarks = []
@@ -4641,17 +4705,15 @@ class linkBenchmarksWindow(QWidget):
         self.updateBenchmarkCombo()
 
     def updateBenchmarkCombo(self):
-        self.benchmarkCombo.clear()
-        self.benchmarkCombo.addItem("")
-        for b in self._benchmarks:
-            # Assume b is a string or has a 'benchmark' key
-            if isinstance(b, str):
-                self.benchmarkCombo.addItem(b)
-            elif isinstance(b, dict) and "benchmark" in b:
-                self.benchmarkCombo.addItem(b["benchmark"])
-            else:
-                self.benchmarkCombo.addItem(str(b))
-
+        for combo in (self.benchmarkCombo, self.tableBenchmarkCombo):
+            combo.clear()
+            combo.addItem("")
+            combo.addItems(sorted([b["benchmark"] if isinstance(b,dict) else str(b) for b in self._benchmarks]))
+    def updateTableElementCombo(self):
+        self.tableElementCombo.clear()
+        opts = ["","Total"]
+        opts.extend([famBranch for famBranch in self.parent.fullLevelOptions.get("Family Branch",[]) if famBranch])
+        self.tableElementCombo.addItems(opts)
     def updateAssetCombo(self):
         self.assetCombo.clear()
         self.assetCombo.addItem("")
@@ -4686,7 +4748,14 @@ class linkBenchmarksWindow(QWidget):
         except Exception as e:
             QMessageBox.warning(self, "Delete Error", f"Error deleting link: {e}")
         self.refreshLinks()
-
+    def addTableElementBenchmarkLink(self):
+        asset = self.tableElementCombo.currentText()
+        levelIdx = 0 if asset == "Total" else -1
+        benchmark = self.tableBenchmarkCombo.currentText().strip()
+        if asset == "" or benchmark == "":
+            QMessageBox.warning(self, "Incomplete", "Please select asset and benchmark.")
+            return
+        self.updateLink(levelIdx,asset,benchmark)
     def addBenchmarkLink(self):
         # Get selections
         level_idx = self.assetLevelCombo.currentIndex()
@@ -4696,21 +4765,23 @@ class linkBenchmarksWindow(QWidget):
             QMessageBox.warning(self, "Incomplete", "Please select asset class level, asset, and benchmark.")
             return
         asset_level = self.assetLevelCombo.currentData()
+        self.updateLink(asset_level,asset,benchmark)
+        
+    def updateLink(self, level,asset,benchmark):
         try:
             with self.parent.lock:
                 cursor = self.parent.db._conn.cursor()
                 cursor.execute(
                     "INSERT OR REPLACE INTO benchmarkLinks (benchmark, asset, assetLevel) VALUES (?, ?, ?)",
-                    (benchmark, asset, asset_level)
+                    (benchmark, asset, level)
                 )
                 self.parent.db._conn.commit()
-            QMessageBox.information(self, "Success", f"Linked {benchmark} to {asset} at level {asset_level}.")
+            QMessageBox.information(self, "Success", f"Linked {benchmark} to {asset} at level {level}.")
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Failed to save link: {e}")
         self.parent.db.fetchBenchmarkLinks(update=True)
         self.refreshLinks()
         self.parent.buildReturnTable()
-
 class exportWindow(QWidget):
     def __init__(self, parent=None, flags=Qt.WindowFlags(), parentSource=None):
         super().__init__(parent, flags)
@@ -5458,6 +5529,7 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
                 monthPoolEntryInvestor["Ownership"] = ownershipPerc
                 poolOwnershipSum += ownershipPerc
                 monthPoolEntryInvestorList.append([monthPoolEntryInvestor, EOMcheck])
+            adjustedOwnershipBool = abs(poolOwnershipSum - 100) > ownershipFlagTolerance #boolean for if ownership is adjusted. Tolerance for thousandth of a percent off
             for investorEntry, EOMcheck in monthPoolEntryInvestorList:
                 investor = investorEntry["Investor"]
                 investorEOM = investorEntry["NAV"]
@@ -5484,6 +5556,7 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
                     fundInvestorUnfunded = fundEntry[nameHier["Unfunded"]["local"]] * fundInvestorOwnership
 
                     if investorEntry["MDdenominator"] != 0 and investorMDdenominatorSum != 0: 
+                        #only run IRR data if there is investor value
                         if investor not in IRRinvestorTrack:
                             IRRinvestorTrack[investor] = {}
                         if fund not in IRRinvestorTrack[investor]:
@@ -5512,7 +5585,8 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
                                     nameHier["Commitment"]["local"] : fundInvestorCommitment, nameHier["Unfunded"]["local"] : fundInvestorUnfunded, 
                                     "Calculation Type" : "Total Fund",
                                     "IRR ITD" : fundInvestorIRR,
-                                    nameHier["sleeve"]["local"] : fundList.get(fund)
+                                    nameHier["sleeve"]["local"] : fundList.get(fund),
+                                    "ownershipAdjust" : adjustedOwnershipBool
                                     }
                     calculations.append(monthFundInvestorEntry) #add fund level data to calculations for use in aggregation and report generation
             #end of months loop
@@ -5731,7 +5805,15 @@ class displayWindow(QWidget):
 
         # Layout and table
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(text))
+        
+        scrollArea = QScrollArea(self) #make a scroll area with a layout inside containing a widget of the text that is styled to the color theme
+        textContainer = QWidget()
+        textContainer.setObjectName("subPanel")
+        textLayout = QVBoxLayout()
+        textLayout.addWidget(QLabel(text))
+        textContainer.setLayout(textLayout)
+        scrollArea.setWidget(textContainer)
+        layout.addWidget(scrollArea)
 
 @attach_logging_to_class
 class DictListModel(QAbstractTableModel):
@@ -6325,6 +6407,7 @@ class MultiSelectBox(QWidget):
             # 6. Apply
             self.popup.move(pos)
             self.popup.show()
+            self.popup.searchBar.setFocus()
     def addItems(self,items):
         for item in items:
             self.addItem(item)
