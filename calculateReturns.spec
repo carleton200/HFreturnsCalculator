@@ -1,13 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 from pathlib import Path
-pip freeze >> requirements.txt
+import os
+
 assets = [
     ('assets/Acc_Tran.db', 'assets'),
     ('assets/tranCalc.db', 'assets'),
     ('assets/helpInfo.txt', 'assets'),
     ('calculateReturns.py','sourceCode'),
     ('calculateReturns.spec','sourceCode'),
+    *[(str(f), 'sourceCode/classes') for f in Path('classes').glob('*.py')],
+    *[(str(f), 'sourceCode/scripts') for f in Path('scripts').glob('*.py')],
     ('requirements.txt','sourceCode'),
 ]
 
@@ -31,7 +34,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='calculateReturns',
+    name='CRSPR',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -51,5 +54,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='returnsCalculator',
+    name='CRSPR',
 )
