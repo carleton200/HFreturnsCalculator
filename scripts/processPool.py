@@ -1,3 +1,6 @@
+from scripts.importList import *
+from scripts.commonValues import *
+from scripts.basicFunctions import *
 
 def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
     #Function to take all the information for one pool, calculate all relevant information, and return a list of the calculations

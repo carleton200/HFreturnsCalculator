@@ -1,9 +1,9 @@
 from scripts.importList import *
 
-currentVersion = "1.1.8"
+currentVersion = "1.1.9"
 demoMode = True
 ownershipCorrect = True
-importInterval = relativedelta(hours=2)
+importInterval = relativedelta(hours=3)
 calculationPingTime = 2
 ownershipFlagTolerance = 0.001
 
@@ -46,4 +46,3 @@ timeOptions = ["MTD","QTD","YTD", "ITD", "IRR ITD"] + [f"{y}YR" for y in yearOpt
 percent_headers = {option for option in timeOptions}
 for header in ("Return","Ownership"):
     percent_headers.add(header)
-

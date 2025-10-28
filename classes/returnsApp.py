@@ -882,8 +882,9 @@ class returnsApp(QWidget):
         for yr in yearOptions:
             YR_times[yr] = [datetime.strftime(endTime - relativedelta(months=i),"%B %Y") for i in range(12 * yr)]
         for level in monthOutput.keys():
-            if level not in complexOutput:
+            if level not in complexOutput or complexOutput[level]['dataType'] == "benchmark":
                 continue #occurs when complexOutput filtered out a row such as hiddenLayer. so ignore
+                        # also ignores benchmarks as their time calculations are all imported
             for timeFrame, monthOpts in timeSections.items():
                 complexOutput[level][timeFrame] = 1
                 for monthO in monthOpts:
