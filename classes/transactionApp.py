@@ -1,5 +1,15 @@
-from scripts.loggingFuncs import attach_logging_to_class
 from scripts.importList import *
+from scripts.loggingFuncs import attach_logging_to_class
+from classes.DatabaseManager import DatabaseManager
+from scripts.instantiate_basics import *
+from classes.widgetClasses import *
+from scripts.commonValues import *
+from classes.DatabaseManager import *
+from scripts.processPool import processPool
+from scripts.basicFunctions import *
+from classes.windowClasses import *
+from classes.tableWidgets import *
+
 @attach_logging_to_class
 class transactionApp(QWidget):
     def __init__(self, start_index=0, apiKey = None):
@@ -1144,7 +1154,8 @@ class transactionApp(QWidget):
                 "benchCols" : (f"Index, As of date, MTD %, QTD %, YTD %, ITD cumulative %, ITD TWRR %, "
                                f"{', '.join(f'Last {y} yr %' for y in yearOptions)}"), 
             }
-            calculationsTest = load_from_db("calculations", db=TRAN_DATABASE_PATH)
+            calculationsTest = [] #load_from_db("calculations", db=TRAN_DATABASE_PATH)
+            #Currently forcing to calculate from scratch every time
             if calculationsTest != []:
                 skipCalculations = True
                 self.poolChangeDates["active"] = True
@@ -1500,7 +1511,7 @@ class transactionApp(QWidget):
                 gui_queue.put(lambda: self.calculationLoadingBox.setVisible(True))
                 self.updateMonths()
                 gui_queue.put(lambda: self.pullLevelNames())
-                print("Calculating return....")
+                print("Calculating differences....")
                 fundListDB = load_from_db("funds", db=TRAN_DATABASE_PATH)
                 fundList = {}
                 for fund in fundListDB:
@@ -1512,6 +1523,7 @@ class transactionApp(QWidget):
                     noCalculations = True
                 else:
                     noCalculations = False
+                noCalculations = True #force to calculate from scratch
 
                 if self.earliestChangeDate > datetime.now() and not noCalculations:
                     #if no new data exists, use old calculations
@@ -1590,7 +1602,7 @@ class transactionApp(QWidget):
                     
                     self.calcStartTime = datetime.now()
                     for pool in self.pools:
-                        res = self.pool.apply_async(processPoolTransactions, args=(pool, commonData,self.workerStatusQueue, self.workerDBqueue, self.calcFailedFlag))
+                        res = self.pool.apply_async(processPool, args=(pool, commonData,self.workerStatusQueue, self.workerDBqueue, self.calcFailedFlag, True))
                         self.futures.append(res)
                     self.pool.close()
 
@@ -1740,6 +1752,7 @@ class transactionApp(QWidget):
                 except Exception as e:
                     print(f"Error appending calculations: {e}")
             keys = []
+            calculations = [entry for entry in calculations if isinstance(entry,dict)]
             for row in calculations:
                 for key in row.keys():
                     if key not in keys:

@@ -1,6 +1,10 @@
 from classes.DatabaseManager import load_from_db, save_to_db
 from scripts.importList import *
 from scripts.loggingFuncs import attach_logging_to_class
+from classes.widgetClasses import *
+from scripts.basicFunctions import *
+from scripts.exportTableToExcel import exportTableToExcel
+
 class linkBenchmarksWindow(QWidget):
     def __init__(self, parent=None, flags=Qt.WindowFlags(), parentSource=None):
         super().__init__(parent, flags)
@@ -15,7 +19,6 @@ class linkBenchmarksWindow(QWidget):
         self.selected_asset_level = None
         self.selected_asset = None
         self.selected_benchmark = None
-
         self.init_ui()
 
     def init_ui(self):
@@ -177,7 +180,9 @@ class linkBenchmarksWindow(QWidget):
             QMessageBox.information(self, "Success", f"Deleted link: {link['benchmark']} to {link['asset']} at level {link['assetLevel']}.")
         except Exception as e:
             QMessageBox.warning(self, "Delete Error", f"Error deleting link: {e}")
+        self.parent.db.fetchBenchmarkLinks(update=True)
         self.refreshLinks()
+        self.parent.buildReturnTable()
     def addTableElementBenchmarkLink(self):
         asset = self.tableElementCombo.currentText()
         levelIdx = 0 if asset == "Total" else -1
@@ -648,7 +653,7 @@ class underlyingDataWindow(QWidget):
                             inputs.extend(filterSelections)
                 inputs.extend([highTables[table],allEnd])
                 try:
-                    rows = load_from_db(table,query.removesuffix("AND") + " AND [Date] BETWEEN ? AND ?", tuple(inputs))
+                    rows = load_from_db(table,query.removesuffix("AND") + " AND [Date] BETWEEN ? AND ?", tuple(inputs), db=self.db)
                 except Exception as e:
                     print(f"Error in call : {e} ; {e.args}")
                     rows = []

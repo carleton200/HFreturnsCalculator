@@ -1,6 +1,6 @@
 from scripts.importList import *
 
-currentVersion = "1.1.9"
+currentVersion = "1.1.10"
 demoMode = True
 ownershipCorrect = True
 importInterval = relativedelta(hours=3)

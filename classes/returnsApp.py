@@ -209,8 +209,7 @@ class returnsApp(QWidget):
         self.importButton.clicked.connect(self.beginImport)
         clearButton = QPushButton('Full Recalculation')
         clearButton.clicked.connect(self.resetData)
-        if not demoMode:
-            controlsLayout.addWidget(clearButton, stretch=0)
+        controlsLayout.addWidget(clearButton, stretch=0)
         controlsLayout.addWidget(self.importButton, stretch=0)
         btn_to_results = QPushButton('See Calculation Database')
         btn_to_results.clicked.connect(self.show_results)
@@ -239,7 +238,6 @@ class returnsApp(QWidget):
         buttonLayout = QVBoxLayout()
         for idx, rb in enumerate((self.complexTableBtn,self.monthlyTableBtn)):
             self.tableBtnGroup.addButton(rb)
-            #rb.toggled.connect(self.updateTableType)
             buttonLayout.addWidget(rb)
         self.returnOutputType = QComboBox()
         self.returnOutputType.addItems(headerOptions)
@@ -390,7 +388,7 @@ class returnsApp(QWidget):
             print("No previous import found")
             #pull data is there is no data pulled yet
             self.importButton.setEnabled(False)
-            executor.submit(lambda: self.pullData())
+            executor.submit(self.pullData)
         else:
             lastImportString = self.lastImportDB[0]["lastImport"]
             lastImport = datetime.strptime(lastImportString, "%B %d, %Y @ %I:%M %p")  
@@ -403,7 +401,6 @@ class returnsApp(QWidget):
                 executor.submit(self.pullData)
             else:
                 calculations = load_from_db("calculations")
-                self.processFunds()
                 if calculations != []:
                     self.populate(self.calculationTable,calculations)
                     self.buildReturnTable()
@@ -416,7 +413,7 @@ class returnsApp(QWidget):
             lastImport = datetime.strptime(lastImportString, "%B %d, %Y @ %I:%M %p")  
             now = datetime.now()
             if lastImport.month != now.month or now > (lastImport + importInterval):
-                print(f"Reimporting due to time elapsing. \n     Last import: {lastImport}\n    Current time: {now}")
+                print(f"Reimporting due to the time elapsing. \n     Last import: {lastImport}\n    Current time: {now}")
                 #pull data if in a new month or 1 days have elapsed
                 executor.submit(self.pullData)
         except:
@@ -581,14 +578,41 @@ class returnsApp(QWidget):
                     selections = self.filterDict.get(filter.get("key")).checkedItems()
                     if selections != []:
                         filterSelections[filter.get("key")] = ", ".join(selections)
-                if filterSelections:
-                    cell = ws.cell(row=1,column=1,value="Filters:")
-                    cell.font = Font(bold=True)
-                    cell = ws.cell(row=2,column=1,value="Selections:")
-                    cell.font = Font(bold=True)
-                    for idx, filter in enumerate(filterSelections, start=2):
-                        ws.cell(row=1,column=idx, value=filter)
-                        cell = ws.cell(row=2,column=idx, value=filterSelections.get(filter))
+
+                # Determine date range to display in column A
+                date_start = ""
+                date_end = ""
+                # Try to retrieve selected date range values if possible
+                try:
+                    if hasattr(self, "dataStartSelect") and hasattr(self.dataStartSelect, "currentText"):
+                        date_start = self.dataStartSelect.currentText()
+                    if hasattr(self, "dataEndSelect") and hasattr(self.dataEndSelect, "currentText"):
+                        date_end = self.dataEndSelect.currentText()
+                except Exception:
+                    pass
+                date_range_str = ""
+                if date_start or date_end:
+                    if date_start and date_end:
+                        date_range_str = f"{date_start} to {date_end}"
+                    elif date_start:
+                        date_range_str = f"Start: {date_start}"
+                    elif date_end:
+                        date_range_str = f"End: {date_end}"
+
+                if filterSelections or date_range_str:
+                    # Date range in column A
+                    ws.cell(row=1, column=1, value="Date Range:")
+                    ws.cell(row=2, column=1, value=date_range_str)
+                    ws.cell(row=1, column=1).font = Font(bold=True)
+                    ws.cell(row=2, column=1).font = Font(bold=True)
+                    # Filters start at column 2
+                    ws.cell(row=1, column=2, value="Filters:")
+                    ws.cell(row=2, column=2, value="Selections:")
+                    ws.cell(row=1, column=2).font = Font(bold=True)
+                    ws.cell(row=2, column=2).font = Font(bold=True)
+                    for idx, filter in enumerate(filterSelections, start=3):
+                        ws.cell(row=1, column=idx, value=filter)
+                        cell = ws.cell(row=2, column=idx, value=filterSelections.get(filter))
                         cell.alignment = Alignment(wrap_text=True)
 
             
@@ -692,15 +716,10 @@ class returnsApp(QWidget):
             self.processFunds()
         def buildTable(cancelEvent):
             try:
-                startTime = datetime.now()
                 print("Building return table...")
                 self.currentTableData = None #resets so a failed build won't be used
-                
-                if self.tableBtnGroup.checkedButton().text() == "Complex Table":
-                    gui_queue.put(lambda: self.returnOutputType.setCurrentText("Return"))
-                    gui_queue.put(lambda: self.dataTypeBox.setVisible(False))
-                else:
-                    gui_queue.put(lambda: self.dataTypeBox.setVisible(True))
+                complexMode = self.tableBtnGroup.checkedButton().text() == "Complex Table"
+                gui_queue.put(lambda: self.dataTypeBox.setVisible(not complexMode))
                 if self.filterDict["Investor"].checkedItems() == [] and self.filterDict[nameHier["Family Branch"]["local"]].checkedItems() == []:
                     #if no investor level selections,show full portfolio information
                     parameters = ["Total Fund"]
@@ -732,19 +751,23 @@ class returnsApp(QWidget):
                                 parameters.append(param)
                             placeholders = ','.join('?' for _ in paramTemp)
                             condStatement += f" AND [{filter["key"]}] IN ({placeholders})"
+                # Add time filter to condStatement for database-level filtering
+                startDate = datetime.strptime(self.dataStartSelect.currentText(), "%B %Y")
+                startDateStr = startDate.strftime("%Y-%m-%d %H:%M:%S")
+                endDate = datetime.strptime(self.dataEndSelect.currentText(), "%B %Y")
+                endDateStr = endDate.strftime("%Y-%m-%d %H:%M:%S")
+                condStatement += f" AND [dateTime] >= ? AND [dateTime] <= ?"
+                parameters.append(startDateStr)
+                parameters.append(endDateStr)
                 gui_queue.put(lambda: self.buildTableLoadingBar.setValue(3))
                 if cancelEvent.is_set(): #exit if new table build request is made
                     return
-                print(f"Processed filters. Elapsed: {(datetime.now() - startTime).total_seconds()}")
                 data = load_from_db("calculations",condStatement, tuple(parameters), lock=self.lock)
-                print(f"Loaded calculations. Elapsed: {(datetime.now() - startTime).total_seconds()}")
                 output = {"Total##()##" : {}}
                 flagOutput = {"Total##()##" : {}}
                 if self.benchmarkSelection.checkedItems() != [] or self.showBenchmarkLinksBtn.isChecked():
                     output = self.applyBenchmarks(output)
-                print(f"Applied benchmarks. Elapsed: {(datetime.now() - startTime).total_seconds()}")
                 output , data = self.calculateUpperLevels(output,data)
-                print(f"Calculated Upper levels. Elapsed: {(datetime.now() - startTime).total_seconds()}")
                 for benchmark in self.pendingBenchmarks: #remove the benchmarks used only in benchmark links
                     if benchmark not in self.benchmarkChoices and benchmark + self.buildCode([]) in output.keys():
                         output.pop(benchmark + self.buildCode([]))
@@ -753,54 +776,88 @@ class returnsApp(QWidget):
                     return
                 complexOutput = copy.deepcopy(output)
                 multiData = {}
-                dataOutputType = self.returnOutputType.currentText()
+                # Cache frequently used values and avoid repeated lookups/parsing in the loop
+                headerOptions_local = headerOptions
+                complexMode_local = complexMode
+                end_month_str = self.dataEndSelect.currentText()
+                cFunds_checked = self.consolidateFundsBtn.isChecked()
+                consolidatedFunds_local = self.consolidatedFunds
+                investor_checked = self.filterDict["Investor"].checkedItems() != []
+                fam_checked = self.filterDict["Family Branch"].checkedItems() != []
+                # Map "%" to NAV only for non-complex mode
+                dataOutputType = self.returnOutputType.currentText() if not complexMode_local else "Return"
+                if not complexMode_local and dataOutputType == "%":
+                    dataOutputType = "NAV"
+                # Cache month string conversions by timestamp
+                month_cache = {}
+                get_month = month_cache.get
+                set_month = month_cache.__setitem__
+                # Local refs for speed
+                out_ref = output
+                c_out_ref = complexOutput
+                flag_ref = flagOutput
                 for entry in data:
-                    if (datetime.strptime(entry["dateTime"], "%Y-%m-%d %H:%M:%S") >  datetime.strptime(self.dataEndSelect.currentText(),"%B %Y") or 
-                        datetime.strptime(entry["dateTime"], "%Y-%m-%d %H:%M:%S") <  datetime.strptime(self.dataStartSelect.currentText(),"%B %Y")):
-                        #don't build in data outside the selection
-                        continue
-                    date = datetime.strftime(datetime.strptime(entry["dateTime"], "%Y-%m-%d %H:%M:%S"), "%B %Y")
+                    e_get = entry.get
+                    # month string from dateTime (with small cache)
+                    dt_str = e_get("dateTime")
+                    month_str = get_month(dt_str)
+                    if month_str is None:
+                        month_str = datetime.strftime(datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S"), "%B %Y")
+                        set_month(dt_str, month_str)
                     Dtype = entry["Calculation Type"]
                     level = entry["rowKey"]
-                    if dataOutputType == "IRR ITD" and ((self.consolidateFundsBtn.isChecked() and entry.get("Fund") in self.consolidatedFunds) or entry.get("Calculation Type") != "Total Fund"):
-                        #this only skips for monthly table
-                        continue #cannot use IRR ITD for consolidated funds
-                    if level not in output.keys():
-                        output[level] = {}
-                    if entry.get(dataOutputType) not in (None,"None",""):
-                        flagOutput.setdefault(level,{}).setdefault(date,False)
-                        flagOutput[level][date] = entry.get("ownershipAdjust",'False') == 'True' or flagOutput.setdefault(level,{}).setdefault(date,False)
-                        if date not in output[level].keys():
-                            #creates value if not exists. If it is not return percent, sums the values
-                            output[level][date] = float(entry.get(dataOutputType))
+                    if dataOutputType == "IRR ITD" and ((cFunds_checked and e_get("Fund") in consolidatedFunds_local) or e_get("Calculation Type") != "Total Fund"):
+                        # skip for consolidated funds or non-total
+                        continue
+                    # ensure output[level]
+                    lvl_out = out_ref.get(level)
+                    if lvl_out is None:
+                        lvl_out = {}
+                        out_ref[level] = lvl_out
+                    val = e_get(dataOutputType)
+                    if val not in (None, "None", ""):
+                        # flags
+                        level_flags = flag_ref.setdefault(level, {})
+                        level_flags.setdefault(month_str, False)
+                        level_flags[month_str] = (e_get("ownershipAdjust", 'False') == 'True') or level_flags[month_str]
+                        # aggregate
+                        if month_str not in lvl_out:
+                            lvl_out[month_str] = float(val)
                         elif dataOutputType not in ("Return", "Ownership"):
-                            output[level][date] += float(entry.get(dataOutputType))
-                        else: #should only reach here if two calculations exist of the same exact row which needs special handling of the return
-                            multiData.setdefault(level,{})
-                    if "dataType" not in output[level].keys():
-                        output[level]["dataType"] = Dtype
-                    if self.tableBtnGroup.checkedButton().text() == "Complex Table" and date == self.dataEndSelect.currentText():
-                        if level not in complexOutput.keys():
-                            complexOutput[level] = {}
-                        if "dataType" not in complexOutput[level].keys():
-                            complexOutput[level]["dataType"] = Dtype
-                        flagOutput.setdefault(level,{}).setdefault("NAV",False)
-                        flagOutput[level]["NAV"] = entry.get("ownershipAdjust",'False') == 'True' or flagOutput.setdefault(level,{}).setdefault("NAV",False)
-                        if headerOptions[0] not in complexOutput[level].keys() and headerOptions:
-                            for option in headerOptions:
-                                if option == "IRR ITD" and ((self.consolidateFundsBtn.isChecked() and entry.get("Fund") in self.consolidatedFunds) or entry.get("Calculation Type") != "Total Fund"):
-                                    continue #cannot use IRR ITD for consolidated funds
-                                complexOutput[level][option] = float(entry[option] if entry.get(option) not in (None,"None","") else 0)
+                            lvl_out[month_str] += float(val)
                         else:
-                            for option in headerOptions:
+                            # same row needs special handling later
+                            multiData.setdefault(level, {})
+                    if "dataType" not in lvl_out:
+                        lvl_out["dataType"] = Dtype
+                    # complex table accumulation only at end month
+                    if complexMode_local and month_str == end_month_str:
+                        lvl_c_out = c_out_ref.get(level)
+                        if lvl_c_out is None:
+                            lvl_c_out = {}
+                            c_out_ref[level] = lvl_c_out
+                        if "dataType" not in lvl_c_out:
+                            lvl_c_out["dataType"] = Dtype
+                        level_flags = flag_ref.setdefault(level, {})
+                        nav_flag = level_flags.setdefault("NAV", False)
+                        level_flags["NAV"] = (e_get("ownershipAdjust", 'False') == 'True') or nav_flag
+                        if headerOptions_local and headerOptions_local[0] not in lvl_c_out:
+                            for option in headerOptions_local:
+                                if option == "IRR ITD" and ((cFunds_checked and e_get("Fund") in consolidatedFunds_local) or e_get("Calculation Type") != "Total Fund"):
+                                    continue
+                                ov = e_get(option)
+                                lvl_c_out[option] = float(ov if ov not in (None, "None", "") else 0)
+                        else:
+                            for option in headerOptions_local:
                                 if option not in ("Ownership", "IRR ITD"):
-                                    #do not sum IRR ITD or ownership in any scenario. Should only occur for consolidation anyways
-                                    complexOutput[level][option] += float(entry[option] if entry.get(option) not in (None,"None","") else 0)
-                        if entry.get("Ownership") not in (None,"None") and (self.filterDict["Investor"].checkedItems() != [] or self.filterDict["Family Branch"].checkedItems() != []):
-                            if "Ownership" not in complexOutput[level].keys():
-                                complexOutput[level]["Ownership"] = float(entry["Ownership"])
+                                    ov = e_get(option)
+                                    lvl_c_out[option] += float(ov if ov not in (None, "None", "") else 0)
+                        if e_get("Ownership") not in (None, "None") and (investor_checked or fam_checked):
+                            own = float(entry["Ownership"]) if entry.get("Ownership") not in (None, "None") else 0.0
+                            if "Ownership" not in lvl_c_out:
+                                lvl_c_out["Ownership"] = own
                             else:
-                                complexOutput[level]["Ownership"] += float(entry["Ownership"])
+                                lvl_c_out["Ownership"] += own
                             # else:
                             #     complexOutput[level]["Ownership"] += float(entry["Ownership"])
                 for tableStruc in (output,complexOutput): 
@@ -809,52 +866,42 @@ class returnsApp(QWidget):
                     pops = [key for key in keys if "dataType" not in tableStruc[key]]
                     for pop in pops:
                         tableStruc.pop(pop)
-                print(f"Organized Tables step 1. Elapsed: {(datetime.now() - startTime).total_seconds()}")
                 if multiData and dataOutputType == "Return": #must iterate through data again to correct for returns of multi pool funds
-                    for entry in data:
-                        if (datetime.strptime(entry["dateTime"], "%Y-%m-%d %H:%M:%S") >  datetime.strptime(self.dataEndSelect.currentText(),"%B %Y") or 
-                            datetime.strptime(entry["dateTime"], "%Y-%m-%d %H:%M:%S") <  datetime.strptime(self.dataStartSelect.currentText(),"%B %Y")):
-                            #don't build in data outside the selection
-                            continue
-                        if entry.get("rowKey") in multiData: #only occurs for the multifunds
-                            #sums all gains and MDden for a row for a month
-                            dateTime = entry.get("dateTime")
-                            if dateTime not in multiData[entry.get("rowKey")]:
-                                multiData[entry.get("rowKey")][entry.get("dateTime")] = {"MDdenominator" : float(entry.get("MDdenominator")), "Monthly Gain" : float(entry.get("Monthly Gain"))}
-                            else:
-                                multiData[entry.get("rowKey")][entry.get("dateTime")]["MDdenominator"] += float(entry.get("MDdenominator"))
-                                multiData[entry.get("rowKey")][entry.get("dateTime")]["Monthly Gain"] += float(entry.get("Monthly Gain"))
+                    for entry in (entry for entry in data if entry.get("rowKey") in multiData):
+                        #only occurs for the multifunds
+                        #sums all gains and MDden for a row for a month
+                        dateTime = entry.get("dateTime")
+                        if dateTime not in multiData[entry.get("rowKey")]:
+                            multiData[entry.get("rowKey")][entry.get("dateTime")] = {"MDdenominator" : float(entry.get("MDdenominator")), "Monthly Gain" : float(entry.get("Monthly Gain"))}
+                        else:
+                            multiData[entry.get("rowKey")][entry.get("dateTime")]["MDdenominator"] += float(entry.get("MDdenominator"))
+                            multiData[entry.get("rowKey")][entry.get("dateTime")]["Monthly Gain"] += float(entry.get("Monthly Gain"))
                     for rowKey in multiData: #set proper return values
                         for date in multiData.get(rowKey):
                             strDate = datetime.strftime(datetime.strptime(date, "%Y-%m-%d %H:%M:%S"), "%B %Y")
                             MDden = multiData.get(rowKey).get(date).get("MDdenominator")
                             returnVal = multiData.get(rowKey).get(date).get("Monthly Gain") / MDden * 100 if MDden != 0 else 0
                             output[rowKey][strDate] = returnVal
-                            if self.tableBtnGroup.checkedButton().text() == "Complex Table" and strDate == self.dataEndSelect.currentText():
+                            if complexMode and strDate == self.dataEndSelect.currentText():
                                 complexOutput[rowKey]["Return"] = returnVal
-                print(f"Organized tables step 2. Elapsed: {(datetime.now() - startTime).total_seconds()}")
-                if self.tableBtnGroup.checkedButton().text() == "Complex Table":
+                if complexMode:
                     for rowKey in complexOutput:
                         if complexOutput[rowKey].get("NAV",0.0) != 0:
                             complexOutput[rowKey]["%"] = complexOutput[rowKey].get("NAV",0.0) / complexOutput["Total##()##"].get("NAV",0.0) * 100 if complexOutput["Total##()##"]["NAV"] != 0 else 0
-                else:
-                    for rowKey in output:
-                        if output[rowKey].get("NAV",0.0) != 0:
-                            output[rowKey]["%"] = output[rowKey]["NAV"] / output["Total##()##"].get("NAV",0.0) * 100 if output["Total##()##"].get("NAV",0.0) != 0 else 0                
+                elif self.returnOutputType.currentText() == "%":
+                    for rowKey in reversed(output): #iterate through backwards so total is affected last
+                        for date in [header for header in output[rowKey].keys() if header != "dataType"]:
+                            output[rowKey][date] = float(output[rowKey][date]) / float(output["Total##()##"][date]) * 100 if  float(output["Total##()##"][date]) != 0 else 0                
                 gui_queue.put(lambda: self.buildTableLoadingBar.setValue(5))
                 if cancelEvent.is_set(): #exit if new table build request is made
                     return
-                if self.tableBtnGroup.checkedButton().text() == "Complex Table":
-                    print(f"Initiating complex table calculations... Elapsed: {(datetime.now() - startTime).total_seconds()}")
+                if  complexMode:
                     output = self.calculateComplexTable(output,complexOutput)
-                    print(f"Completed complex table calculations. Elapsed: {(datetime.now() - startTime).total_seconds()}")
                 gui_queue.put(lambda: self.buildTableLoadingBar.setValue(6))
                 if cancelEvent.is_set(): #exit if new table build request is made
                     return
-                deleteKeys = [key for key in output.keys() if len(output[key].keys()) == 0]
-                for key in deleteKeys:
-                    output.pop(key)
-                print(f"Populating table. Elapsed: {(datetime.now() - startTime).total_seconds()}")
+                for key in (key for key in output.keys() if len(output[key].keys()) == 0):
+                    output.pop(key) #remove empty entries
                 gui_queue.put(lambda: self.populateReturnsTable(output,flagStruc=flagOutput))
                 self.currentTableData = output
                 self.currentTableFlags = flagOutput
@@ -873,69 +920,104 @@ class returnsApp(QWidget):
         future = executor.submit(buildTable, cancelEvent)
         self.buildTableFuture = future
     def calculateComplexTable(self,monthOutput,complexOutput):
-        endTime = datetime.strptime(self.dataEndSelect.currentText(),"%B %Y")
-        MTDtime = [datetime.strftime(endTime,"%B %Y"),]
-        QTDtimes = [datetime.strftime(endTime - relativedelta(months=i),"%B %Y") for i in range(int((endTime.month)) % 3 if (int(endTime.month)) % 3 != 0 else 3)]
-        YTDtimes = [datetime.strftime(endTime - relativedelta(months=i),"%B %Y") for i in range(int((endTime.month)) % 12 if (int(endTime.month)) % 12 != 0 else 12)]
-        YR_times = {}
-        timeSections = {"MTD" : MTDtime, "QTD" : QTDtimes, "YTD" : YTDtimes}
-        for yr in yearOptions:
-            YR_times[yr] = [datetime.strftime(endTime - relativedelta(months=i),"%B %Y") for i in range(12 * yr)]
-        for level in monthOutput.keys():
-            if level not in complexOutput or complexOutput[level]['dataType'] == "benchmark":
-                continue #occurs when complexOutput filtered out a row such as hiddenLayer. so ignore
-                        # also ignores benchmarks as their time calculations are all imported
+        # Precompute end-of-period and month sequences
+        endTime = datetime.strptime(self.dataEndSelect.currentText(), "%B %Y")
+        end_month_str = datetime.strftime(endTime, "%B %Y")
+        MTDtime = [end_month_str]
+        # avoid repeated int() calls
+        end_month = endTime.month
+        q_len = (end_month % 3) if (end_month % 3) != 0 else 3
+        y_len = (end_month % 12) if (end_month % 12) != 0 else 12
+        QTDtimes = [datetime.strftime(endTime - relativedelta(months=i), "%B %Y") for i in range(q_len)]
+        YTDtimes = [datetime.strftime(endTime - relativedelta(months=i), "%B %Y") for i in range(y_len)]
+        timeSections = {"MTD": MTDtime, "QTD": QTDtimes, "YTD": YTDtimes}
+        # Year windows
+        YR_times = {yr: [datetime.strftime(endTime - relativedelta(months=i), "%B %Y") for i in range(12 * yr)] for yr in yearOptions}
+
+        # Local refs for speed
+        mo = monthOutput
+        co = complexOutput
+
+        # Cache for parsing month strings
+        month_dt_cache = {}
+        def parse_month_str(s):
+            dt = month_dt_cache.get(s)
+            if dt is None:
+                dt = datetime.strptime(s, "%B %Y")
+                month_dt_cache[s] = dt
+            return dt
+
+        for level, lvl_month in mo.items():
+            lvl_co = co.get(level)
+            if not lvl_co or lvl_co.get('dataType') == "benchmark":
+                # Skip filtered rows and benchmarks (imported separately)
+                continue
+
+            # Aggregate MTD/QTD/YTD compounded performance
             for timeFrame, monthOpts in timeSections.items():
-                complexOutput[level][timeFrame] = 1
+                cPerf = 1.0
+                # multiply only months present
                 for monthO in monthOpts:
-                    complexOutput[level][timeFrame] *= (1 + float(monthOutput[level][monthO]) / 100) if monthO in monthOutput[level] else 1
-                complexOutput[level][timeFrame] = (complexOutput[level][timeFrame] - 1) * 100
-            for yearKey in YR_times.keys():
-                if (all(month in monthOutput[level].keys() for month in YR_times[yearKey]) and 
-                    not any(complexOutput[level].get("NAV",1) == 0 and float(monthOutput[level][month]) == 0 for month in YR_times[yearKey])):
-                    #dont calculate if it includes empty fund times
-                    headerKey = f"{yearKey}YR"
-                    complexOutput[level][headerKey] = 1
-                    for month in YR_times[yearKey]:
-                        complexOutput[level][headerKey] *= (1 + float(monthOutput[level][month]) / 100 )
-                    complexOutput[level][headerKey] = ((complexOutput[level][headerKey] ** (1/int(yearKey)) ) - 1 ) * 100 if complexOutput[level][headerKey] > 0 else -1 * ((abs(complexOutput[level][headerKey]) ** (1/int(yearKey)) ) - 1)* 100
+                    val = lvl_month.get(monthO)
+                    if val is not None:
+                        cPerf *= (1.0 + float(val) / 100.0)
+                    if cPerf < 0:
+                        cPerf = -1.999
+                        break
+                lvl_co[timeFrame] = (cPerf - 1.0) * 100.0 if cPerf > 0 else -999
+
+            # Yearly windows compounded and annualized
+            lvl_month_keys = lvl_month.keys()
+            nav_zero = (lvl_co.get("NAV", 1) == 0)
+            for yearKey, months in YR_times.items():
+                # Ensure all months are present
+                if not all(m in lvl_month_keys for m in months):
+                    continue
+                # Skip if NAV==0 and any month return is 0
+                if nav_zero and any(float(lvl_month[m]) == 0 for m in months):
+                    continue
+                cYR = 1.0
+                for m in months:
+                    cYR *= (1.0 + float(lvl_month[m]) / 100.0)
+                    if cYR < 0:
+                        cYR = -1.999
+                        break
+                lvl_co[f"{yearKey}YR"] = (((cYR ** (1 / int(yearKey))) - 1) * 100.0) if cYR > 0 else -999
+
+            # ITD
             try:
-                if monthOutput[level].get("dataType","") != "benchmark":
-                    monthCount = 0
-                    if MTDtime[0] in monthOutput[level].keys():
-                        #only runs ITD if it is a current fund (MTD month exists)
-                        ITDmonths = list(monthOutput[level].keys())
-                        ITDmonths = [m for m in ITDmonths if m != "dataType"]
-                        ITDmonths = sorted([datetime.strptime(date,"%B %Y") for date in ITDmonths])
-                        
-                        ITDmonths = [datetime.strftime(date,"%B %Y") for date in ITDmonths]
-                        if len(ITDmonths) >= 2:
-                            #only calculates if more than previous month
-                            #ITDmonths = ITDmonths[1:] #remove first month?? 
-                            complexOutput[level]["ITD"] = 1
-                            for month in ITDmonths:
-                                if (month != "dataType" and datetime.strptime(month,"%B %Y") <= datetime.strptime(self.dataEndSelect.currentText(),"%B %Y")):
-                                    #and not (complexOutput[level].get("NAV",1) == 0 and float(monthOutput[level][month]) == 0)): 
-                                    #skip if there is no value and no return, should mean the fund was empty so it should not factor in to ITD
-                                    monthCount += 1
-                                    if (1 + float(monthOutput[level][month]) / 100 ) < 0:
-                                        #if a negative value breaks the ITD calculation, flag it with -999%
-                                        complexOutput[level]["ITD"] = -1.999 #displays -999% as a flag
-                                        monthCount = 14 #results in annualization checking for negative
-                                        break
-                                    else:
-                                        complexOutput[level]["ITD"] *= (1 + float(monthOutput[level][month]) / 100 )
-                            complexOutput[level]["ITD"] = annualizeITD(complexOutput[level]["ITD"],monthCount)
-                            
+                if lvl_month.get("dataType", "") != "benchmark":
+                    if end_month_str in lvl_month:
+                        # months up to endTime
+                        # build list of (dt, str) once, ignoring 'dataType'
+                        month_pairs = []
+                        for m in lvl_month_keys:
+                            if m == "dataType":
+                                continue
+                            dt = parse_month_str(m)
+                            if dt <= endTime:
+                                month_pairs.append((dt, m))
+                        if len(month_pairs) >= 2:
+                            month_pairs.sort(key=lambda x: x[0])
+                            cITD = 1.0
+                            monthCount = 0
+                            for _, m in month_pairs:
+                                monthCount += 1
+                                cITD *= (1.0 + float(lvl_month[m]) / 100.0)
+                                if cITD < 0:
+                                    cITD = -1.999
+                                    monthCount = 14
+                                    break
+                            lvl_co["ITD"] = annualizeITD(cITD, monthCount)
                         else:
-                            #ITD is just the previous month if no more months are found
-                            complexOutput[level]["ITD"] = monthOutput[level][MTDtime]
+                            # ITD is just the previous month if no more months are found
+                            lvl_co["ITD"] = lvl_month[MTDtime]
                 else:
-                    complexOutput[level]["ITD"] = monthOutput[level]["ITD"]
-            except Exception as e:
+                    lvl_co["ITD"] = lvl_month["ITD"]
+            except Exception:
                 pass
 
-        return complexOutput
+        return co
     def applyBenchmarks(self, output):
         if self.showBenchmarkLinksBtn.isChecked(): #activate the benchmark links so they are all used if relevant
             benchmarkLinks = self.db.fetchBenchmarkLinks()
@@ -974,6 +1056,19 @@ class returnsApp(QWidget):
             code = f"##({"::".join(path)})##"
             return code
     def calculateUpperLevels(self, tableStructure,data):
+        # Hot-path caches and precomputations for performance on large inputs
+        headerOptions_local = headerOptions
+        dataOptions_local = dataOptions
+        sortHierarchy = self.sortHierarchy.checkedItems()
+        buildCode = self.buildCode
+        showBenchLinks = self.showBenchmarkLinksBtn.isChecked()
+        consolidateFunds = self.consolidateFundsBtn.isChecked()
+        consolidatedFunds_map = self.consolidatedFunds
+        # Precompute end-of-period datetime once for NAV sorting comparisons
+        try:
+            end_period_dt = datetime.strptime(self.dataEndSelect.currentText(), "%B %Y")
+        except Exception:
+            end_period_dt = None
         def applyLinkedBenchmarks(struc,code, levelName, option):
             for entry in benchmarkLinks:
                 if levelName == assetLevelLinks[entry.get("assetLevel")].get("Link") and option == entry.get("asset"):
@@ -990,15 +1085,17 @@ class returnsApp(QWidget):
                                             "assetClass" : None, "subAssetClass" : None, "Investor" : None,
                                             "Return" : None , nameHier["sleeve"]["local"] : None,
                                             "Ownership" : None, "IRR ITD" : None}
-            for header in headerOptions:
+            for header in headerOptions_local:
                 if header not in ("Ownership", "IRR ITD"):
                     entryTemplate[header] = 0
 
-            #check for filtering. If none, use all options
-            options = []
-            for entry in data: #all available data
-                if entry[levelName] not in options: #
-                    options.append(entry[levelName])
+            # Group data once by the current level to avoid repeated scans
+            from collections import defaultdict
+            grouped_by_level = defaultdict(list)
+            for _e in data:
+                grouped_by_level[_e[levelName]].append(_e)
+            # Derive options from grouped keys
+            options = list(grouped_by_level.keys())
             if levelName == "subAssetClass":
                 # Sort options so those in assetClass2Order come first (in the given order),
                 # then anything else not in assetClass2Order appears after (sorted alphabetically)
@@ -1016,16 +1113,14 @@ class returnsApp(QWidget):
                     
                     highEntries = {}
                     name = option if levelName != "assetClass" or option != "Cash" else "Cash "
-                    code = self.buildCode(tempPath)
+                    code = buildCode(tempPath)
                     struc[name + code] = {} #place table space for that level selection
-                    if self.showBenchmarkLinksBtn.isChecked():
+                    if showBenchLinks:
                         struc = applyLinkedBenchmarks(struc,code, levelName, option)
                                 
                                 
-                    levelData = []
-                    for entry in data: #separates out only relevant data
-                        if entry[levelName] == option:
-                            levelData.append(entry)
+                    #separates out only relevant data
+                    levelData = grouped_by_level.get(option, [])
                     if len(sortHierarchy) > levelIdx + 1 and levelName == "subAssetClass" and sortHierarchy[levelIdx] == "subAssetSleeve" and option in self.db.fetchOptions("asset3Visibility").keys():
                         #will skip the subAssetSleeve for hidden ones and send the entire section of data to the next level
                         tempPath.append("hiddenLayer")
@@ -1037,7 +1132,7 @@ class returnsApp(QWidget):
                         if total["dateTime"] not in highEntries.keys():
                             highEntries[total["dateTime"]] = copy.deepcopy(entryTemplate)
                             highEntries[total["dateTime"]]["rowKey"] = name + code
-                            for label in dataOptions:
+                            for label in dataOptions_local: #instantiates basic string values
                                 highEntries[total["dateTime"]][label] = total[label]
                             if levelName not in ("Investor","Family Branch"):
                                 highEntries[total["dateTime"]][levelName] = total[levelName] if total[levelName] != "Cash" or levelName != "assetClass" else "Cash "
@@ -1045,17 +1140,18 @@ class returnsApp(QWidget):
                                     highEntries[total["dateTime"]]["assetClass"] = total["assetClass"] if total["assetClass"] != "Cash" else "Cash "
                         if highEntries[total["dateTime"]].get("ownershipAdjust", 'False') == 'False' and total.get('ownershipAdjust','False') == 'True':
                             highEntries[total["dateTime"]]["ownershipAdjust"] = 'True'
-                        for header in headerOptions:
+                        for header in headerOptions_local:
                             if header not in ("Ownership", "IRR ITD"):
                                 highEntries[total["dateTime"]][header] += float(total[header])
                             elif header == "Ownership" and levelName in ("Pool", "Investor", "Family Branch") and total.get(header) not in (None,"None","",0) and "Pool" in sortHierarchy[:levelIdx]:
+                                #allows aggregation of ownership if above level is parent investor or overall pool
                                 if highEntries[total["dateTime"]].get(header) is None:
                                     highEntries[total["dateTime"]][header] = float(total[header]) #initialize
                                 else:
                                     highEntries[total["dateTime"]][header] += float(total[header]) #aggregate pool ownerships
                     for month in highEntries.keys():
                         highEntries[month]["Return"] = highEntries[month]["Monthly Gain"] / highEntries[month]["MDdenominator"] * 100 if highEntries[month]["MDdenominator"] != 0 else 0
-                        highTotals.append(highEntries[month])
+                    highTotals.extend([hEntry for _,hEntry in highEntries.items()])
                 newTotalEntries.extend(highTotals)       
                 #high totals: all totals for the exact level
                 #newTotalEntries: all totals for every level being tracked
@@ -1065,53 +1161,63 @@ class returnsApp(QWidget):
                 totalDataLow = []
                 if levelName == "subAssetSleeve" and sortHierarchy[levelIdx - 2] == "subAssetClass" and insertedOption in self.db.fetchOptions("asset3Visibility").keys():
                     options = ["hiddenLayer"]
+                NAVsort = "NAV" in self.sortStyle.text()
                 for option in options:
-                    tempPath = path.copy()
-                    tempPath.append(option)
                     totalEntriesLow = {}
                     name = option if not(levelName == "assetClass" and option == "Cash") else "Cash " #adds a space to cash L1 for differentiation
-                    code = self.buildCode(tempPath)
+                    code = buildCode([*path,option])
                     if option != "hiddenLayer":
                         struc[name + code] = {} #place table space for that level selection
-                        if self.showBenchmarkLinksBtn.isChecked():
+                        if showBenchLinks:
                             struc = applyLinkedBenchmarks(struc,code, levelName, option)
-                        levelData = [entry for entry in data if entry[levelName] == option] #separates out only relevant data
+                        levelData = grouped_by_level.get(option, []) #separates out only relevant data
                     else:
                         levelData = data #dont filter the data for hidden layer
-                    #gui_queue.put(lambda rows = levelData, name = option: self.openTableWindow(rows,f"data for: {name}"))
-                    nameList = {}
+                    nameList = {} #used for sorting by descending NAV
                     investorsAccessed = {}
                     for entry in levelData:
-                        fundName = entry["Fund"] if not self.consolidateFundsBtn.isChecked() or entry["Fund"] not in self.consolidatedFunds or entry["Fund"] in self.filterDict["Fund"].checkedItems() else self.consolidatedFunds.get(entry["Fund"]).get("cFund")
-                        nameList.setdefault(fundName + code,0.0)
-                        if "NAV" in self.sortStyle.text() and datetime.strptime(entry["dateTime"], "%Y-%m-%d %H:%M:%S") == datetime.strptime(self.dataEndSelect.currentText(),"%B %Y"):
-                            nameList[fundName + code] += float(entry.get("NAV",0.0)) if entry.get("NAV",0.0) not in (None,"None","" ,0) else 0.0
+                        fund_raw = entry["Fund"]
+                        if not consolidateFunds or fund_raw not in consolidatedFunds_map or fund_raw in self.filterDict["Fund"].checkedItems():
+                            fundName = fund_raw
+                        else:
+                            fundName = consolidatedFunds_map.get(fund_raw).get("cFund")
+                        name_key = fundName + code
+                        nameList[name_key] = nameList.get(name_key, 0.0)
+                        if NAVsort and end_period_dt is not None and datetime.strptime(entry["dateTime"], "%Y-%m-%d %H:%M:%S") == end_period_dt:
+                            #store list of names and NAVs to sort by descending NAV
+                            nav_val = entry.get("NAV", 0.0)
+                            nameList[name_key] += float(nav_val) if nav_val not in (None,"None","" ,0) else 0.0
                         temp = entry.copy()
-                        temp["rowKey"] = fundName + code
+                        temp["rowKey"] = name_key
                         totalDataLow.append(temp)
                         if entry["dateTime"] not in totalEntriesLow:
                             totalEntriesLow[entry["dateTime"]] = copy.deepcopy(entryTemplate)
-                            totalEntriesLow[entry["dateTime"]]["rowKey"] =name + code
-                            for label in dataOptions:
+                            totalEntriesLow[entry["dateTime"]]["rowKey"] = name + code
+                            for label in dataOptions_local:
                                 totalEntriesLow[entry["dateTime"]][label] = entry[label]
                             if levelName not in ("Investor","Family Branch"):
-                                totalEntriesLow[entry["dateTime"]][levelName] = entry[levelName] if entry[levelName] != "Cash" or levelName != "assetClass" else "Cash "
+                                lvl_val = entry[levelName]
+                                totalEntriesLow[entry["dateTime"]][levelName] = lvl_val if not (lvl_val == "Cash" and levelName == "assetClass") else "Cash "
                                 if levelName == "subAssetClass":
                                     totalEntriesLow[entry["dateTime"]]["assetClass"] = entry["assetClass"] if entry["assetClass"] != "Cash" else "Cash "
                         if totalEntriesLow[entry["dateTime"]].get("ownershipAdjust", 'False') == 'False' and entry.get('ownershipAdjust','False') == 'True':
                             totalEntriesLow[entry["dateTime"]]["ownershipAdjust"] = 'True'
-                        for header in headerOptions:
-                            if header not in ("Ownership", "IRR ITD") and entry.get(header) not in (None,"None",""):
-                                totalEntriesLow[entry["dateTime"]][header] += float(entry[header])
-                            elif header == "Ownership" and levelName in ("Investor", "Family Branch") and "Pool" in sortHierarchy and entry.get(header) not in (None,"None","") and float(entry.get(header)) != 0:
+                        for header in headerOptions_local:
+                            v = entry.get(header)
+                            if header not in ("Ownership", "IRR ITD") and v not in (None,"None",""):
+                                totalEntriesLow[entry["dateTime"]][header] += float(v)
+                            elif header == "Ownership" and levelName in ("Investor", "Family Branch") and "Pool" in sortHierarchy and v not in (None,"None","") and float(v) != 0:
                                 investor = entry.get("Investor")
                                 if totalEntriesLow[entry["dateTime"]].get(header) is None:
-                                    totalEntriesLow[entry["dateTime"]][header] = float(entry[header]) #assign investor to ownership based on fund
-                                    investorsAccessed[entry["dateTime"]] = [investor,]
-                                elif investor not in investorsAccessed.get(entry["dateTime"], []): #accounts for family branch level to add the investor level ownerships
-                                    totalEntriesLow[entry["dateTime"]][header] += float(entry[header])
-                                    investorsAccessed[entry["dateTime"]].append(investor)
-                    if "alphabetical" in self.sortStyle.text().lower():
+                                    totalEntriesLow[entry["dateTime"]][header] = float(v) #assign investor to ownership based on fund
+                                    investorsAccessed[entry["dateTime"]] = {investor}
+                                else:
+                                    accessed = investorsAccessed.get(entry["dateTime"], set())
+                                    if investor not in accessed: #accounts for family branch level to add the investor level ownerships
+                                        totalEntriesLow[entry["dateTime"]][header] += float(v)
+                                        accessed.add(investor)
+                                        investorsAccessed[entry["dateTime"]] = accessed
+                    if not NAVsort:
                         for name in sorted(nameList.keys()): #sort by alphabetical order
                             struc[name] = {}
                     else:
@@ -1119,16 +1225,15 @@ class returnsApp(QWidget):
                             struc[name] = {}
                     for month in totalEntriesLow.keys():
                         totalEntriesLow[month]["Return"] = totalEntriesLow[month]["Monthly Gain"] / totalEntriesLow[month]["MDdenominator"] * 100 if totalEntriesLow[month]["MDdenominator"] != 0 else 0
-                        newEntriesLow.append(totalEntriesLow[month])
+                    newEntriesLow.extend(totalEntriesLow.values())
                 totalDataLow.extend(newEntriesLow)
                 return struc, newEntriesLow, totalDataLow
 
         if self.showBenchmarkLinksBtn.isChecked():
             benchmarkLinks = self.db.fetchBenchmarkLinks()
             tableStructure = applyLinkedBenchmarks(tableStructure,self.buildCode("Total"), "Total", "Total") #apply benchmark links to total
-        sortHierarchy = self.sortHierarchy.checkedItems()
         levelIdx = 0
-        tableStructure, highestEntries, newEntries = buildLevel(sortHierarchy[levelIdx],levelIdx,tableStructure,data, [])
+        tableStructure, highestEntries, newEntries = buildLevel(sortHierarchy[0],levelIdx,tableStructure,data, [])
         trueTotalEntries = {}
         for total in highestEntries:
             if total["dateTime"] not in trueTotalEntries.keys():
@@ -1137,14 +1242,14 @@ class returnsApp(QWidget):
                                             "Return" : None , nameHier["sleeve"]["local"] : None,
                                             "Ownership" : None, "IRR ITD" : None}
                 trueTotalEntries[total["dateTime"]]["rowKey"] = "Total" + self.buildCode([])
-                for header in headerOptions:
+                for header in headerOptions_local:
                     if header != "Ownership":
                         trueTotalEntries[total["dateTime"]][header] = 0
-                for label in dataOptions:
+                for label in dataOptions_local:
                     trueTotalEntries[total["dateTime"]][label] = total[label]
             if trueTotalEntries[total["dateTime"]].get("ownershipAdjust", 'False') == 'False' and total.get('ownershipAdjust','False') == 'True':
                 trueTotalEntries[total["dateTime"]]["ownershipAdjust"] = 'True'
-            for header in headerOptions:
+            for header in headerOptions_local:
                 if header not in ("Ownership", "IRR ITD"):
                     trueTotalEntries[total["dateTime"]][header] += float(total[header])
         for month in trueTotalEntries.keys():
@@ -1899,6 +2004,7 @@ class returnsApp(QWidget):
 
 
             self.apiCallTime = datetime.now().strftime("%B %d, %Y @ %I:%M %p")
+            self.processFunds()
             gui_queue.put(lambda: self.apiLoadingBarBox.setVisible(False))
             gui_queue.put(lambda: self.calculationLoadingBox.setVisible(True)) #secondary early change to make it appear faster if running slow
             gui_queue.put(lambda: self.calculateReturn(importedTables))

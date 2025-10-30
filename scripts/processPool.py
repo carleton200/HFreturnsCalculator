@@ -2,7 +2,7 @@ from scripts.importList import *
 from scripts.commonValues import *
 from scripts.basicFunctions import *
 
-def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
+def processPool(poolData : dict,selfData : dict, statusQueue, _, failed, transactionCalc: bool = False):
     #Function to take all the information for one pool, calculate all relevant information, and return a list of the calculations
     #Inputs:
     #   poolData: dict with information relevant to this specific pool
@@ -36,6 +36,33 @@ def processPool(poolData : dict,selfData : dict, statusQueue, dbQueue, failed):
             newMonths = months #check all months if there are no previous calculations
         IRRtrack = {} #dict of each fund's cash flows and dates for IRR calculation
         IRRinvestorTrack = {} #dict of each investor's cash flows and dates for IRR calculation
+        if transactionCalc: #run transaction app calculations
+            for month in newMonths: #loops through every month relevant to the pool
+                statusQueue.put((pool,len(newMonths),"Working")) #puts to queue to update loading bar status. Allows computations to continue
+                if failed.value: #if other workers failed, halt the process
+                    print(f"Exiting worker {pool} due to other failure...")
+                    return []
+                poolCashFlow = 0
+                lowTransactions = cache.get("transactions_low", {}).get(month["dateTime"], [])
+                for transaction in lowTransactions: #get fund data, cash flows, and commitment alterations
+                    if transaction["TransactionType"] not in commitmentChangeTransactionTypes and transaction[nameHier["CashFlow"]["dynLow"]] not in (None, "None"):
+                        poolCashFlow -= float(transaction[nameHier["CashFlow"]["dynLow"]])
+                investorPoolCashFlow = 0
+                transactions = cache.get("transactions_high", {}).get(month["dateTime"], []) #all cashflow and commitment based transactions for investors into the pool for the month
+                for tran in transactions:
+                    if tran["TransactionType"] not in commitmentChangeTransactionTypes and tran[nameHier["CashFlow"]["dynHigh"]] not in (None, "None"):
+                        investorPoolCashFlow -= float(tran[nameHier["CashFlow"]["dynHigh"]])
+                difference = round(poolCashFlow - investorPoolCashFlow,2) * -1
+                if difference != 0:
+                    monthPoolEntry = {"dateTime" : month["dateTime"], "Investor" : "Total Pool", "Pool" : pool, 
+                                            "Transaction Sum" : difference,
+                                            "Calculation Type" : "Total Pool",
+                    }
+                    calculations.append(monthPoolEntry) #append to calculations for use in report generation and aggregation
+
+                #end of months loop
+            statusQueue.put((pool,len(newMonths),"Completed")) #push completed status update to the main thread
+            return calculations
         for month in newMonths: #loops through every month relevant to the pool
             monthFundIRRtrack = {}
             statusQueue.put((pool,len(newMonths),"Working")) #puts to queue to update loading bar status. Allows computations to continue
