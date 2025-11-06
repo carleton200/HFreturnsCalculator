@@ -207,9 +207,15 @@ class returnsApp(QWidget):
         controlsLayout.addStretch(1)
         self.importButton = QPushButton('Reimport Data')
         self.importButton.clicked.connect(self.beginImport)
-        clearButton = QPushButton('Full Recalculation')
-        clearButton.clicked.connect(self.resetData)
-        controlsLayout.addWidget(clearButton, stretch=0)
+        self.clearButton = QPushButton('Full Recalculation')
+        self.clearButton.clicked.connect(self.resetData)
+        # Tie clearButton visibility to importButton
+        original_setEnabled = self.importButton.setEnabled
+        def setEnabled_wrapper(visible):
+            original_setEnabled(visible)
+            self.clearButton.setEnabled(visible)
+        self.importButton.setEnabled = setEnabled_wrapper
+        controlsLayout.addWidget(self.clearButton, stretch=0)
         controlsLayout.addWidget(self.importButton, stretch=0)
         btn_to_results = QPushButton('See Calculation Database')
         btn_to_results.clicked.connect(self.show_results)
@@ -307,39 +313,49 @@ class returnsApp(QWidget):
         mainFilterLayout = QGridLayout()
         filterTitle = QLabel("Filters")
         filterTitle.setObjectName("titleBox")
-        mainFilterLayout.addWidget(filterTitle,0,0,2,1)
+        mainFilterLayout.addWidget(filterTitle,0,0,3,1)
+        resetFiltersBtn = QPushButton("Reset Filters")
+        def filterUpdate(*_):
+            self.pullLevelNames()
+            self.buildReturnTable()
+        resetFiltersBtn.clicked.connect(filterUpdate)
+        
+        mainFilterLayout.addWidget(resetFiltersBtn,3,0)
 
         self.filterOptions = [
                             {"key": "Classification", "name": "HF Classification", "dataType" : None, "dynNameLow" : "Target nameExposureHFClassificationLevel2"},
+                            {"key" : nameHier["subClassification"]["local"], "name" : nameHier["subClassification"]["local"], "dataType" : None, "dynNameLow" : nameHier["subClassification"]["dynLow"]},
                             {"key" : nameHier["Family Branch"]["local"], "name" : nameHier["Family Branch"]["local"], "dataType" : None, "dynNameLow" : None, "dynNameHigh" : nameHier["Family Branch"]["dynHigh"]},
                             {"key": "Investor",       "name": "Investor", "dataType" : "Investor", "dynNameLow" : None, "dynNameHigh" : "Source name"},
                             {"key": "assetClass",     "name": "Asset Level 1", "dataType" : "Total Asset", "dynNameLow" : "ExposureAssetClass", "dynNameHigh" : "ExposureAssetClass"},
                             {"key": "subAssetClass",  "name": "Asset Level 2", "dataType" : "Total subAsset", "dynNameLow" : "ExposureAssetClassSub-assetClass(E)", "dynNameHigh" : "ExposureAssetClassSub-assetClass(E)"},
                             {"key" : nameHier["sleeve"]["local"], "name" : "Asset Level 3", "dataType" : "Total sleeve", "dynNameLow" : nameHier["sleeve"]["local"]},
                             {"key": "Pool",           "name": "Pool", "dataType" : "Total Pool" , "dynNameLow" : "Source name", "dynNameHigh" : "Target name"},
-                            {"key": "Fund",           "name": "Fund/Investment", "dataType" : "Total Fund" , "dynNameLow" : "Target name"},
+                            {"key": "Fund",           "name": "Fund/Investment", "dataType" : "Total Fund" , "dynNameLow" : "Target name"}
                             
                         ]
-        self.filterBtnExclusions = ["Investor","Classification", nameHier["Family Branch"]["local"]]
+        self.filterBtnExclusions = ["Investor","Classification", nameHier["subClassification"]["local"], nameHier["Family Branch"]["local"]]
         self.highOnlyFilters = ["Investor", nameHier["Family Branch"]["local"]]
         self.filterDict = {}
         self.filterRadioBtnDict = {}
         self.filterBtnGroup = QButtonGroup()
         self.filterBtnGroup.setExclusive(False)
         for col, filter in enumerate(self.filterOptions, start=1):
+            row = int((col - col % 5) / 5) * 2
+            col = int(col - row * 5 / 2 + 1)
             if filter["key"] not in self.filterBtnExclusions:
                 #investor level is not filterable. It is total portfolio or shows the investors data
                 self.filterRadioBtnDict[filter["key"]] = QCheckBox(f"{filter["name"]}:")
                 self.filterRadioBtnDict[filter["key"]].setChecked(True)
                 self.filterBtnGroup.addButton(self.filterRadioBtnDict[filter["key"]])
-                mainFilterLayout.addWidget(self.filterRadioBtnDict[filter["key"]],0, col)
+                mainFilterLayout.addWidget(self.filterRadioBtnDict[filter["key"]],row, col)
             else:
-                mainFilterLayout.addWidget(QLabel(f"{filter["name"]}:"), 0, col)
+                mainFilterLayout.addWidget(QLabel(f"{filter["name"]}:"), row, col)
             if filter["key"] != "Fund":
                 self.sortHierarchy.addItem(filter["key"])
             self.filterDict[filter["key"]] = MultiSelectBox()
             self.filterDict[filter["key"]].popup.closed.connect(lambda: self.filterUpdate())
-            mainFilterLayout.addWidget(self.filterDict[filter["key"]],1,col)
+            mainFilterLayout.addWidget(self.filterDict[filter["key"]],row + 1,col)
         self.sortHierarchy.setCheckedItems(["assetClass","subAssetClass"])
         self.filterBtnGroup.buttonToggled.connect(self.filterBtnUpdate)
         mainFilterBox.setLayout(mainFilterLayout)
@@ -842,7 +858,7 @@ class returnsApp(QWidget):
                         nav_flag = level_flags.setdefault("NAV", False)
                         level_flags["NAV"] = (e_get("ownershipAdjust", 'False') == 'True') or nav_flag
                         if headerOptions_local and headerOptions_local[0] not in lvl_c_out:
-                            for option in headerOptions_local:
+                            for option in (option for option in headerOptions_local if option != "Ownership"):
                                 if option == "IRR ITD" and ((cFunds_checked and e_get("Fund") in consolidatedFunds_local) or e_get("Calculation Type") != "Total Fund"):
                                     continue
                                 ov = e_get(option)
@@ -1410,47 +1426,51 @@ class returnsApp(QWidget):
         else:
             self.allInvestors = []
             self.allFamilyBranches = []
-    def pullLevelNames(self):
-        allOptions = {}
-        fundPoolLink = {}
-        for filter in self.filterOptions:
-            if filter["key"] not in self.highOnlyFilters:
-                allOptions[filter["key"]] = []
-        accountsHigh = load_from_db(self,"positions_high")
-        if accountsHigh is not None:
-            for account in accountsHigh:
-                for filter in self.filterOptions:
-                    if (filter["key"] in allOptions and "dynNameHigh" in filter.keys() and
-                        account[filter["dynNameHigh"]] is not None and
-                        account[filter["dynNameHigh"]] not in allOptions[filter["key"]]):
-                        allOptions[filter["key"]].append(account[filter["dynNameHigh"]])
-        else:
-            print("no investor to pool accounts found")
-        accountsLow = load_from_db(self,"positions_low")
-        if accountsLow is not None:
-            for lowAccount in accountsLow:
-                for filter in self.filterOptions:
-                    if (filter["key"] in allOptions and "dynNameLow" in filter.keys() and
-                        lowAccount[filter["dynNameLow"]] is not None and
-                        lowAccount[filter["dynNameLow"]] not in allOptions[filter["key"]]):
-                        allOptions[filter["key"]].append(lowAccount[filter["dynNameLow"]])
-                fundPoolLink[lowAccount["Target name"]] = lowAccount["Source name"]
-        else:
-            print("no pool to fund accounts found")
-        self.fullLevelOptions = {}
-        for filter in self.filterOptions:
-            if filter["key"] in allOptions:
-                allOptions[filter["key"]].sort()
-                self.filterDict[filter["key"]].addItems(allOptions[filter["key"]])
-                self.fullLevelOptions[filter["key"]] = allOptions[filter["key"]]
-        self.filterDict["Classification"].setCheckedItem("HFC")
-        self.assetClass3Visibility.addItems(self.fullLevelOptions["subAssetClass"])
-        hiddenItems = self.db.fetchOptions("asset3Visibility")
-        for item in hiddenItems.keys():
-            self.assetClass3Visibility.setCheckedItem(item)
-        self.fundPoolLinks = fundPoolLink
-        self.pullInvestorNames()
-        self.pullBenchmarks()
+    def pullLevelNames(self,*_):
+        try:
+            allOptions = {}
+            fundPoolLink = {}
+            for filter in self.filterOptions:
+                if filter["key"] not in self.highOnlyFilters:
+                    allOptions[filter["key"]] = []
+            accountsHigh = load_from_db(self,"positions_high")
+            if accountsHigh is not None:
+                for account in accountsHigh:
+                    for filter in self.filterOptions:
+                        if (filter["key"] in allOptions and "dynNameHigh" in filter.keys() and
+                            account[filter["dynNameHigh"]] is not None and
+                            account[filter["dynNameHigh"]] not in allOptions[filter["key"]]):
+                            allOptions[filter["key"]].append(account[filter["dynNameHigh"]])
+            else:
+                print("no investor to pool accounts found")
+            accountsLow = load_from_db(self,"positions_low")
+            if accountsLow is not None:
+                for lowAccount in accountsLow:
+                    for filter in self.filterOptions:
+                        if (filter["key"] in allOptions and "dynNameLow" in filter.keys() and
+                            lowAccount.get(filter["dynNameLow"]) is not None and
+                            lowAccount[filter["dynNameLow"]] not in allOptions[filter["key"]]):
+                            allOptions[filter["key"]].append(lowAccount[filter["dynNameLow"]])
+                    fundPoolLink[lowAccount["Target name"]] = lowAccount["Source name"]
+            else:
+                print("no pool to fund accounts found")
+            self.fullLevelOptions = {}
+            for filter in self.filterOptions:
+                if filter["key"] in allOptions:
+                    allOptions[filter["key"]].sort()
+                    self.filterDict[filter["key"]].addItems(allOptions[filter["key"]])
+                    self.fullLevelOptions[filter["key"]] = allOptions[filter["key"]]
+            self.filterDict["Classification"].setCheckedItem("HFC")
+            self.assetClass3Visibility.addItems(self.fullLevelOptions["subAssetClass"])
+            hiddenItems = self.db.fetchOptions("asset3Visibility")
+            for item in hiddenItems.keys():
+                self.assetClass3Visibility.setCheckedItem(item)
+            self.fundPoolLinks = fundPoolLink
+            self.pullInvestorNames()
+            self.pullBenchmarks()
+        except Exception as e:
+            logging.warning(f"Error occured updating level names: {e}")
+            QMessageBox(self,"Warning", f"Error occured updating filters: {e}")
 
     def pullBenchmarks(self):
         benchmarks = load_from_db(self,"benchmarks")
@@ -1601,7 +1621,7 @@ class returnsApp(QWidget):
                 "tranCols": "Investment in, Investing Entity, Transaction Type, Effective date, Asset Class (E), Sub-asset class (E), HF Classification, Remaining commitment change, Transaction timing, Amount in system currency, Cash flow change (USD), Parent investor",
                 "tranName": "InvestmentTransaction",
                 "tranSort": "Effective date:desc",
-                "accountCols": "As of Date, Balance Type, Asset Class, Sub-asset class, Investing entity, Investment in, HF Classification, Parent investor, Value in system currency, Fund class",
+                "accountCols": "As of Date, Balance Type, Asset Class, Sub-asset class, Investing entity, Investment in, HF Classification, HF Sub-classification, Parent investor, Value in system currency, Fund class",
                 "accountName": "InvestmentPosition",
                 "accountSort": "As of Date:desc",
                 "fundCols" : "Fund Name, Asset class category, Parent fund, Fund Pipeline Status",
@@ -2263,7 +2283,7 @@ class returnsApp(QWidget):
             except Exception as e:
                 QMessageBox.warning(self,"Warning",f"Failed to update internal data for last import time. Data will likely reimport soon: {e} {e.args}")
                 print(f"failed to update last import time {e} {e.args}")
-            gui_queue.put(self.filterUpdate)
+            gui_queue.put(self.pullLevelNames)
             gui_queue.put( lambda: self.populate(self.calculationTable,calculations,keys = keys))
             gui_queue.put( lambda: self.buildReturnTable())
             gui_queue.put(lambda: self.calculationLoadingBox.setVisible(False))

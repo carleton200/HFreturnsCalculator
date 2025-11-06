@@ -1,6 +1,6 @@
 from scripts.importList import *
 
-currentVersion = "1.1.11"
+currentVersion = "1.1.12"
 demoMode = True
 remoteDBmode = False
 ownershipCorrect = True
@@ -21,6 +21,7 @@ nameHier = {
                 "Value" : {"local" : "NAV", "api" : "Value in system currency", "dynLow" : "ValueInSystemCurrency", "dynHigh" : "ValueInSystemCurrency"},
                 "Classification" : {"local" : "Classification" , "dynLow" : "Target nameExposureHFClassificationLevel2"},
                 "FundClass" : {"dynLow" : "Fundclass" , "dynHigh" : "Fundclass"},
+                "subClassification" : {"local" : "HF Sub-Classification", "dynLow" : "Target nameExposureHFClassificationLevel2ExposureHFClassificationLevel3", "dynHigh" : "Target nameExposureHFClassificationLevel2ExposureHFClassificationLevel3"}
             }
 mainTableNames = ["positions_low", "positions_high", "transactions_low", "transactions_high"]
 #TODO: make this database stored variable later
@@ -28,7 +29,9 @@ assetClass1Order = ["Illiquid", "Liquid","Cash"]
 assetClass2Order = ["Direct Private Equity", "Private Equity", "Direct Real Assets", "Real Assets", "Public Equity", "Long/Short", "Absolute Return", "Fixed Income", "Cash"] 
 commitmentChangeTransactionTypes = ["Commitment", "Transfer of commitment", "Transfer of commitment (out)", "Secondary - Original commitment (by secondary seller)"]
 ignoreInvTranTypes = [""]
-headerOptions = ["Return","NAV", "Monthly Gain", "Ownership" , "MDdenominator", "Commitment", "Unfunded", "IRR ITD", "%"]
+headerOptions = ["Return","NAV", "Monthly Gain", "Ownership" , "MDdenominator", "Commitment", "Unfunded", "%"]
+if not demoMode:
+    headerOptions.append("IRR ITD")
 dataOptions = ["Investor","Family Branch","Classification", "dateTime"]
 tranAppHeaderOptions = ["Transaction Sum"]
 tranAppDataOptions = ["Investor","Family Branch", "dateTime"]

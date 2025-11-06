@@ -115,6 +115,7 @@ def processPool(poolData : dict,selfData : dict, statusQueue, _, failed, transac
                 assetClass = None
                 subAssetClass = None
                 fundClassification = None
+                fundSubClassification = None
                 startEntryCache = startEntries.get(fund, [])
                 endEntryCache = endEntries.get(fund, [])
                 startEntry = copy.deepcopy(startEntryCache)
@@ -130,6 +131,7 @@ def processPool(poolData : dict,selfData : dict, statusQueue, _, failed, transac
                     assetClass = startEntry[0]["ExposureAssetClass"]
                     subAssetClass = startEntry[0]["ExposureAssetClassSub-assetClass(E)"]
                     fundClassification = startEntry[0]["Target nameExposureHFClassificationLevel2"]
+                    fundSubClassification = startEntry[0].get(nameHier["subClassification"]["dynLow"])
                     commitment = float(startEntry[0].get(nameHier["Commitment"]["local"],0))
                     unfunded = float(startEntry[0].get(nameHier["Unfunded"]["local"],0))
                 if len(startEntry) > 1: #combines the values for fund sub classes for calculations
@@ -180,6 +182,7 @@ def processPool(poolData : dict,selfData : dict, statusQueue, _, failed, transac
                     assetClass = endEntry[0]["ExposureAssetClass"]
                     subAssetClass = endEntry[0]["ExposureAssetClassSub-assetClass(E)"]
                     fundClassification = endEntry[0]["Target nameExposureHFClassificationLevel2"]
+                    fundSubClassification = endEntry[0].get(nameHier["subClassification"]["dynLow"])
                 if len(endEntry) > 1: #combine sub funds for calculations
                     split = {}
                     foundDuplicate = False
@@ -301,7 +304,9 @@ def processPool(poolData : dict,selfData : dict, statusQueue, _, failed, transac
                                     "IRR ITD" : IRRitd,
                                     nameHier["sleeve"]["local"] : fundList.get(fund),
                                     nameHier["Commitment"]["local"] : commitment,
-                                    nameHier["Unfunded"]["local"] : unfunded}
+                                    nameHier["Unfunded"]["local"] : unfunded,
+                                    nameHier["subClassification"]["local"] : fundSubClassification
+                                    }
                     if fund not in (None,"None"): #removing blank funds (found duplicate of Monogram in 'HF Direct Investments Pool, LLC - PE (2021)' with most None values)
                         calculations.append(monthFundEntry) #append to calculations for use in report generation and aggregation
                         fundEntryList.append(monthFundEntry) #fund data stored on its own for investor calculations
@@ -466,8 +471,10 @@ def processPool(poolData : dict,selfData : dict, statusQueue, _, failed, transac
                     fundInvestorMDdenominator = investorEntry["MDdenominator"] / monthPoolEntry["MDdenominator"] * fundEntry["MDdenominator"] if monthPoolEntry["MDdenominator"] != 0 else 0
                     fundInvestorReturn = fundInvestorGain / fundInvestorMDdenominator if fundInvestorMDdenominator != 0 else 0
                     fundInvestorOwnership = fundInvestorNAV /  fundEntry["NAV"] if fundEntry["NAV"] != 0 else 0
-                    fundInvestorCommitment = fundEntry[nameHier["Commitment"]["local"]] * fundInvestorOwnership
-                    fundInvestorUnfunded = fundEntry[nameHier["Unfunded"]["local"]] * fundInvestorOwnership
+                    #account for commitment calculations on closed funds
+                    tempFundOwnership = fundInvestorOwnership if fundInvestorOwnership != 0 else investorOwnership / 100
+                    fundInvestorCommitment = fundEntry[nameHier["Commitment"]["local"]] * tempFundOwnership 
+                    fundInvestorUnfunded = fundEntry[nameHier["Unfunded"]["local"]] * tempFundOwnership
 
                     if investorEntry["MDdenominator"] != 0 and investorMDdenominatorSum != 0: 
                         #only run IRR data if there is investor value
@@ -494,7 +501,8 @@ def processPool(poolData : dict,selfData : dict, statusQueue, _, failed, transac
                                     "Calculation Type" : "Total Fund",
                                     "IRR ITD" : fundInvestorIRR,
                                     nameHier["sleeve"]["local"] : fundList.get(fund),
-                                    "ownershipAdjust" : adjustedOwnershipBool
+                                    "ownershipAdjust" : adjustedOwnershipBool,
+                                    nameHier["subClassification"]["local"] : fundEntry[nameHier["subClassification"]["local"]]
                                     }
                     calculations.append(monthFundInvestorEntry) #add fund level data to calculations for use in aggregation and report generation
             #end of months loop

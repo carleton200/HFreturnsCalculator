@@ -5,7 +5,6 @@ import os
 
 assets = [
     ('assets/Acc_Tran.db', 'assets'),
-    ('assets/tranCalc.db', 'assets'),
     ('assets/helpInfo.txt', 'assets'),
     ('calculateReturns.py','sourceCode'),
     ('calculateReturns.spec','sourceCode'),
