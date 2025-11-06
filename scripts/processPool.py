@@ -54,9 +54,8 @@ def processPool(poolData : dict,selfData : dict, statusQueue, _, failed, transac
                         investorPoolCashFlow -= float(tran[nameHier["CashFlow"]["dynHigh"]])
                 difference = round(poolCashFlow - investorPoolCashFlow,2) * -1
                 if difference != 0:
-                    monthPoolEntry = {"dateTime" : month["dateTime"], "Investor" : "Total Pool", "Pool" : pool, 
+                    monthPoolEntry = {"dateTime" : month["dateTime"], "Pool" : pool, 
                                             "Transaction Sum" : difference,
-                                            "Calculation Type" : "Total Pool",
                     }
                     calculations.append(monthPoolEntry) #append to calculations for use in report generation and aggregation
 
@@ -305,7 +304,7 @@ def processPool(poolData : dict,selfData : dict, statusQueue, _, failed, transac
                                     nameHier["Unfunded"]["local"] : unfunded}
                     if fund not in (None,"None"): #removing blank funds (found duplicate of Monogram in 'HF Direct Investments Pool, LLC - PE (2021)' with most None values)
                         calculations.append(monthFundEntry) #append to calculations for use in report generation and aggregation
-                        fundEntryList.append([monthFundEntry, float(startEntry[nameHier["Value"]["dynLow"]])]) #fund data stored on its own for investor calculations
+                        fundEntryList.append(monthFundEntry) #fund data stored on its own for investor calculations
 
 
                 except Exception as e:
@@ -460,7 +459,7 @@ def processPool(poolData : dict,selfData : dict, statusQueue, _, failed, transac
                                         lst[nameHier["Value"]["dynHigh"]] = investorEOM #this does not represent adjusted values
                                         lst["Balancetype"] = "Calculated_R"
                 #final (3rd) investor level iteration to use the pool level results for the investor to calculate the fund level information
-                for fundEntry, fundStartValue in fundEntryList:
+                for fundEntry in fundEntryList:
                     fund = fundEntry["Fund"]
                     fundInvestorNAV = investorOwnership / 100 * fundEntry["NAV"]
                     fundInvestorGain = fundEntry["Monthly Gain"] / monthPoolEntry["Monthly Gain"] * investorEntry["Monthly Gain"] if monthPoolEntry["Monthly Gain"] != 0 else 0
@@ -476,12 +475,6 @@ def processPool(poolData : dict,selfData : dict, statusQueue, _, failed, transac
                             IRRinvestorTrack[investor] = {}
                         if fund not in IRRinvestorTrack[investor]:
                             IRRinvestorTrack[investor][fund] = {"cashFlows" : [], "dates" : []}
-                            if fundStartValue != 0:
-                                #if fund start value is not zero, the investment is not new, but the investor is being added
-                                #apply ownership to previous fund NAV to get faux starting value for IRR
-                                investorStartValue = fundStartValue * investorEntry["Ownership"] / 100
-                                IRRinvestorTrack[investor][fund]["cashFlows"].append(investorStartValue * -1)
-                                IRRinvestorTrack[investor][fund]["dates"].append(datetime.strptime(month["accountStart"], "%Y-%m-%dT%H:%M:%S"))
                         cashflows = monthFundIRRtrack.get(fundEntry["Fund"], {}).get("cashFlows", [])
                         dates = monthFundIRRtrack.get(fundEntry["Fund"], {}).get("dates", [])
                         for cashflow, date in zip(cashflows, dates):

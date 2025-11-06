@@ -12,20 +12,21 @@ from classes.tableWidgets import *
 
 @attach_logging_to_class
 class transactionApp(QWidget):
-    def __init__(self, start_index=0, apiKey = None):
+    def __init__(self,  dbMan : DatabaseManager, start_index=0, apiKey = None):
         super().__init__()
         self.setWindowTitle('Transaction Compare App')
         self.setGeometry(100, 100, 1000, 600)
 
         os.makedirs(ASSETS_DIR, exist_ok=True)
+        self.db = dbMan
         self.start_index = start_index
         self.api_key = apiKey
         self.filterCallLock = False
         self.cancel = False
-        self.lock = None
+        self.lock = self.db._lock
         self.tableWindows = {}
         self.dataTimeStart = datetime(2000,1,1)
-        self.earliestChangeDate = datetime(datetime.now().year,datetime.now().month + 1,datetime.now().day)
+        self.earliestChangeDate = datetime.now() + relativedelta(months = 1)
         self.poolChangeDates = {"active" : False}
         self.currentTableData = None
         self.fullLevelOptions = {}
@@ -182,13 +183,6 @@ class transactionApp(QWidget):
         controlsBox = QWidget()
         controlsLayout = QHBoxLayout()
         controlsLayout.addStretch(1)
-        self.importButton = QPushButton('Reimport Data')
-        self.importButton.clicked.connect(self.beginImport)
-        clearButton = QPushButton('Clear All Cached Data')
-        clearButton.clicked.connect(self.resetData)
-        if not demoMode:
-            controlsLayout.addWidget(clearButton, stretch=0)
-        controlsLayout.addWidget(self.importButton, stretch=0)
         btn_to_results = QPushButton('See Calculation Database')
         btn_to_results.clicked.connect(self.show_results)
         controlsLayout.addWidget(btn_to_results, stretch=0)
@@ -335,34 +329,41 @@ class transactionApp(QWidget):
         self.dataStartSelect.currentTextChanged.connect(self.buildReturnTable)
     def init_data_processing(self):
         self.calcSubmitted = False
-        lastImportDB = load_from_db("history", db=TRAN_DATABASE_PATH) if len(load_from_db("history", db=TRAN_DATABASE_PATH)) == 1 else None
+        lastImportDB = load_from_db(self,"history")
+        lastImportDB  if len(lastImportDB) == 1 else None
         if lastImportDB is None:
-            print("No previous import found")
-            #pull data is there is no data pulled yet
-            self.importButton.setEnabled(False)
-            executor.submit(lambda: self.pullData())
+            QMessageBox.warning(self,"Missing Data","Missing data from the returns app. Transaction app uses data pulled by the returns app.")
         else:
-            lastImportString = lastImportDB[0]["lastImport"]
+            lastImportString = lastImportDB[0]["lastCalculation"]
             lastImport = datetime.strptime(lastImportString, "%B %d, %Y @ %I:%M %p")  
-            self.lastImportLabel.setText(f"Last Data Import: {lastImportString}")
+            self.lastImportLabel.setText(f"Last Data Calculation: {lastImportString}")
             now = datetime.now()
-            if lastImport.month != now.month or now > (lastImport + relativedelta(hours=2)):
-                print(f"Reimporting due to two hour data gap. \n     Last import: {lastImport}\n    Current time: {now}")
-                #pull data if in a new month or 1 days have elapsed
-                self.importButton.setEnabled(False)
-                executor.submit(self.pullData)
-            elif lastImportDB[0]["lastImport"] != lastImportDB[0].get("lastCalculation", "None"):
+            #run calculations if they do not match the last import from returns Calculator, otherwise, continue as normal
+            if lastImportDB[0]["lastImport"] != lastImportDB[0].get("lastCalculation", "None"):
                 self.earliestChangeDate = datetime.strptime(lastImportDB[0].get("changeDate"), "%B %d, %Y @ %I:%M %p")
                 self.processFunds()
                 self.calculateReturn()
             else:
-                calculations = load_from_db("calculations", db=TRAN_DATABASE_PATH)
+                calculations = load_from_db(self,"tranCalculations")
                 self.processFunds()
                 if calculations != []:
                     self.populate(self.calculationTable,calculations)
                     self.buildReturnTable()
                 else:
                     self.calculateReturn()
+            self.bgWatch = QTimer()
+            self.bgWatch.timeout.connect(self.watchForUpdateTime)
+            hours = 0.05 #check every 3 minutes for an update
+            self.bgWatch.start(int(hours * 60 * 60 * 1000))
+    def watchForUpdateTime(self):
+        try:
+            print("Checking if update required.")
+            history = load_from_db(self,"history")[0]
+            if history["lastCalculation"] != history["lastImport"]:
+                print("Recalculating due to a new import detected...")
+                self.calculateReturn()
+        except:
+            print("Background watch failed")
     def cancelCalc(self, *_):
         _ = updateStatus(self,"DummyFail",99, status="Failed")
         self.cancel = True
@@ -578,7 +579,7 @@ class transactionApp(QWidget):
         self.cFundToFundLinks = {}
         self.pools = []
         poolList = set()
-        funds = load_from_db("funds", db=TRAN_DATABASE_PATH)
+        funds = load_from_db(self,"funds")
         if funds != []:
             consolidatorFunds = {}
             for row in funds: #find sleeve values and consolidated funds
@@ -623,12 +624,6 @@ class transactionApp(QWidget):
                 self.buildReturnTable()
             else:
                 self.populateReturnsTable(self.currentTableData)
-    def resetData(self,*_):
-        save_to_db("calculations",None,action="reset", db=TRAN_DATABASE_PATH) #reset calculations so new data will be freshly calculated
-        self.poolChangeDates = {"active" : False}
-        executor.submit(self.pullData)
-    def beginImport(self, *_):
-        executor.submit(self.pullData)
     def updateMonthOptions(self):
         start = self.dataTimeStart
         end = datetime.now() - relativedelta(months=1) + relativedelta(hours=8)
@@ -657,8 +652,8 @@ class transactionApp(QWidget):
                     gui_queue.put(lambda: self.dataTypeBox.setVisible(False))
                 else:
                     gui_queue.put(lambda: self.dataTypeBox.setVisible(True))
-                parameters = ["Total Pool"]
-                condStatement = " WHERE [Investor] = ? "
+                parameters = []
+                condStatement = None
                 for filter in self.filterOptions:
                     if filter["key"] != "Investor" and filter["key"] != nameHier["Family Branch"]["local"]:
                         if self.filterDict[filter["key"]].checkedItems() != []:
@@ -666,11 +661,14 @@ class transactionApp(QWidget):
                             for param in paramTemp:
                                 parameters.append(param)
                             placeholders = ','.join('?' for _ in paramTemp)
-                            condStatement += f" AND [{filter["key"]}] IN ({placeholders})"
+                            if condStatement:
+                                condStatement += f" AND [{filter["key"]}] IN ({placeholders})"
+                            else:
+                                condStatement = f"WHERE [{filter["key"]}] IN ({placeholders})"
                 gui_queue.put(lambda: self.buildTableLoadingBar.setValue(3))
                 if cancelEvent.is_set(): #exit if new table build request is made
                     return
-                data = load_from_db("calculations",condStatement, tuple(parameters), lock=self.lock, db=TRAN_DATABASE_PATH)
+                data = load_from_db(self,"tranCalculations",condStatement if condStatement else "", tuple(parameters))
                 output = {"Total##()##" : {}}
                 #output , data = self.calculateUpperLevels(output,data)
                 gui_queue.put(lambda: self.buildTableLoadingBar.setValue(4))
@@ -679,13 +677,13 @@ class transactionApp(QWidget):
                 complexOutput = copy.deepcopy(output)
                 multiPoolFunds = {}
                 dataOutputType = self.returnOutputType.currentText()
-                for entry in data:
+                Dtype = "Total Pool"
+                for entry in (entry for entry in data if entry.get('dateTime') not in (None,'')):
                     if (datetime.strptime(entry["dateTime"], "%Y-%m-%d %H:%M:%S") >  datetime.strptime(self.dataEndSelect.currentText(),"%B %Y") or 
                         datetime.strptime(entry["dateTime"], "%Y-%m-%d %H:%M:%S") <  datetime.strptime(self.dataStartSelect.currentText(),"%B %Y")):
                         #don't build in data outside the selection
                         continue
                     date = datetime.strftime(datetime.strptime(entry["dateTime"], "%Y-%m-%d %H:%M:%S"), "%B %Y")
-                    Dtype = entry["Calculation Type"]
                     level = entry.get("Pool") + "##(" + entry.get("Pool") + ")##"
 
                     
@@ -769,10 +767,7 @@ class transactionApp(QWidget):
         
         def buildLevel(levelName,levelIdx, struc,data,path : list):
             levelIdx += 1
-            entryTemplate = {"dateTime" : None, "Calculation Type" : "Total " + levelName, "Pool" : None, "Fund" : None ,
-                                            "assetClass" : None, "subAssetClass" : None, "Investor" : None,
-                                            "Return" : None , nameHier["sleeve"]["local"] : None,
-                                            "Ownership" : None}
+            entryTemplate = {"dateTime" : None,  "Pool" : None}
             for header in tranAppHeaderOptions:
                 if header != "Ownership":
                     entryTemplate[header] = 0
@@ -944,7 +939,7 @@ class transactionApp(QWidget):
                                             condStatement += f" AND [{filter["dynNameLow"]}] IN ({placeholders})"
                                         for param in paramTemp:
                                             parameters.append(param)
-                            lowTran = load_from_db("transactions_low", condStatement,tuple(parameters), lock=self.lock, db=TRAN_DATABASE_PATH)
+                            lowTran = load_from_db(self,"transactions_low", condStatement,tuple(parameters))
                             
                             options = {}
                             for filter in self.filterOptions:
@@ -995,7 +990,7 @@ class transactionApp(QWidget):
 
             monthEntry = {"dateTime" : monthDT, "Month" : dateString, "tranStart" : tranStart.removesuffix(".000Z"), "endDay" : bothEnd.removesuffix(".000Z"), "accountStart" : accountStart.removesuffix(".000Z")}
             dbDates.append(monthEntry)
-        save_to_db("Months",dbDates, db=TRAN_DATABASE_PATH)
+        save_to_db(self,"Months",dbDates)
 
     def pullLevelNames(self):
         allOptions = {}
@@ -1003,7 +998,7 @@ class transactionApp(QWidget):
         for filter in self.filterOptions:
             if filter["key"] not in self.highOnlyFilters:
                 allOptions[filter["key"]] = []
-        accountsHigh = load_from_db("transactions_high", db=TRAN_DATABASE_PATH)
+        accountsHigh = load_from_db(self,"transactions_high")
         if accountsHigh is not None:
             for account in accountsHigh:
                 for filter in self.filterOptions:
@@ -1013,7 +1008,7 @@ class transactionApp(QWidget):
                         allOptions[filter["key"]].append(account.get(filter["dynNameHigh"]))
         else:
             print("no investor to pool accounts found")
-        accountsLow = load_from_db("transactions_low", db=TRAN_DATABASE_PATH)
+        accountsLow = load_from_db(self,"transactions_low")
         if accountsLow is not None:
             for lowAccount in accountsLow:
                 for filter in self.filterOptions:
@@ -1083,7 +1078,7 @@ class transactionApp(QWidget):
                 diffCount = 0
                 differences = []
                 newRows = []
-                previous = load_from_db(table, db=TRAN_DATABASE_PATH) or []
+                previous = load_from_db(self,table) or []
 
                 # Build a set of tuple‐keys for the old data
                 oldRecords = set()
@@ -1135,9 +1130,8 @@ class transactionApp(QWidget):
                 print(f"Error searching old data: {e}")
         
         try:
-            self.earliestChangeDate = datetime(datetime.now().year,datetime.now().month + 1,datetime.now().day)
+            self.earliestChangeDate = datetime.now() + relativedelta(months=1)
             gui_queue.put(lambda: self.apiLoadingBarBox.setVisible(True))
-            gui_queue.put(lambda: self.importButton.setEnabled(False))
             self.updateMonths()
             completeLock = threading.Lock()
             self.apiFutures = set()
@@ -1162,7 +1156,7 @@ class transactionApp(QWidget):
                 self.foundRetroChange = False
             else:
                 skipCalculations = False
-            for i in range(2):
+            for i in range(1):
                 cols_key = 'accountCols' if i == 1 else 'tranCols'
                 name_key = 'accountName' if i == 1 else 'tranName'
                 sort_key = 'accountSort' if i == 1 else 'tranSort'
@@ -1174,111 +1168,110 @@ class transactionApp(QWidget):
                 }
                 for j in range(2): #0: fund level, 1: pool to high investor level
                     investmentLevel = "Investing entity" if j == 0 else "Investment in"
-                    if i == 0: #transaction
-                        if j == 0: #fund level
-                            payload = {
-                                        "advf": {
-                                            "e": [
-                                                {
-                                                    "_name": "InvestmentTransaction",
-                                                    "e": [
-                                                        {
-                                                            "_name": "InvestorAccount",
-                                                            "_not": True
-                                                        },
-                                                        {
-                                                            "_name": "Fund",
-                                                            "rule": [
-                                                                {
-                                                                    "_op": "is",
-                                                                    "_prop": "Fund Pipeline Status",
-                                                                    "values": [
-                                                                        {
-                                                                            "id": "d33af081-c4c8-431b-a98b-de9eaf576324",
-                                                                            "es": "L_FundPipelineStatus",
-                                                                            "name": "I - Internal"
-                                                                        }
-                                                                    ]
-                                                                }
-                                                            ]
-                                                        }
-                                                    ],
-                                                    "rule": [
-                                                        {
-                                                            "_op": "not_null",
-                                                            "_prop": "Cash flow change (USD)"
-                                                        },
-                                                        {
-                                                            "_op": "not_null",
-                                                            "_prop": "Investing entity"
-                                                        }
-                                                    ]
-                                                },
-                                                {
-                                                    "_name": "InvestmentTransaction",
-                                                    "e": [
-                                                        {
-                                                            "_name": "InvestorAccount",
-                                                            "_not": True
-                                                        },
-                                                        {
-                                                            "_name": "Fund",
-                                                            "rule": [
-                                                                {
-                                                                    "_op": "is",
-                                                                    "_prop": "Fund Pipeline Status",
-                                                                    "values": [
-                                                                        {
-                                                                            "id": "d33af081-c4c8-431b-a98b-de9eaf576324",
-                                                                            "es": "L_FundPipelineStatus",
-                                                                            "name": "I - Internal"
-                                                                        }
-                                                                    ]
-                                                                }
-                                                            ]
-                                                        }
-                                                    ],
-                                                    "rule": [
-                                                        {
-                                                            "_op": "not_null",
-                                                            "_prop": "Investing entity"
-                                                        },
-                                                        {
-                                                            "_op": "any_item",
-                                                            "_prop": "Transaction type",
-                                                            "values": [
-                                                                [
+                    if j == 0: #fund level
+                        payload = {
+                                    "advf": {
+                                        "e": [
+                                            {
+                                                "_name": "InvestmentTransaction",
+                                                "e": [
+                                                    {
+                                                        "_name": "InvestorAccount",
+                                                        "_not": True
+                                                    },
+                                                    {
+                                                        "_name": "Fund",
+                                                        "rule": [
+                                                            {
+                                                                "_op": "is",
+                                                                "_prop": "Fund Pipeline Status",
+                                                                "values": [
                                                                     {
-                                                                        "id": "5327639c-8160-4d85-9b23-8c6bf60c5406",
-                                                                        "es": "L_TransactionType",
-                                                                        "name": "Commitment"
-                                                                    },
-                                                                    {
-                                                                        "id": "37339e7c-1c24-4d13-9d17-86d0efe079b3",
-                                                                        "es": "L_TransactionType",
-                                                                        "name": "Transfer of commitment"
-                                                                    },
-                                                                    {
-                                                                        "id": "0f8f8671-8579-49d7-b604-05300b6a3990",
-                                                                        "es": "L_TransactionType",
-                                                                        "name": "Transfer of commitment (out)"
-                                                                    },
-                                                                    {
-                                                                        "id": "5e098d83-70b0-4135-a629-aff19048fb1c",
-                                                                        "es": "L_TransactionType",
-                                                                        "name": "Secondary - Original commitment (by secondary seller)"
+                                                                        "id": "d33af081-c4c8-431b-a98b-de9eaf576324",
+                                                                        "es": "L_FundPipelineStatus",
+                                                                        "name": "I - Internal"
                                                                     }
                                                                 ]
+                                                            }
+                                                        ]
+                                                    }
+                                                ],
+                                                "rule": [
+                                                    {
+                                                        "_op": "not_null",
+                                                        "_prop": "Cash flow change (USD)"
+                                                    },
+                                                    {
+                                                        "_op": "not_null",
+                                                        "_prop": "Investing entity"
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                "_name": "InvestmentTransaction",
+                                                "e": [
+                                                    {
+                                                        "_name": "InvestorAccount",
+                                                        "_not": True
+                                                    },
+                                                    {
+                                                        "_name": "Fund",
+                                                        "rule": [
+                                                            {
+                                                                "_op": "is",
+                                                                "_prop": "Fund Pipeline Status",
+                                                                "values": [
+                                                                    {
+                                                                        "id": "d33af081-c4c8-431b-a98b-de9eaf576324",
+                                                                        "es": "L_FundPipelineStatus",
+                                                                        "name": "I - Internal"
+                                                                    }
+                                                                ]
+                                                            }
+                                                        ]
+                                                    }
+                                                ],
+                                                "rule": [
+                                                    {
+                                                        "_op": "not_null",
+                                                        "_prop": "Investing entity"
+                                                    },
+                                                    {
+                                                        "_op": "any_item",
+                                                        "_prop": "Transaction type",
+                                                        "values": [
+                                                            [
+                                                                {
+                                                                    "id": "5327639c-8160-4d85-9b23-8c6bf60c5406",
+                                                                    "es": "L_TransactionType",
+                                                                    "name": "Commitment"
+                                                                },
+                                                                {
+                                                                    "id": "37339e7c-1c24-4d13-9d17-86d0efe079b3",
+                                                                    "es": "L_TransactionType",
+                                                                    "name": "Transfer of commitment"
+                                                                },
+                                                                {
+                                                                    "id": "0f8f8671-8579-49d7-b604-05300b6a3990",
+                                                                    "es": "L_TransactionType",
+                                                                    "name": "Transfer of commitment (out)"
+                                                                },
+                                                                {
+                                                                    "id": "5e098d83-70b0-4135-a629-aff19048fb1c",
+                                                                    "es": "L_TransactionType",
+                                                                    "name": "Secondary - Original commitment (by secondary seller)"
+                                                                }
                                                             ]
-                                                        }
-                                                    ]
-                                                }
-                                            ]
-                                        },
-                                        "mode": "compact"
-                                    }
-                        else: #investor level
-                            payload = {
+                                                        ]
+                                                    }
+                                                ]
+                                            }
+                                        ]
+                                    },
+                                    "mode": "compact"
+                                }
+                    else: #investor level
+                        payload = {
                                         "advf": {
                                             "e": [
                                                 {
@@ -1303,8 +1296,6 @@ class transactionApp(QWidget):
                                         },
                                         "mode": "compact"
                                     }
-                    else:
-                        continue #removed account positions
                     def bgPullData(payload=payload, headers=headers, i=i, j=j):
                         rows = []
                         idx = 0
@@ -1342,23 +1333,9 @@ class transactionApp(QWidget):
                                 pass
                         else:
                             if j == 0:
-                                if skipCalculations: #separate out only new rows to alter db
-                                    rows, good = checkNewestData('transactions_low',rows)
-                                    if good:
-                                        save_to_db('transactions_low', rows, action="add", db=TRAN_DATABASE_PATH)
-                                    else:
-                                        save_to_db('transactions_low', rows, db=TRAN_DATABASE_PATH)
-                                else:
-                                    save_to_db('transactions_low', rows, db=TRAN_DATABASE_PATH)
+                                save_to_db('transactions_low', rows, db=TRAN_DATABASE_PATH)
                             else:
-                                if skipCalculations: #separate out only new rows to alter db
-                                    rows, good = checkNewestData('transactions_high',rows)
-                                    if good:
-                                        save_to_db('transactions_high', rows, action="add", db=TRAN_DATABASE_PATH)
-                                    else:
-                                        save_to_db('transactions_high', rows, db=TRAN_DATABASE_PATH)
-                                else:
-                                    save_to_db('transactions_high', rows, db=TRAN_DATABASE_PATH)
+                                save_to_db('transactions_high', rows, db=TRAN_DATABASE_PATH)
                         with completeLock:
                             self.complete += 1
                         frac = self.complete/totalCalls
@@ -1492,12 +1469,11 @@ class transactionApp(QWidget):
             currentTime = datetime.now().strftime("%B %d, %Y @ %I:%M %p")
             changeData = datetime.strftime(self.earliestChangeDate, "%B %d, %Y @ %I:%M %p")
             save_to_db(None,None,query="UPDATE history SET [lastImport] = ?, [changeDate] = ?", inputs=(currentTime,changeData), action="replace", db=TRAN_DATABASE_PATH)
-            self.lastImportLabel.setText(f"Last Data Import: {currentTime}")
+            self.lastImportLabel.setText(f"Last Data Calculation: {currentTime}")
             gui_queue.put(lambda: self.apiLoadingBarBox.setVisible(False))
             gui_queue.put(lambda: self.calculateReturn())
         except Exception as e:
             QMessageBox.warning(self,"Error Importing Data", f"Error pulling data from dynamo: {e} , {e.args}")
-        gui_queue.put(lambda: self.importButton.setEnabled(True))
         gui_queue.put(lambda: self.apiLoadingBarBox.setVisible(False))
     def openTableWindow(self, rows, name = "Table", headers = None):
         window = tableWindow(parentSource=self,all_rows=rows,table=name, headers=headers)
@@ -1506,20 +1482,17 @@ class transactionApp(QWidget):
     def calculateReturn(self):
         def initalizeCalc():
             try:
-                calculationStart = datetime.now()
-                gui_queue.put(lambda: self.importButton.setEnabled(False))
                 gui_queue.put(lambda: self.calculationLoadingBox.setVisible(True))
-                self.updateMonths()
                 gui_queue.put(lambda: self.pullLevelNames())
                 print("Calculating differences....")
-                fundListDB = load_from_db("funds", db=TRAN_DATABASE_PATH)
+                fundListDB = load_from_db(self,"funds")
                 fundList = {}
                 for fund in fundListDB:
                     fundList[fund["Name"]] = fund[nameHier["sleeve"]["sleeve"]]
-                months = load_from_db("Months", f"ORDER BY [dateTime] ASC", db=TRAN_DATABASE_PATH)
+                months = load_from_db(self,"Months", f"ORDER BY [dateTime] ASC")
                 calculations = []
                 monthIdx = 0
-                if load_from_db("calculations", db=TRAN_DATABASE_PATH) == []:
+                if load_from_db(self,"tranCalculations") == []:
                     noCalculations = True
                 else:
                     noCalculations = False
@@ -1527,7 +1500,7 @@ class transactionApp(QWidget):
 
                 if self.earliestChangeDate > datetime.now() and not noCalculations:
                     #if no new data exists, use old calculations
-                    calculations = load_from_db("calculations", db=TRAN_DATABASE_PATH)
+                    calculations = load_from_db(self,"tranCalculations")
                     keys = []
                     for row in calculations:
                         for key in row.keys():
@@ -1536,7 +1509,6 @@ class transactionApp(QWidget):
                     gui_queue.put( lambda: self.populate(self.calculationTable,calculations,keys = keys))
                     gui_queue.put( lambda: self.buildReturnTable())
                     gui_queue.put(lambda: self.calculationLoadingBox.setVisible(False))
-                    gui_queue.put(lambda: self.importButton.setEnabled(True))
                     print("Calculations skipped.")
                     return
                 
@@ -1544,8 +1516,8 @@ class transactionApp(QWidget):
                 self.workerProgress = {}
 
                 # ------------------- build data cache ----------------------
-                tables = [ "transactions_low", "transactions_high", "calculations"]
-                table_rows = {t: load_from_db(t, db=TRAN_DATABASE_PATH) for t in tables}
+                tables = [ "transactions_low", "transactions_high", "tranCalculations"]
+                table_rows = {t: load_from_db(self, t) for t in tables}
                 cache = {}
                 for table, rows in table_rows.items():
                     for row in rows:
@@ -1558,7 +1530,7 @@ class transactionApp(QWidget):
                         if poolKey is None:
                             continue
                         for m in months:
-                            if table == "calculations":
+                            if table == "tranCalculations":
                                 if row.get("dateTime") != m["dateTime"]:
                                     continue
                             else:
@@ -1610,15 +1582,12 @@ class transactionApp(QWidget):
                 gui_queue.put(lambda: initializeWorkerPool()) #puts on main thread
             except Exception as e:
                 gui_queue.put(lambda: self.calculationLoadingBox.setVisible(False))
-                gui_queue.put(lambda: self.importButton.setEnabled(True))
                 print(f"Error occured running calculations: {e}")
                 print("e.args:", e.args)
                 # maybe also:
                 print(traceback.format_exc())
         executor.submit(initalizeCalc)
     def watch_db(self):
-        conn = sqlite3.connect(TRAN_DATABASE_PATH)
-        c = conn.cursor()
         while True:
             count = 0
             while not self.workerStatusQueue.empty() and count < 300:
@@ -1662,49 +1631,6 @@ class transactionApp(QWidget):
                 print(traceback.format_exc())
                 pass
             time.sleep(calculationPingTime * 0.01)
-        conn.close()
-    def updateWorkerDB(self):
-        try:
-            conn = sqlite3.connect(TRAN_DATABASE_PATH)
-            cursor = conn.cursor()
-        except:
-            print("connection failed")
-        dbFailure = False
-        maxFails = 4
-        print("Initiating background database updates...")
-        while True:
-            try:
-                results = self.workerDBqueue.get_nowait()  # non-blocking, safe for fixed queues
-                data = results.get("data")
-                failCount = 0
-                while True:
-                    try:
-                        if results.get("type") == "insert":
-                            save_to_db(data[0], data[1], action=data[2], connection=conn, lock=self.lock, db=TRAN_DATABASE_PATH)
-                            break
-                        elif results.get("type") == "update":
-                            with self.lock:
-                                cursor.executemany(data[0], data[1])
-                                conn.commit()
-                                break
-                        else:
-                            print(f"\n\n Database data was not handled correctly: {results} \n\n")
-                            break
-                    except:
-                        failCount += 1
-                        print(f"Error updating database. Attempt {failCount} of {maxFails}")
-                        if failCount > maxFails:
-                            print("Error occured in delayed database updates. Calculation date will be reset")
-                            dbFailure = True
-                            break
-            except queue.Empty:
-                break  # all done; queue drained
-            except Exception as e:
-                print(f"Error occurred updating database from worker threads: {e}, {e.args}")
-        print("Background database updates complete")
-        if dbFailure: #will force a recalculation on the next opening since the database won't be accurate
-            save_to_db(None,None,query="UPDATE history SET [lastCalculation] = ?", inputs=("Database Failure",), action="replace", lock=self.lock, db=TRAN_DATABASE_PATH)
-        conn.close()
     def update_from_queue(self):
         if self.queue:
             while self.queue: #cycle through the queue options to get most up to date value. Breaks out if complete or halted
@@ -1736,12 +1662,10 @@ class transactionApp(QWidget):
                 self.pool.terminate()
                 self.pool.join()
                 gui_queue.put(lambda: self.calculationLoadingBox.setVisible(False))
-                gui_queue.put(lambda: self.importButton.setEnabled(True))
                 
     def calcCompletion(self):
         try:
             print("Checking worker completion...")
-            executor.submit(self.updateWorkerDB)
             self.pool.join()
             print("All workers finished")
             
@@ -1757,21 +1681,20 @@ class transactionApp(QWidget):
                 for key in row.keys():
                     if key not in keys:
                         keys.append(key)
-            save_to_db("calculations",calculations, keys=keys, lock=self.lock, db=TRAN_DATABASE_PATH)
+            save_to_db(self,"tranCalculations",calculations, keys=keys)
             try:
-                apiPullTime = load_from_db("history", db=TRAN_DATABASE_PATH)[0]["lastImport"]
-                save_to_db(None,None,query="UPDATE history SET [lastCalculation] = ?", inputs=(apiPullTime,), action="replace", lock=self.lock, db=TRAN_DATABASE_PATH)
+                apiPullTime = load_from_db(self,"history")[0]["lastImport"]
+                save_to_db(self,None,None,query="UPDATE history SET [lastCalculation] = ?", inputs=(apiPullTime,), action="replace")
+                self.lastImportLabel.setText(f"Last Data Calculation: {apiPullTime}")
             except:
                 print("failed to update last calculation time")
             gui_queue.put( lambda: self.populate(self.calculationTable,calculations,keys = keys))
             gui_queue.put( lambda: self.buildReturnTable())
             gui_queue.put(lambda: self.calculationLoadingBox.setVisible(False))
-            gui_queue.put(lambda: self.importButton.setEnabled(True))
             print("Calculations complete.")
             self.workerProgress = {}
         except:
             gui_queue.put(lambda: self.calculationLoadingBox.setVisible(False))
-            gui_queue.put(lambda: self.importButton.setEnabled(True))
             print(f"Error occured processing calculation results. Resetting... ")
             print(traceback.format_exc())
     def separateRowCode(self, label):

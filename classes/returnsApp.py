@@ -28,7 +28,7 @@ class returnsApp(QWidget):
         self.db._lock = self.lock #attach the lock to the database manager
         self.tableWindows = {}
         self.dataTimeStart = datetime(2000,1,1)
-        self.earliestChangeDate = datetime(datetime.now().year,datetime.now().month + 1,datetime.now().day)
+        self.earliestChangeDate = datetime.now() + relativedelta(months=1)
         self.poolChangeDates = {"active" : False}
         self.currentTableData = None
         self.fullLevelOptions = {}
@@ -381,7 +381,7 @@ class returnsApp(QWidget):
         self.dataStartSelect.currentTextChanged.connect(self.buildReturnTable)
     def init_data_processing(self):
         self.calcSubmitted = False
-        self.lastImportDB = load_from_db("history")
+        self.lastImportDB = load_from_db(self,"history")
         if len(self.lastImportDB) != 1:
             self.lastImportDB = None
         if self.lastImportDB is None:
@@ -400,7 +400,7 @@ class returnsApp(QWidget):
                 self.importButton.setEnabled(False)
                 executor.submit(self.pullData)
             else:
-                calculations = load_from_db("calculations")
+                calculations = load_from_db(self,"calculations")
                 if calculations != []:
                     self.populate(self.calculationTable,calculations)
                     self.buildReturnTable()
@@ -433,7 +433,7 @@ class returnsApp(QWidget):
         window.show()
         self.exportWindow = window
     def openTranApp(self,*_):
-        tranApp = transactionApp(apiKey=self.api_key)
+        tranApp = transactionApp(self.db, apiKey=self.api_key)
         tranApp.stack.setCurrentIndex(1)
         tranApp.init_data_processing()
         tranApp.show()
@@ -629,7 +629,7 @@ class returnsApp(QWidget):
         self.cFundToFundLinks = {}
         self.pools = []
         sleeves = set()
-        funds = load_from_db("funds")
+        funds = load_from_db(self,"funds")
         if funds != []:
             consolidatorFunds = {}
             for row in funds: #find sleeve values and consolidated funds
@@ -685,7 +685,7 @@ class returnsApp(QWidget):
             QMessageBox.warning(self,"API Failure", "API connection has failed. Server is down or API key is bad. \n Previous calculations are left in place for viewing.")
             return
         for table in ("calculations","positions_low","positions_high","transactions_low","transactions_high"):
-            save_to_db(table,None,action="clear") #reset all tables so everything will be fresh data
+            save_to_db(self,table,None,action="clear") #reset all tables so everything will be fresh data
         self.poolChangeDates = {"active" : False}
         executor.submit(self.pullData)
     def beginImport(self, *_):
@@ -762,7 +762,7 @@ class returnsApp(QWidget):
                 gui_queue.put(lambda: self.buildTableLoadingBar.setValue(3))
                 if cancelEvent.is_set(): #exit if new table build request is made
                     return
-                data = load_from_db("calculations",condStatement, tuple(parameters), lock=self.lock)
+                data = load_from_db(self,"calculations",condStatement, tuple(parameters))
                 output = {"Total##()##" : {}}
                 flagOutput = {"Total##()##" : {}}
                 if self.benchmarkSelection.checkedItems() != [] or self.showBenchmarkLinksBtn.isChecked():
@@ -964,7 +964,7 @@ class returnsApp(QWidget):
                     if cPerf < 0:
                         cPerf = -1.999
                         break
-                lvl_co[timeFrame] = (cPerf - 1.0) * 100.0 if cPerf > 0 else -999
+                lvl_co[timeFrame] = (cPerf - 1.0) * 100.0 if cPerf > 0 else 'N/A'
 
             # Yearly windows compounded and annualized
             lvl_month_keys = lvl_month.keys()
@@ -982,7 +982,7 @@ class returnsApp(QWidget):
                     if cYR < 0:
                         cYR = -1.999
                         break
-                lvl_co[f"{yearKey}YR"] = (((cYR ** (1 / int(yearKey))) - 1) * 100.0) if cYR > 0 else -999
+                lvl_co[f"{yearKey}YR"] = (((cYR ** (1 / int(yearKey))) - 1) * 100.0) if cYR > 0 else 'N/A'
 
             # ITD
             try:
@@ -1026,7 +1026,10 @@ class returnsApp(QWidget):
         allBenchmarkChoices = set(set(self.benchmarkChoices) | set(self.pendingBenchmarks))
         code = self.buildCode([])
         placeholders = ','.join('?' for _ in allBenchmarkChoices)
-        benchmarks = load_from_db("benchmarks",f"WHERE [Index] IN ({placeholders})",tuple(allBenchmarkChoices), lock=self.lock)
+        if allBenchmarkChoices:
+            benchmarks = load_from_db(self,"benchmarks",f"WHERE [Index] IN ({placeholders})",tuple(allBenchmarkChoices))
+        else:
+            benchmarks = []
         for bench in benchmarks:
             name = bench["Index"] + code
             if (datetime.strptime(bench["Asofdate"], "%Y-%m-%dT%H:%M:%S") < datetime.strptime(self.dataStartSelect.currentText(), "%B %Y") or
@@ -1323,7 +1326,7 @@ class returnsApp(QWidget):
                         continue
 
                     condSQL, condParams = build_condition(exclude_key=key)
-                    lowAccounts = load_from_db("positions_low", condSQL, condParams, lock=self.lock)
+                    lowAccounts = load_from_db(self,"positions_low", condSQL, condParams)
 
                     options = {
                         f["key"]: set()
@@ -1384,10 +1387,10 @@ class returnsApp(QWidget):
 
             monthEntry = {"dateTime" : monthDT, "Month" : dateString, "tranStart" : tranStart.removesuffix(".000Z"), "endDay" : bothEnd.removesuffix(".000Z"), "accountStart" : accountStart.removesuffix(".000Z")}
             dbDates.append(monthEntry)
-        save_to_db("Months",dbDates)
+        save_to_db(self,"Months",dbDates)
 
     def pullInvestorNames(self):
-        accountsHigh = load_from_db('positions_high', lock=self.lock)
+        accountsHigh = load_from_db(self,'positions_high')
         if accountsHigh is not None:
             investors = []
             familyBranches = []
@@ -1413,7 +1416,7 @@ class returnsApp(QWidget):
         for filter in self.filterOptions:
             if filter["key"] not in self.highOnlyFilters:
                 allOptions[filter["key"]] = []
-        accountsHigh = load_from_db("positions_high")
+        accountsHigh = load_from_db(self,"positions_high")
         if accountsHigh is not None:
             for account in accountsHigh:
                 for filter in self.filterOptions:
@@ -1423,7 +1426,7 @@ class returnsApp(QWidget):
                         allOptions[filter["key"]].append(account[filter["dynNameHigh"]])
         else:
             print("no investor to pool accounts found")
-        accountsLow = load_from_db("positions_low")
+        accountsLow = load_from_db(self,"positions_low")
         if accountsLow is not None:
             for lowAccount in accountsLow:
                 for filter in self.filterOptions:
@@ -1450,7 +1453,7 @@ class returnsApp(QWidget):
         self.pullBenchmarks()
 
     def pullBenchmarks(self):
-        benchmarks = load_from_db("benchmarks")
+        benchmarks = load_from_db(self,"benchmarks")
         benchNames = []
         for bench in benchmarks:
             if bench["Index"] not in benchNames:
@@ -1527,7 +1530,7 @@ class returnsApp(QWidget):
             try:
                 diffCount = 0
                 differences = []
-                previous = load_from_db(table) or []
+                previous = load_from_db(self,table) or []
 
                 # Build a set of tuple‐keys for the old data
                 oldRecords = set()
@@ -1583,7 +1586,7 @@ class returnsApp(QWidget):
                 print(traceback.format_exc())
                 print(f"Error searching old data: {e}")
         try:
-            self.earliestChangeDate = datetime(datetime.now().year,datetime.now().month + 1,datetime.now().day)
+            self.earliestChangeDate = datetime.now() + relativedelta(months=1)
             earlyChangeDateLock = threading.Lock()
             gui_queue.put(lambda: self.apiLoadingBarBox.setVisible(True))
             gui_queue.put(lambda: self.importButton.setEnabled(False))
@@ -1605,7 +1608,7 @@ class returnsApp(QWidget):
                 "benchCols" : (f"Index, As of date, MTD %, QTD %, YTD %, ITD cumulative %, ITD TWRR %, "
                                f"{', '.join(f'Last {y} yr %' for y in yearOptions)}"), 
             }
-            calculationsTest = load_from_db("calculations")
+            calculationsTest = load_from_db(self,"calculations")
             if calculationsTest != []:
                 skipCalculations = True
                 self.poolChangeDates = {"active" : True}
@@ -1614,7 +1617,7 @@ class returnsApp(QWidget):
                 skipCalculations = False
             accountTranTableFutures = []
             #key for the table naming convention {i : {j : table name}}
-            tableNameKey = {1 : {0 : "positions_low", 1 : "positions_high"}, 0 : {0 : "transactions_low", 1 : "transactions_high"}}
+            
             for i in range(2):
                 cols_key = 'accountCols' if i == 1 else 'tranCols'
                 name_key = 'accountName' if i == 1 else 'tranName'
@@ -1919,7 +1922,7 @@ class returnsApp(QWidget):
                             if row.get("Parentfund") in consolidatorFunds:
                                 self.consolidatedFunds[row["Name"]] = consolidatorFunds.get(row.get("Parentfund"))
                         if rows != []:
-                            save_to_db("funds",rows,lock=self.lock)
+                            save_to_db(self,"funds",rows)
                     except Exception as e:
                         print(f"Error proccessing fund API data : {e} {e.args}.  {traceback.format_exc()}")
                     
@@ -1958,7 +1961,7 @@ class returnsApp(QWidget):
                             rows = []
                         keys_to_remove = {'_id', '_es'}
                         rows = [{k: v for k, v in row.items() if k not in keys_to_remove} for row in rows]
-                        save_to_db("benchmarks",rows, lock=self.lock)
+                        save_to_db(self,"benchmarks",rows)
                     except Exception as e:
                         print(f"Error proccessing benchmark API data : {e} {e.args}.  {traceback.format_exc()}")
                     
@@ -2028,27 +2031,27 @@ class returnsApp(QWidget):
                 self.updateMonths()
                 gui_queue.put(lambda: self.pullLevelNames())
                 print("Calculating return....")
-                fundListDB = load_from_db("funds")
+                fundListDB = load_from_db(self,"funds")
                 fundList = {}
                 for fund in fundListDB:
                     fundList[fund["Name"]] = fund[nameHier["sleeve"]["sleeve"]]
-                months = load_from_db("Months", f"ORDER BY [dateTime] ASC",lock=self.lock)
+                months = load_from_db(self,"Months", f"ORDER BY [dateTime] ASC")
                 calculations = []
                 monthIdx = 0
-                if load_from_db("calculations",lock=self.lock) == []:
+                if load_from_db(self,"calculations") == []:
                     noCalculations = True
                 else:
                     noCalculations = False
 
                 if self.earliestChangeDate > datetime.now() and not noCalculations:
                     #if no new data exists, use old calculations
-                    calculations = load_from_db("calculations")
+                    calculations = load_from_db(self,"calculations")
                     keys = list({key for row in calculations for key in row.keys()})
                     gui_queue.put( lambda: self.populate(self.calculationTable,calculations,keys = keys))
                     gui_queue.put( lambda: self.buildReturnTable())
                     gui_queue.put(lambda: self.calculationLoadingBox.setVisible(False))
                     gui_queue.put(lambda: self.importButton.setEnabled(True))
-                    save_to_db(None,None,query="UPDATE history SET [lastImport] = ?", inputs=(self.apiCallTime,), action="replace", lock=self.lock)
+                    save_to_db(self,None,None,query="UPDATE history SET [lastImport] = ?", inputs=(self.apiCallTime,), action="replace")
                     self.lastImportLabel.setText(f"Last Data Import: {self.apiCallTime}")
                     self.lastImportDB[0]['lastImport'] = self.apiCallTime
                     print("Calculations skipped.")
@@ -2060,7 +2063,7 @@ class returnsApp(QWidget):
                 # ------------------- build data cache ----------------------
                 tables = ["positions_low", "transactions_low", "positions_high", "transactions_high"]
                 table_rows = {t: dynImportData[t] for t in tables}
-                table_rows["calculations"] = load_from_db("calculations",lock=self.lock)
+                table_rows["calculations"] = load_from_db(self,"calculations")
                 cache = {}
                 for table, rows in table_rows.items():
                     for row in rows:
@@ -2148,8 +2151,6 @@ class returnsApp(QWidget):
                 print(traceback.format_exc())
         executor.submit(initalizeCalc)
     def watch_db(self):
-        conn = sqlite3.connect(DATABASE_PATH)
-        c = conn.cursor()
         while True:
             count = 0
             while not self.workerStatusQueue.empty() and count < 300:
@@ -2196,7 +2197,6 @@ class returnsApp(QWidget):
                 print(traceback.format_exc())
                 pass
             time.sleep(calculationPingTime * 0.01)
-        conn.close()
     def update_from_queue(self):
         if self.queue:
             while self.queue: #cycle through the queue options to get most up to date value. Breaks out if complete or halted
@@ -2252,17 +2252,18 @@ class returnsApp(QWidget):
                 allDynTables[table].extend(self.cachedDynTables[table])
             keys = list({key for row in calculations for key in row.keys()})
             print("Updating database...")
-            save_to_db("calculations",calculations, keys=keys, lock=self.lock)
+            save_to_db(self,"calculations",calculations, keys=keys)
             for table in mainTableNames:
-                save_to_db(table, allDynTables[table], lock=self.lock)
+                save_to_db(self,table, allDynTables[table])
             print("Database updated.")
             try:
-                save_to_db(None,None,query="UPDATE history SET [lastImport] = ?", inputs=(self.apiCallTime,), action="replace", lock=self.lock)
+                save_to_db(self,None,None,query="UPDATE history SET [lastImport] = ?", inputs=(self.apiCallTime,), action="replace")
                 self.lastImportLabel.setText(f"Last Data Import: {self.apiCallTime}")
                 self.lastImportDB[0]['lastImport'] = self.apiCallTime
             except Exception as e:
                 QMessageBox.warning(self,"Warning",f"Failed to update internal data for last import time. Data will likely reimport soon: {e} {e.args}")
                 print(f"failed to update last import time {e} {e.args}")
+            gui_queue.put(self.filterUpdate)
             gui_queue.put( lambda: self.populate(self.calculationTable,calculations,keys = keys))
             gui_queue.put( lambda: self.buildReturnTable())
             gui_queue.put(lambda: self.calculationLoadingBox.setVisible(False))
@@ -2278,7 +2279,7 @@ class returnsApp(QWidget):
         self.currentVersionAccess = False
         self.globalVersion = None
         try:
-            row = load_from_db("history")[0]
+            row = load_from_db(self,"history")[0]
             self.globalVersion = row["currentVersion"]
             if row["currentVersion"] == currentVersion:
                 self.currentVersionAccess = True

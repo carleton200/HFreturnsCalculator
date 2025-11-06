@@ -11,14 +11,9 @@ from classes.tableWidgets import *
 from classes.widgetClasses import *
 
 from scripts.processPool import processPool
-from scripts.processPoolTransactions import processPoolTransactions
 from scripts.basicFunctions import *
 from scripts.exportTableToExcel import exportTableToExcel
 from scripts.loggingFuncs import *
-
-
-
-
 
 
 if __name__ == '__main__':

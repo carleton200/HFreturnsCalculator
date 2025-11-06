@@ -423,7 +423,7 @@ class underlyingDataWindow(QWidget):
         self.parent = parentSource
         self.setWindowTitle("Underlying Data Viewer")
         self.resize(1000, 600)
-        self.db = db
+        self.db = db #only input from transactionApp
         # Layout and table
         layout = QVBoxLayout(self)
         buttonBox = QWidget()
@@ -607,7 +607,7 @@ class underlyingDataWindow(QWidget):
                             inputs.extend(filterSelections)
                 inputs.extend([highTables[table],allEnd])
                 try:
-                    rows = load_from_db(table,query.removesuffix("AND") + " AND [Date] BETWEEN ? AND ?", tuple(inputs), db=self.db)
+                    rows = load_from_db(self.parent,table,query.removesuffix("AND") + " AND [Date] BETWEEN ? AND ?", tuple(inputs))
                 except Exception as e:
                     print(f"Error in call : {e} ; {e.args}")
                     rows = []
@@ -653,7 +653,7 @@ class underlyingDataWindow(QWidget):
                             inputs.extend(filterSelections)
                 inputs.extend([highTables[table],allEnd])
                 try:
-                    rows = load_from_db(table,query.removesuffix("AND") + " AND [Date] BETWEEN ? AND ?", tuple(inputs), db=self.db)
+                    rows = load_from_db(self.parent,table,query.removesuffix("AND") + " AND [Date] BETWEEN ? AND ?", tuple(inputs))
                 except Exception as e:
                     print(f"Error in call : {e} ; {e.args}")
                     rows = []
@@ -711,7 +711,7 @@ class underlyingDataWindow(QWidget):
                         inputs.extend(filterSelections)
             inputs.extend([lowTables[table],allEnd])
             try:
-                rows = load_from_db(table,query.removesuffix("AND") + " AND [Date] BETWEEN ? AND ?", tuple(inputs), db=self.db)
+                rows = load_from_db(self.parent,table,query.removesuffix("AND") + " AND [Date] BETWEEN ? AND ?", tuple(inputs))
             except Exception as e:
                 print(f"Error in call : {e}; {e.args}")
                 rows = []

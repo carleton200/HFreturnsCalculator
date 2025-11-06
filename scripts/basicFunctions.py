@@ -40,8 +40,10 @@ def accountBalanceKey(accEntry):
 def annualizeITD(cumITD, monthCount):
     if monthCount < 12: #ITD for less than a year is essentially YTD style
         return (cumITD - 1) * 100
-    annualITD = (cumITD ** (12/monthCount)) - 1 if cumITD > 0 else -9.99
-    return annualITD * 100
+    elif cumITD > 0:
+        return (cumITD ** (12/monthCount)) - 1
+    else:
+        return 'N/A'
 
 def calculateBackdate(transaction,noStartValue = False):
     time = transaction.get(nameHier["Transaction Time"]["dynLow"])

@@ -1,7 +1,8 @@
 from scripts.importList import *
 
-currentVersion = "1.1.10"
+currentVersion = "1.1.11"
 demoMode = True
+remoteDBmode = False
 ownershipCorrect = True
 importInterval = relativedelta(hours=3)
 calculationPingTime = 2
@@ -37,6 +38,7 @@ assetLevelLinks = {1: {"Display" : "Asset Level 1", "Link" : "assetClass"},
                     0 : {"Display" : "Total Portfolio" , "Link" : "Total"},
                     -1 : {"Link" : "Family Branch"}}
 displayLinks = {"assetClass" : "Asset Level 1", "subAssetClass" : "Asset Level 2" , "subAssetSleeve" : "Asset Level 3"}
+tableNameKey = {1 : {0 : "positions_low", 1 : "positions_high"}, 0 : {0 : "transactions_low", 1 : "transactions_high"}}
 for link in displayLinks.copy(): #builds out in reverse so it can work both ways
     displayLinks[displayLinks.get(link)] = link
 balanceTypePriority = ["Actual", "Adjusted", "Manager Estimate"]
@@ -46,3 +48,8 @@ timeOptions = ["MTD","QTD","YTD", "ITD", "IRR ITD"] + [f"{y}YR" for y in yearOpt
 percent_headers = {option for option in timeOptions}
 for header in ("Return","Ownership"):
     percent_headers.add(header)
+
+if remoteDBmode:
+    sqlPlaceholder = "%s"
+else:
+    sqlPlaceholder = "?"
