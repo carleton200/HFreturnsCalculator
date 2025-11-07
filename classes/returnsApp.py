@@ -125,9 +125,8 @@ class returnsApp(QWidget):
         headerLayout = QHBoxLayout()
         self.lastImportLabel = QLabel("Last Data Import: ")
         headerLayout.addWidget(self.lastImportLabel)
-        if ownershipCorrect:
-            headerLayout.addStretch()
-            headerLayout.addWidget(QLabel("                              Notice: \n Yellow highlights on NAV or monthly table indicate \n the values or sub-group values are affected by investor ownership corrections"))
+        headerLayout.addStretch()
+        headerLayout.addWidget(QLabel("Carleton's Really Speedy Performance Reporting"))
         headerLayout.addStretch()
         headerLayout.addWidget(QLabel(f"Version: {currentVersion}"))
         self.helpBtn = QPushButton("Help")
@@ -383,6 +382,8 @@ class returnsApp(QWidget):
         unDataLayout.addStretch(1)
         unDataBox.setLayout(unDataLayout)
         layout.addWidget(unDataBox)
+        if ownershipCorrect:
+            layout.addWidget(QLabel("Notice: Yellow highlights on NAV or monthly table indicate the values or sub-group values are affected by investor ownership corrections"))
         
 
 
