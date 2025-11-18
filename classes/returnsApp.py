@@ -5,7 +5,8 @@ from scripts.instantiate_basics import *
 from classes.widgetClasses import *
 from scripts.commonValues import *
 from classes.DatabaseManager import *
-from scripts.processPool import processPool
+from scripts.processClump import processClump
+from scripts.processInvestments import processInvestments
 from scripts.basicFunctions import *
 from classes.transactionApp import transactionApp
 from classes.windowClasses import *
@@ -29,7 +30,7 @@ class returnsApp(QWidget):
         self.tableWindows = {}
         self.dataTimeStart = datetime(2000,1,1)
         self.earliestChangeDate = datetime.now() + relativedelta(months=1)
-        self.poolChangeDates = {"active" : False}
+        self.nodeChangeDates = {"active" : False}
         self.currentTableData = None
         self.fullLevelOptions = {}
         self.buildTableCancel = None
@@ -398,7 +399,7 @@ class returnsApp(QWidget):
         self.dataStartSelect.currentTextChanged.connect(self.buildReturnTable)
     def init_data_processing(self):
         self.calcSubmitted = False
-        self.lastImportDB = load_from_db(self,"history")
+        self.lastImportDB = load_from_db(self.db,"history")
         if len(self.lastImportDB) != 1:
             self.lastImportDB = None
         if self.lastImportDB is None:
@@ -417,7 +418,7 @@ class returnsApp(QWidget):
                 self.importButton.setEnabled(False)
                 executor.submit(self.pullData)
             else:
-                calculations = load_from_db(self,"calculations")
+                calculations = load_from_db(self.db,"calculations")
                 if calculations != []:
                     self.populate(self.calculationTable,calculations)
                     self.buildReturnTable()
@@ -644,9 +645,8 @@ class returnsApp(QWidget):
         self.cFundsCalculated = True
         self.sleeveFundLinks = {}
         self.cFundToFundLinks = {}
-        self.pools = []
         sleeves = set()
-        funds = load_from_db(self,"funds")
+        funds = load_from_db(self.db,"funds")
         if funds != []:
             consolidatorFunds = {}
             for row in funds: #find sleeve values and consolidated funds
@@ -661,8 +661,6 @@ class returnsApp(QWidget):
                     self.sleeveFundLinks[row["sleeve"]] = [row["Name"]]
                 else:
                     self.sleeveFundLinks[row["sleeve"]].append(row["Name"])
-                if row["Fundpipelinestatus"] == "I - Internal":
-                    self.pools.append({"poolName" : row["Name"], "assetClass" : assetClass, "subAssetClass" : subAssetClass})
             self.consolidatedFunds = {}
             for row in funds: #assign funds to their consolidators
                 if row.get("Parentfund") in consolidatorFunds:
@@ -702,8 +700,8 @@ class returnsApp(QWidget):
             QMessageBox.warning(self,"API Failure", "API connection has failed. Server is down or API key is bad. \n Previous calculations are left in place for viewing.")
             return
         for table in ("calculations","positions_low","positions_high","transactions_low","transactions_high"):
-            save_to_db(self,table,None,action="clear") #reset all tables so everything will be fresh data
-        self.poolChangeDates = {"active" : False}
+            save_to_db(self.db,table,None,action="clear") #reset all tables so everything will be fresh data
+        self.nodeChangeDates = {"active" : False}
         executor.submit(self.pullData)
     def beginImport(self, *_):
         self.importButton.setEnabled(False)
@@ -779,7 +777,7 @@ class returnsApp(QWidget):
                 gui_queue.put(lambda: self.buildTableLoadingBar.setValue(3))
                 if cancelEvent.is_set(): #exit if new table build request is made
                     return
-                data = load_from_db(self,"calculations",condStatement, tuple(parameters))
+                data = load_from_db(self.db,"calculations",condStatement, tuple(parameters))
                 output = {"Total##()##" : {}}
                 flagOutput = {"Total##()##" : {}}
                 if self.benchmarkSelection.checkedItems() != [] or self.showBenchmarkLinksBtn.isChecked():
@@ -836,7 +834,7 @@ class returnsApp(QWidget):
                         # flags
                         level_flags = flag_ref.setdefault(level, {})
                         level_flags.setdefault(month_str, False)
-                        level_flags[month_str] = (e_get("ownershipAdjust", 'False') == 'True') or level_flags[month_str]
+                        level_flags[month_str] = (e_get("ownershipAdjust", False)) or level_flags[month_str]
                         # aggregate
                         if month_str not in lvl_out:
                             lvl_out[month_str] = float(val)
@@ -857,7 +855,7 @@ class returnsApp(QWidget):
                             lvl_c_out["dataType"] = Dtype
                         level_flags = flag_ref.setdefault(level, {})
                         nav_flag = level_flags.setdefault("NAV", False)
-                        level_flags["NAV"] = (e_get("ownershipAdjust", 'False') == 'True') or nav_flag
+                        level_flags["NAV"] = (e_get("ownershipAdjust", False)) or nav_flag
                         if headerOptions_local and headerOptions_local[0] not in lvl_c_out:
                             for option in (option for option in headerOptions_local if option != "Ownership"):
                                 if option == "IRR ITD" and ((cFunds_checked and e_get("Fund") in consolidatedFunds_local) or e_get("Calculation Type") != "Total Fund"):
@@ -1044,7 +1042,7 @@ class returnsApp(QWidget):
         code = self.buildCode([])
         placeholders = ','.join('?' for _ in allBenchmarkChoices)
         if allBenchmarkChoices:
-            benchmarks = load_from_db(self,"benchmarks",f"WHERE [Index] IN ({placeholders})",tuple(allBenchmarkChoices))
+            benchmarks = load_from_db(self.db,"benchmarks",f"WHERE [Index] IN ({placeholders})",tuple(allBenchmarkChoices))
         else:
             benchmarks = []
         for bench in benchmarks:
@@ -1158,8 +1156,8 @@ class returnsApp(QWidget):
                                 highEntries[total["dateTime"]][levelName] = total[levelName] if total[levelName] != "Cash" or levelName != "assetClass" else "Cash "
                                 if levelName == "subAssetClass":
                                     highEntries[total["dateTime"]]["assetClass"] = total["assetClass"] if total["assetClass"] != "Cash" else "Cash "
-                        if highEntries[total["dateTime"]].get("ownershipAdjust", 'False') == 'False' and total.get('ownershipAdjust','False') == 'True':
-                            highEntries[total["dateTime"]]["ownershipAdjust"] = 'True'
+                        if not highEntries[total["dateTime"]].get("ownershipAdjust", False) and total.get('ownershipAdjust',False):
+                            highEntries[total["dateTime"]]["ownershipAdjust"] = True
                         for header in headerOptions_local:
                             if header not in ("Ownership", "IRR ITD"):
                                 highEntries[total["dateTime"]][header] += float(total[header])
@@ -1220,8 +1218,8 @@ class returnsApp(QWidget):
                                 totalEntriesLow[entry["dateTime"]][levelName] = lvl_val if not (lvl_val == "Cash" and levelName == "assetClass") else "Cash "
                                 if levelName == "subAssetClass":
                                     totalEntriesLow[entry["dateTime"]]["assetClass"] = entry["assetClass"] if entry["assetClass"] != "Cash" else "Cash "
-                        if totalEntriesLow[entry["dateTime"]].get("ownershipAdjust", 'False') == 'False' and entry.get('ownershipAdjust','False') == 'True':
-                            totalEntriesLow[entry["dateTime"]]["ownershipAdjust"] = 'True'
+                        if not totalEntriesLow[entry["dateTime"]].get("ownershipAdjust", False) and entry.get('ownershipAdjust',False):
+                            totalEntriesLow[entry["dateTime"]]["ownershipAdjust"] = True
                         for header in headerOptions_local:
                             v = entry.get(header)
                             if header not in ("Ownership", "IRR ITD") and v not in (None,"None",""):
@@ -1267,8 +1265,8 @@ class returnsApp(QWidget):
                         trueTotalEntries[total["dateTime"]][header] = 0
                 for label in dataOptions_local:
                     trueTotalEntries[total["dateTime"]][label] = total[label]
-            if trueTotalEntries[total["dateTime"]].get("ownershipAdjust", 'False') == 'False' and total.get('ownershipAdjust','False') == 'True':
-                trueTotalEntries[total["dateTime"]]["ownershipAdjust"] = 'True'
+            if not trueTotalEntries[total["dateTime"]].get("ownershipAdjust", False) and total.get('ownershipAdjust',False):
+                trueTotalEntries[total["dateTime"]]["ownershipAdjust"] = True
             for header in headerOptions_local:
                 if header not in ("Ownership", "IRR ITD"):
                     trueTotalEntries[total["dateTime"]][header] += float(total[header])
@@ -1343,7 +1341,7 @@ class returnsApp(QWidget):
                         continue
 
                     condSQL, condParams = build_condition(exclude_key=key)
-                    lowAccounts = load_from_db(self,"positions_low", condSQL, condParams)
+                    lowAccounts = load_from_db(self.db,"positions_low", condSQL, condParams)
 
                     options = {
                         f["key"]: set()
@@ -1404,10 +1402,10 @@ class returnsApp(QWidget):
 
             monthEntry = {"dateTime" : monthDT, "Month" : dateString, "tranStart" : tranStart.removesuffix(".000Z"), "endDay" : bothEnd.removesuffix(".000Z"), "accountStart" : accountStart.removesuffix(".000Z")}
             dbDates.append(monthEntry)
-        save_to_db(self,"Months",dbDates)
+        save_to_db(self.db,"Months",dbDates)
 
     def pullInvestorNames(self):
-        accountsHigh = load_from_db(self,'positions_high')
+        accountsHigh = load_from_db(self.db,'positions_high')
         if accountsHigh is not None:
             investors = []
             familyBranches = []
@@ -1434,7 +1432,7 @@ class returnsApp(QWidget):
             for filter in self.filterOptions:
                 if filter["key"] not in self.highOnlyFilters:
                     allOptions[filter["key"]] = []
-            accountsHigh = load_from_db(self,"positions_high")
+            accountsHigh = load_from_db(self.db,"positions_high")
             if accountsHigh is not None:
                 for account in accountsHigh:
                     for filter in self.filterOptions:
@@ -1444,7 +1442,7 @@ class returnsApp(QWidget):
                             allOptions[filter["key"]].append(account[filter["dynNameHigh"]])
             else:
                 print("no investor to pool accounts found")
-            accountsLow = load_from_db(self,"positions_low")
+            accountsLow = load_from_db(self.db,"positions_low")
             if accountsLow is not None:
                 for lowAccount in accountsLow:
                     for filter in self.filterOptions:
@@ -1474,7 +1472,7 @@ class returnsApp(QWidget):
             QMessageBox(self,"Warning", f"Error occured updating filters: {e}")
 
     def pullBenchmarks(self):
-        benchmarks = load_from_db(self,"benchmarks")
+        benchmarks = load_from_db(self.db,"benchmarks")
         benchNames = []
         for bench in benchmarks:
             if bench["Index"] not in benchNames:
@@ -1534,24 +1532,24 @@ class returnsApp(QWidget):
         if not self.testAPIconnection():
             gui_queue.put(lambda: QMessageBox.warning(self,"API Failure", "API connection has failed. Server is down or API key is bad. \n Previous calculations are left in place for viewing."))
             return
-        def checkNewestData(table, rows):
+        def checkNewestData(table, rows, nodes : list[str], sources, targets):
             #iterate through the freshly imported rows, check if they match with the previous data. 
             #inputs: table name, rows of newly imported data
             #outputs: newImportedRows, oldDatabaseRows, self.earliestChangeDate is updated if a new earliest change date is found
             def buildKey(record): #TODO: check for transactions of the same value in the same source to target. Could ignore new ones
-                value = record[nameHier["Value"]["dynHigh"] if "position" in table else nameHier["CashFlow"]["dynLow"]]
+                value = record[nameHier["Value"]["dynHigh"] if table == "positions" else nameHier["CashFlow"]["dynLow"]]
                 value = 0 if value is None or value == "None" else value
                 key = (
                         record['Source name'] if record['Source name'] is not None else "None",
                         record['Target name'] if record['Target name'] is not None else "None",
-                        round(float(value)) if table != "positions_high" else 0,               # normalize to float
+                        round(float(value)) if table != "positions" else 0,               # normalize to float
                         record['Date'].replace(' ', 'T')      # normalize format if needed
                     )
                 return key
             try:
                 diffCount = 0
                 differences = []
-                previous = load_from_db(self,table) or []
+                previous = load_from_db(self.db,table) or []
 
                 # Build a set of tuple‐keys for the old data
                 oldRecords = set()
@@ -1561,18 +1559,18 @@ class returnsApp(QWidget):
                 newRecords = set()
                 earliest = None
                 for rec in rows:
-                    poolTag = "Target name" if "high" in table else "Source name"
-                    if not any(rec.get(poolTag) == pool.get('poolName') for pool in self.pools):
-                        continue #dont allow the import of non pool related data yet 
-                        #TODO: eventually build to handle these skips where it would be investor directly to a fund
-                    value = rec[nameHier["Value"]["dynHigh"] if "position" in table else nameHier["CashFlow"]["dynLow"]]
+                    rowNodes = [node for node in nodes if node in (rec.get("Target name"), rec.get("Source name"))] #nodes that the entry connects to
+                    if not rowNodes and rec.get('Target name') in targets and rec.get('Source name') in sources:
+                        rowNodes = ['noNodeData',]
+                    elif not rowNodes:
+                        print(f"Warning: no nodes or direct investment found attached to a datapoint: {rec}")
+                    value = rec[nameHier["Value"]["dynHigh"] if "positions" in table else nameHier["CashFlow"]["dynLow"]]
                     value = 0 if value is None or value == "None" else value
                     key = buildKey(rec)
                     newRecords.add(key)
-                    if table == "positions_low": #updates new data to have required fields
+                    if table == "positions": #updates new data to have required fields
                         rec[nameHier["Unfunded"]["local"]] = 0
                         rec[nameHier["Commitment"]["local"]] = 0
-                        rec[nameHier["sleeve"]["local"]] = None
                     if key in oldRecords:
                         continue
                     diffCount += 1
@@ -1583,8 +1581,9 @@ class returnsApp(QWidget):
                     if earliest is None or dt < earliest: #sets overall values to earliest
                         earliest = dt.replace(day=1)
                     with earlyChangeDateLock:
-                        if dt < self.poolChangeDates.get(rec.get(poolTag),datetime.now()): 
-                            self.poolChangeDates[rec.get(poolTag)] =  dt.replace(day=1) # sets each pool value to earliest and instantiates if not existing
+                        for node in rowNodes:
+                            if dt < self.nodeChangeDates.get(node,datetime.now()): 
+                                self.nodeChangeDates[node] =  dt.replace(day=1) # sets each pool value to earliest and instantiates if not existing
                 for oldRec in oldRecords:
                     #find if a new record no longer exists in the old. Means old data is altered and must be redone from that timeframe
                     if oldRec not in newRecords: 
@@ -1615,111 +1614,87 @@ class returnsApp(QWidget):
             completeLock = threading.Lock()
             self.apiFutures = set()
             self.complete = float(0)
-            totalCalls = float(6)
+            totalCalls = float(5)
             self.pullInvestorNames()
             importedTables = {}
             apiData = {
-                "tranCols": "Investment in, Investing Entity, Transaction Type, Effective date, Asset Class (E), Sub-asset class (E), HF Classification, Remaining commitment change, Transaction timing, Amount in system currency, Cash flow change (USD), Parent investor",
+                "tranCols": "Investment in, Investing Entity, Transaction Type, Effective date, Remaining commitment change, Transaction timing, Cash flow change (USD), ValueInSystemCurrency",
                 "tranName": "InvestmentTransaction",
                 "tranSort": "Effective date:desc",
-                "accountCols": "As of Date, Balance Type, Asset Class, Sub-asset class, Investing entity, Investment in, HF Classification, HF Sub-classification, Parent investor, Value in system currency, Fund class",
+                "accountCols": "As of Date, Balance Type, Investing entity, Investment in, Value in system currency, Fund class",
                 "accountName": "InvestmentPosition",
                 "accountSort": "As of Date:desc",
-                "fundCols" : "Fund Name, Asset class category, Parent fund, Fund Pipeline Status",
+                "fundCols" : " Parent fund, Fund Name, Fund Pipeline Status, Asset class category, HF Classification, HF sub-classification",
+                "investorCols" : "Parent investor, Account name",
+                "InvestorName" : "",
                 "benchCols" : (f"Index, As of date, MTD %, QTD %, YTD %, ITD cumulative %, ITD TWRR %, "
                                f"{', '.join(f'Last {y} yr %' for y in yearOptions)}"), 
             }
-            calculationsTest = load_from_db(self,"calculations")
+            calculationsTest = load_from_db(self.db,"calculations")
             if calculationsTest != []:
                 skipCalculations = True
-                self.poolChangeDates = {"active" : True}
+                self.nodeChangeDates = {"active" : True}
                 self.foundRetroChange = False
             else:
                 skipCalculations = False
             accountTranTableFutures = []
             #key for the table naming convention {i : {j : table name}}
-            
-            for i in range(2):
-                cols_key = 'accountCols' if i == 1 else 'tranCols'
-                name_key = 'accountName' if i == 1 else 'tranName'
-                sort_key = 'accountSort' if i == 1 else 'tranSort'
-                headers = {
+            def apiHeader(cols, sort = None):
+                header = {
                     "Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json",
-                    "x-columns": apiData[cols_key],
-                    "x-sort": apiData[sort_key]
+                    "x-columns": cols,
                 }
-                for j in range(2): #0: fund level, 1: pool to high investor level
-                    investmentLevel = "Investing entity" if j == 0 else "Investment in"
-                    if i == 0: #transaction
-                        if j == 0: #fund level
-                            payload = {
+                if sort:
+                    header["x-sort"] : sort
+                return header
+            positionsPayload = {
+                                    "advf": {
+                                        "e": [
+                                            {
+                                                "_name": "InvestmentPosition",
+                                                "rule": [
+                                                    {
+                                                        "_op": "not_null",
+                                                        "_prop": "Investing entity"
+                                                    },
+                                                    {
+                                                        "_op": "not_null",
+                                                        "_prop": "Investment in"
+                                                    },
+                                                    {
+                                                        "_op": "is_null",
+                                                        "_prop": "Holding"
+                                                    }
+                                                ]
+                                            }
+                                        ]
+                                    },
+                                    "mode": "compact"
+                                }
+            transactionsPayload = {
                                         "advf": {
                                             "e": [
                                                 {
                                                     "_name": "InvestmentTransaction",
-                                                    "e": [
-                                                        {
-                                                            "_name": "InvestorAccount",
-                                                            "_not": True
-                                                        },
-                                                        {
-                                                            "_name": "Fund",
-                                                            "rule": [
-                                                                {
-                                                                    "_op": "is",
-                                                                    "_prop": "Fund Pipeline Status",
-                                                                    "values": [
-                                                                        {
-                                                                            "id": "d33af081-c4c8-431b-a98b-de9eaf576324",
-                                                                            "es": "L_FundPipelineStatus",
-                                                                            "name": "I - Internal"
-                                                                        }
-                                                                    ]
-                                                                }
-                                                            ]
-                                                        }
-                                                    ],
                                                     "rule": [
                                                         {
                                                             "_op": "not_null",
-                                                            "_prop": "Cash flow change (USD)"
+                                                            "_prop": "Investing entity"
                                                         },
                                                         {
                                                             "_op": "not_null",
-                                                            "_prop": "Investing entity"
+                                                            "_prop": "Investment in"
+                                                        },
+                                                        {
+                                                            "_op": "not_null",
+                                                            "_prop": "Cash flow change (USD)"
                                                         }
                                                     ]
                                                 },
                                                 {
                                                     "_name": "InvestmentTransaction",
-                                                    "e": [
-                                                        {
-                                                            "_name": "InvestorAccount",
-                                                            "_not": True
-                                                        },
-                                                        {
-                                                            "_name": "Fund",
-                                                            "rule": [
-                                                                {
-                                                                    "_op": "is",
-                                                                    "_prop": "Fund Pipeline Status",
-                                                                    "values": [
-                                                                        {
-                                                                            "id": "d33af081-c4c8-431b-a98b-de9eaf576324",
-                                                                            "es": "L_FundPipelineStatus",
-                                                                            "name": "I - Internal"
-                                                                        }
-                                                                    ]
-                                                                }
-                                                            ]
-                                                        }
-                                                    ],
                                                     "rule": [
-                                                        {
-                                                            "_op": "not_null",
-                                                            "_prop": "Investing entity"
-                                                        },
                                                         {
                                                             "_op": "any_item",
                                                             "_prop": "Transaction type",
@@ -1747,28 +1722,10 @@ class returnsApp(QWidget):
                                                                     }
                                                                 ]
                                                             ]
-                                                        }
-                                                    ]
-                                                }
-                                            ]
-                                        },
-                                        "mode": "compact"
-                                    }
-                        else: #investor level
-                            payload = {
-                                        "advf": {
-                                            "e": [
-                                                {
-                                                    "_name": "InvestmentTransaction",
-                                                    "e": [
-                                                        {
-                                                            "_name": "InvestorAccount"
-                                                        }
-                                                    ],
-                                                    "rule": [
+                                                        },
                                                         {
                                                             "_op": "not_null",
-                                                            "_prop": "Cash flow change (USD)"
+                                                            "_prop": "Investment in"
                                                         },
                                                         {
                                                             "_op": "not_null",
@@ -1780,112 +1737,51 @@ class returnsApp(QWidget):
                                         },
                                         "mode": "compact"
                                     }
-                        
-                    else: #account (position)
-                        if j == 0: #fund level
-                            payload = {
-                                    "advf": {
-                                        "e": [
-                                            {
-                                                "_name": "InvestmentPosition",
-                                                "e": [
-                                                    {
-                                                        "_name": "Fund",
-                                                        "rule": [
-                                                            {
-                                                                "_op": "is",
-                                                                "_prop": "Fund Pipeline Status",
-                                                                "values": [
-                                                                    {
-                                                                        "id": "d33af081-c4c8-431b-a98b-de9eaf576324",
-                                                                        "es": "L_FundPipelineStatus",
-                                                                        "name": "I - Internal"
-                                                                    }
-                                                                ]
-                                                            }
-                                                        ]
-                                                    },
-                                                    {
-                                                        "_name": "InvestorAccount",
-                                                        "_not": True
-                                                    }
-                                                ],
-                                                "rule": [
-                                                    {
-                                                        "_op": "not_null",
-                                                        "_prop": "Investing entity"
-                                                    }
-                                                ]
-                                            }
-                                        ]
-                                    },
-                                    "mode": "compact"
-                                }
-                        else: #investor level
-                            payload = {
-                                            "advf": {
-                                                "e": [
-                                                    {
-                                                        "_name": "InvestmentPosition",
-                                                        "e": [
-                                                            {
-                                                                "_name": "InvestorAccount"
-                                                            }
-                                                        ],
-                                                        "rule": [
-                                                            {
-                                                                "_op": "not_null",
-                                                                "_prop": "Investing entity"
-                                                            }
-                                                        ]
-                                                    }
-                                                ]
-                                            },
-                                            "mode": "compact"
-                                        }
-                    def bgPullData(payload=payload, headers=headers, i=i, j=j):
-                        rows = []
-                        idx = 0
-                        while rows in ([],None) and idx < 3: #if call fails, tries again
-                            idx += 1
-                            response = requests.post(f"{mainURL}/Search", headers=headers, data=json.dumps(payload))
-                            if response.status_code == 200:
-                                try:
-                                    data = response.json()
-                                except ValueError:
-                                    continue
-                                if isinstance(data, dict):
-                                    rows = data.get('data', data.get('rows', []))
-                                elif isinstance(data, list):
-                                    rows = data
-                                else:
-                                    rows = []
-
-                                keys_to_remove = {'_id', '_es'}
-                                rows = [
-                                    {k: v for k, v in row.items() if k not in keys_to_remove}
-                                    for row in rows
-                                ]
+            def bgPullData(tableName, payload, headers):
+                    rows = []
+                    idx = 0
+                    while rows in ([],None) and idx < 3: #if call fails, tries again
+                        idx += 1
+                        response = requests.post(f"{mainURL}/Search", headers=headers, data=json.dumps(payload))
+                        if response.status_code == 200:
+                            try:
+                                data = response.json()
+                            except ValueError:
+                                continue
+                            if isinstance(data, dict):
+                                rows = data.get('data', data.get('rows', []))
+                            elif isinstance(data, list):
+                                rows = data
                             else:
-                                print(f"Error in API call. Code: {response.status_code}. {response}")
-                                try:
-                                    print(f"Error: {response.json()}")
-                                except:
-                                    pass
-                        if len(rows) == 0: #prevents bad calculations from missing data. Appears if partial re-calculation but new data is corrupted
-                            raise RuntimeError("API import did not function properly. Try again.")
-                        tables = checkNewestData(tableNameKey[i][j],rows)
-                        with completeLock:
-                            self.complete += 1
-                        frac = self.complete/totalCalls
-                        gui_queue.put(lambda val = frac: self.apiLoadingBar.setValue(int(val * 100)))
-                        return tableNameKey[i][j],tables
-                    try:
-                        accountTranTableFutures.append(APIexecutor.submit(bgPullData))
-                    except RuntimeError:
-                        raise
-                    except Exception as e:
-                        print(f"Failure to run background thread API call: {e} \n {e.args}")
+                                rows = []
+
+                            keys_to_remove = {'_id', '_es'}
+                            rows = [
+                                {k: v for k, v in row.items() if k not in keys_to_remove}
+                                for row in rows
+                            ]
+                        else:
+                            print(f"Error in API call. Code: {response.status_code}. {response}")
+                            try:
+                                print(f"Error: {response.json()}")
+                            except:
+                                pass
+                    if len(rows) == 0: #prevents bad calculations from missing data. Appears if partial re-calculation but new data is corrupted
+                        raise RuntimeError("API import did not function properly. Try again.")
+                    targets, sources, nodes = findNodes(rows)
+                    tables = checkNewestData(tableName,rows, nodes, sources, targets)
+                    with completeLock:
+                        self.complete += 1
+                    frac = self.complete/totalCalls
+                    gui_queue.put(lambda val = frac: self.apiLoadingBar.setValue(int(val * 100)))
+                    return tableName,tables
+            try:
+                accountTranTableFutures.append(APIexecutor.submit(bgPullData,'transactions',transactionsPayload,apiHeader(apiData["tranCols"], apiData["tranSort"])))
+                accountTranTableFutures.append(APIexecutor.submit(bgPullData,'positions',positionsPayload,apiHeader(apiData["accountCols"], apiData["accountSort"])))
+            except RuntimeError:
+                raise
+            except Exception as e:
+                print(f"Failure to run background thread API call: {e} \n {e.args}")
             fundPayload = {
                             "advf": {
                                 "e": [
@@ -1896,13 +1792,8 @@ class returnsApp(QWidget):
                             },
                             "mode": "compact"
                         }
-            fundHeaders = {
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                    "x-columns": apiData["fundCols"],
-                }
             def bgFundPull():
-                response = requests.post(f"{mainURL}/Search", headers=fundHeaders, data=json.dumps(fundPayload))
+                response = requests.post(f"{mainURL}/Search", headers=apiHeader(apiData["fundCols"]), data=json.dumps(fundPayload))
                 if response.status_code == 200:
                     try:
                         data = response.json()
@@ -1938,12 +1829,8 @@ class returnsApp(QWidget):
                             rows[idx][nameHier["sleeve"]["sleeve"]] =  sleeve
                             rows[idx]["assetClass"] = assetClass
                             rows[idx]["subAssetClass"] = subAssetClass
-                        self.consolidatedFunds = {}
-                        for row in rows: #assign funds to their consolidators
-                            if row.get("Parentfund") in consolidatorFunds:
-                                self.consolidatedFunds[row["Name"]] = consolidatorFunds.get(row.get("Parentfund"))
                         if rows != []:
-                            save_to_db(self,"funds",rows)
+                            save_to_db(self.db,"funds",rows)
                     except Exception as e:
                         print(f"Error proccessing fund API data : {e} {e.args}.  {traceback.format_exc()}")
                     
@@ -1964,13 +1851,18 @@ class returnsApp(QWidget):
                                     },
                                     "mode": "compact"
                                 }
-            benchmarkHeaders = {
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                    "x-columns": apiData["benchCols"],
-                }
-            def bgBenchPull():
-                response = requests.post(f"{mainURL}/Search", headers=benchmarkHeaders, data=json.dumps(benchmarkPayload))
+            investorPayload = {
+                                    "advf": {
+                                        "e": [
+                                            {
+                                                "_name": "InvestorAccount"
+                                            }
+                                        ]
+                                    },
+                                    "mode": "compact"
+                                }
+            def basicAPIpull(name,payload,cols,sort = None):
+                response = requests.post(f"{mainURL}/Search", headers=apiHeader(cols, sort = sort), data=json.dumps(payload))
                 if response.status_code == 200:
                     try:
                         data = response.json()
@@ -1982,17 +1874,18 @@ class returnsApp(QWidget):
                             rows = []
                         keys_to_remove = {'_id', '_es'}
                         rows = [{k: v for k, v in row.items() if k not in keys_to_remove} for row in rows]
-                        save_to_db(self,"benchmarks",rows)
+                        save_to_db(self.db,name,rows)
                     except Exception as e:
-                        print(f"Error proccessing benchmark API data : {e} {e.args}.  {traceback.format_exc()}")
+                        print(f"Error proccessing {name} API data : {e} {e.args}.  {traceback.format_exc()}")
                     
                 else:
-                    print(f"Error in API call for benchmarks. Code: {response.status_code}. {response}. {traceback.format_exc()}")
+                    print(f"Error in API call for {name}. Code: {response.status_code}. {response}. {traceback.format_exc()}")
                 with completeLock:
                     self.complete += 1
                 frac = self.complete/totalCalls
                 gui_queue.put(lambda val = frac: self.apiLoadingBar.setValue(int(val * 100)))
-            submitAPIcall(self,bgBenchPull)
+            submitAPIcall(self,basicAPIpull,'benchmarks',benchmarkPayload,apiData['benchCols'])
+            submitAPIcall(self,basicAPIpull,'investors',investorPayload,apiData['investorCols'])
             wait(accountTranTableFutures)
             for future in accountTranTableFutures:
                 #must be careful. There are a maximum of 5 threads but there are 6 calls, and 2 are waited for after
@@ -2002,28 +1895,28 @@ class returnsApp(QWidget):
                 else:
                     mergedTable = []
                     poolTag = "Target name" if "high" in table else "Source name"
-                    if not self.poolChangeDates.get("active",False): #if inactive, use generic starting date
+                    if not self.nodeChangeDates.get("active",False): #if inactive, use generic starting date
                         changeDate = self.earliestChangeDate
                     for rec in tableData["new"]:
                         pool = rec[poolTag]
-                        if self.poolChangeDates.get("active",False): #if active, specifiy date by pool
-                            changeDate = self.poolChangeDates.get(pool,datetime.now())
+                        if self.nodeChangeDates.get("active",False): #if active, specifiy date by pool
+                            changeDate = self.nodeChangeDates.get(pool,datetime.now())
                         if changeDate < datetime.strptime(rec["Date"], "%Y-%m-%dT%H:%M:%S"): #new data past the editing date
                             mergedTable.append(rec)
                     for rec in tableData["old"]:
                         pool = rec[poolTag]
-                        if self.poolChangeDates.get("active",False): #if active, specifiy date by pool
-                            changeDate = self.poolChangeDates.get(pool,datetime.now())
+                        if self.nodeChangeDates.get("active",False): #if active, specifiy date by pool
+                            changeDate = self.nodeChangeDates.get(pool,datetime.now())
                         if changeDate >= datetime.strptime(rec["Date"], "%Y-%m-%dT%H:%M:%S"): #old data before the editing date to be kept
                             mergedTable.append(rec)
                     importedTables[table] = mergedTable
             wait(self.apiFutures)
             if skipCalculations:
                 print("Earliest change: ", self.earliestChangeDate)
-                if self.poolChangeDates.get("active", False):
+                if self.nodeChangeDates.get("active", False):
                     print(f"Changes dates by pools:")
-                    for pool in self.poolChangeDates:
-                        print(f"        {pool} : {self.poolChangeDates.get(pool)}")
+                    for pool in self.nodeChangeDates:
+                        print(f"        {pool} : {self.nodeChangeDates.get(pool)}")
             gui_queue.put(lambda: self.apiLoadingBar.setValue(100))
 
 
@@ -2052,27 +1945,27 @@ class returnsApp(QWidget):
                 self.updateMonths()
                 gui_queue.put(lambda: self.pullLevelNames())
                 print("Calculating return....")
-                fundListDB = load_from_db(self,"funds")
+                fundListDB = load_from_db(self.db,"funds")
                 fundList = {}
                 for fund in fundListDB:
                     fundList[fund["Name"]] = fund[nameHier["sleeve"]["sleeve"]]
-                months = load_from_db(self,"Months", f"ORDER BY [dateTime] ASC")
+                months = load_from_db(self.db,"Months", f"ORDER BY [dateTime] ASC")
                 calculations = []
                 monthIdx = 0
-                if load_from_db(self,"calculations") == []:
+                if load_from_db(self.db,"calculations") == []:
                     noCalculations = True
                 else:
                     noCalculations = False
 
                 if self.earliestChangeDate > datetime.now() and not noCalculations:
                     #if no new data exists, use old calculations
-                    calculations = load_from_db(self,"calculations")
+                    calculations = load_from_db(self.db,"calculations")
                     keys = list({key for row in calculations for key in row.keys()})
                     gui_queue.put( lambda: self.populate(self.calculationTable,calculations,keys = keys))
                     gui_queue.put( lambda: self.buildReturnTable())
                     gui_queue.put(lambda: self.calculationLoadingBox.setVisible(False))
                     gui_queue.put(lambda: self.importButton.setEnabled(True))
-                    save_to_db(self,None,None,query="UPDATE history SET [lastImport] = ?", inputs=(self.apiCallTime,), action="replace")
+                    save_to_db(self.db,None,None,query="UPDATE history SET [lastImport] = ?", inputs=(self.apiCallTime,), action="replace")
                     self.lastImportLabel.setText(f"Last Data Import: {self.apiCallTime}")
                     self.lastImportDB[0]['lastImport'] = self.apiCallTime
                     print("Calculations skipped.")
@@ -2081,64 +1974,97 @@ class returnsApp(QWidget):
                 # proces pool section----------------------------------------------------------------
                 self.workerProgress = {}
 
+                targets, sources, nodes = findNodes(dynImportData['transactions'],dynImportData['positions'])
+                nodePaths = findNodeStructure(sources,nodes,targets, [*dynImportData['transactions'],*dynImportData['positions']])
+                for nodeP in nodePaths.values():
+                    print(nodeP)
+                # INSERT_YOUR_CODE
+                nodeClumps = get_connected_node_groups(nodePaths)
+                clumpIdxs = {node : idx for idx, clump in enumerate(nodeClumps) for node in clump}
+
                 # ------------------- build data cache ----------------------
-                tables = ["positions_low", "transactions_low", "positions_high", "transactions_high"]
+                tables = mainTableNames
                 table_rows = {t: dynImportData[t] for t in tables}
-                table_rows["calculations"] = load_from_db(self,"calculations")
+                table_rows["nodeCalculations"] = load_from_db(self.db,"nodeCalculations")
                 cache = {}
-                for table, rows in table_rows.items():
+                for table, rows in table_rows.items(): 
+                    #split the data by nodes for calculations
                     for row in rows:
-                        if table in ("positions_low", "transactions_low"):
-                            poolKey = row.get("Source name")
-                        elif table in ("positions_high", "transactions_high"):
-                            poolKey = row.get("Target name")
-                        elif table == "calculations":
-                            poolKey = row.get("Pool")
-                        if poolKey is None:
-                            continue
-                        if table == "calculations":
-                            cache.setdefault(poolKey, {}).setdefault(table, {}).setdefault(row["dateTime"], []).append(row)
+                        if row['Target name'] in targets and row['Source name'] in sources:
+                            #investments directly from investor to fund
+                            if table == "nodeCalculations":
+                                cache.setdefault(-1, {}).setdefault('noNodeData', {}).setdefault(table, {}).setdefault(row["dateTime"], []).append(row)
+                            else:
+                                for m in months: #find the month the account balance or transaction belongs in
+                                    start = m["accountStart"] if table == "positions" else m["tranStart"]
+                                    date = row.get("Date")
+                                    if not (start <= date <= m["endDay"]):
+                                        continue
+                                    cache.setdefault(-1, {}).setdefault('noNodeData', {}).setdefault(table, {}).setdefault(m["dateTime"], []).append(row)
                         else:
-                            for m in months: #find the month the account balance or transaction belongs in
-                                start = m["accountStart"] if table in ("positions_low", "positions_high") else m["tranStart"]
-                                date = row.get("Date")
-                                if not (start <= date <= m["endDay"]):
+                            for direction in ["Target name" , "Source name", 'node']:
+                                potNode = row.get(direction)
+                                if potNode not in nodes:
                                     continue
-                                cache.setdefault(poolKey, {}).setdefault(table, {}).setdefault(m["dateTime"], []).append(row)
-                self.cachedDynTables = {table : [] for table in mainTableNames}
-                self.cachedPoolCalculations = []
-                if self.poolChangeDates.get("active",False): #iterate through pools that have custom calculation dates
-                    runPools = []
-                    for idx, pool in enumerate(self.pools):
-                        if pool.get("poolName") in self.poolChangeDates or (idx == 0 and not any(pool.get("poolName") in self.poolChangeDates for pool in self.pools)): 
-                            #if there is a date to calculate from. Needs at least one pool to run (idx 0) if none
-                            runPools.append(pool)
-                        else: #otherwise, get the calculations and avoid building a worker thread for nothing
-                            self.cachedPoolCalculations.extend([calcRow for month in  cache.get(pool.get("poolName"),{}).get("calculations", {}) for calcRow in cache.get(pool.get("poolName"),{}).get("calculations", {}).get(month)])
-                            for table in mainTableNames: #add the dynTable data to maintain the pool data and add it again after calculations
-                                if "positions_" in table: #remove the duplicate account balances (EOM = next BOM)
-                                    uniqueBalances = {accountBalanceKey(dynRow): dynRow for month in  cache.get(pool.get("poolName"),{}).get(table, {}) for dynRow in cache.get(pool.get("poolName"),{}).get(table, {}).get(month)}
-                                    self.cachedDynTables[table].extend([entry for _,entry in uniqueBalances.items()])
                                 else:
-                                    self.cachedDynTables[table].extend([dynRow for month in  cache.get(pool.get("poolName"),{}).get(table, {}) for dynRow in cache.get(pool.get("poolName"),{}).get(table, {}).get(month)])
-                    self.pools = runPools #only run calculatable pools
-                for idx, pool in enumerate(self.pools):
-                    self.pools[idx]["cache"] = cache.get(pool.get("poolName"))
-                    if self.poolChangeDates.get("active",False): #if the pool changes have been calculated, use it or set to current date if no changes occured
-                        self.pools[idx]["earliestChangeDate"] = self.poolChangeDates.get(pool.get("poolName"),datetime.now())
-                    else: #if pool changes have not been calculated but calculation requirements were imported, set to earliest global date
-                        self.pools[idx]["earliestChangeDate"] =  self.earliestChangeDate 
+                                    if table == "nodeCalculations":
+                                        cache.setdefault(clumpIdxs[potNode], {}).setdefault(potNode, {}).setdefault(table, {}).setdefault(row["dateTime"], []).append(row)
+                                    else:
+                                        if table == 'positions': #if the node is the source, it is below. Otherwise, above
+                                            tableName = 'positions_below' if 'Source' in direction else 'positions_above'
+                                        elif table == 'transactions':
+                                            tableName = 'transactions_below' if 'Source' in direction else 'transactions_above'
+                                        for m in months: #find the month the account balance or transaction belongs in
+                                            start = m["accountStart"] if table == "positions" else m["tranStart"]
+                                            date = row.get("Date")
+                                            if not (start <= date <= m["endDay"]):
+                                                continue
+                                            cache.setdefault(clumpIdxs[potNode], {}).setdefault(potNode, {}).setdefault(tableName, {}).setdefault(m["dateTime"], []).append(row)
+                self.cachedDynTables = {table : [] for table in mainTableNames}
+                self.cachedNodeCalculations = []
+                if self.nodeChangeDates.get("active",False): #iterate through nodes that have custom calculation dates
+                    runClumps = {idx : [] for idx in range(nodeClumps)}
+                    for idx, cNodes in enumerate(nodeClumps):
+                        if any(node in self.nodeChangeDates for node in cNodes) or (idx == 0 and not any(node in self.nodeChangeDates for node in nodes)):
+                            runClumps[clumpIdxs[node]] = [{'name' : node} for node in cNodes]
+                        else:
+                            for node in cNodes:
+                                self.cachedNodeCalculations.extend([calcRow for _, rows in  cache[idx].get(node,{}).get("nodeCalculations", {}).items() for calcRow in rows])
+                                for table in mainTableNames: #add the dynTable data to maintain the pool data and add it again after calculations
+                                    if "positions" == table: #remove the duplicate account balances (EOM = next BOM)
+                                        uniqueBalances = {accountBalanceKey(dynRow): dynRow for month in  cache[idx].get(node,{}).get(table, {}) for dynRow in cache[idx].get(node,{}).get(table, {}).get(month)}
+                                        self.cachedDynTables[table].extend([entry for _,entry in uniqueBalances.items()])
+                                    else:
+                                        self.cachedDynTables[table].extend([dynRow for month in  cache[idx].get(node,{}).get(table, {}) for dynRow in cache[idx].get(node,{}).get(table, {}).get(month)])
+                else:
+                    runClumps = [[{'name' : node} for node in cNodes] for cNodes in nodeClumps]
+                nodeCount = 0
+                for clumpList in runClumps:
+                    for idx, nodeDict in enumerate[dict](clumpList):
+                        clumpList[idx]["cache"] = cache[clumpIdxs[nodeDict['name']]].get(nodeDict['name'])
+                        if self.nodeChangeDates.get("active",False): #if the pool changes have been calculated, use it or set to current date if no changes occured
+                            clumpList[idx]["earliestChangeDate"] = self.nodeChangeDates.get(nodeDict.get("name"),datetime.now())
+                        else: #if pool changes have not been calculated but calculation requirements were imported, set to earliest global date
+                            clumpList[idx]["earliestChangeDate"] =  self.earliestChangeDate 
+                    #must calculate the entire clump from the same time frame as one node change may likely affect the others
+                    clumpEarliestChangeDate = min((nodeDict['earliestChangeDate'] for nodeDict in clumpList))
+                    for idx, nodeDict in enumerate[dict](clumpList):
+                        clumpList[idx]["earliestChangeDate"] =  clumpEarliestChangeDate
                     newMonths = []
                     if not noCalculations: #if there are calculations, find all months before the data pull, and then pull those calculations
                         for month in months:
                             #if the calculations for the month have already been complete, pull the old data
-                            if self.pools[idx]["earliestChangeDate"] > datetime.strptime(month["endDay"], "%Y-%m-%dT%H:%M:%S"):
+                            if clumpEarliestChangeDate > datetime.strptime(month["endDay"], "%Y-%m-%dT%H:%M:%S"):
                                 pass
                             else:
                                 newMonths.append(month)
                     else:
                         newMonths = months
-                    _ = updateStatus(self, pool.get("poolName"),len(newMonths), status="Initialization")
+                    for idx, nodeDict in enumerate[dict](clumpList):
+                        nodeCount += 1
+                        _ = updateStatus(self, nodeDict['name'],len(newMonths), status="Initialization")
+                nodeCount += 1
+                _ = updateStatus(self, 'noNodeData',len(months), status="Initialization")
                 def initializeWorkerPool():
                     self.manager = Manager()
                     self.lock = self.manager.Lock()
@@ -2149,16 +2075,22 @@ class returnsApp(QWidget):
 
                     self.pool = Pool()
                     self.futures = []
-                    executor.submit(self.watch_db)
+                    self.noNodeFuture = None
+                    executor.submit(self.watch_db,nodeCount)
 
                     commonData = {"noCalculations" : noCalculations,
                                     "months" : months, "fundList" : fundList
                                     }
                     
                     self.calcStartTime = datetime.now()
-                    for pool in self.pools:
-                        res = self.pool.apply_async(processPool, args=(pool, commonData,self.workerStatusQueue, self.workerDBqueue, self.calcFailedFlag))
+                    print("Building worker pool...")
+                    noNodeDataDict = {'name' : 'noNodeData', 'cache' : cache[-1].get('noNodeData',{})}
+                    res = self.pool.apply_async(processInvestments, args=(noNodeDataDict, commonData,self.workerStatusQueue, self.workerDBqueue, self.calcFailedFlag))
+                    self.futures.append(res)
+                    for clumpData in runClumps:
+                        res = self.pool.apply_async(processClump, args=(clumpData,nodePaths, commonData,self.workerStatusQueue, self.workerDBqueue, self.calcFailedFlag))
                         self.futures.append(res)
+                    print("Workers all built. Processing...")
                     self.pool.close()
 
                     self.timer.start(int(calculationPingTime * 0.25) * 1000) #check at 0.75 the ping time to prevent queue buildup
@@ -2171,7 +2103,7 @@ class returnsApp(QWidget):
                 # maybe also:
                 print(traceback.format_exc())
         executor.submit(initalizeCalc)
-    def watch_db(self):
+    def watch_db(self, totalNodes : int):
         while True:
             count = 0
             while not self.workerStatusQueue.empty() and count < 300:
@@ -2202,9 +2134,10 @@ class returnsApp(QWidget):
                         completed.append(line)
                 if len(failed) > 0:
                     print(f"Halting progress watch due to worker '{failed[0].get("pool","Bad Pull")}' failure.")
+                    print(self.workerProgress)
                     self.queue.append(-86) #will halt the queue
                     break
-                elif len(completed) == len(self.pools):
+                elif len(completed) == totalNodes:
                     print("All workers have declared complete.")
                     self.queue.append(100) #backup in case the numbers below fail
                     break
@@ -2257,35 +2190,40 @@ class returnsApp(QWidget):
             self.pool.join()
             print("All workers finished")
             
-            calculations = []
+            nodeCalculations = []
             allDynTables = {table: [] for table in mainTableNames}
             for fut in self.futures:
                 try:
-                    calcs, dynTables = fut.get()
-                    calculations.extend(calcs)
+                    nCalcs, dynTables = fut.get()
+                    nodeCalculations.extend(nCalcs)
                     for table in dynTables:
                         allDynTables[table].extend(dynTables[table])
                 except Exception as e:
                     print(traceback.format_exc())
                     print(f"Error appending calculations: {e}")
-            calculations.extend(self.cachedPoolCalculations)
+            nodeCalculations.extend(self.cachedNodeCalculations)
             for table in dynTables: #add dynamo table data in for pools that were not calculated again
                 allDynTables[table].extend(self.cachedDynTables[table])
-            keys = list({key for row in calculations for key in row.keys()})
+            keys = list({key for row in nodeCalculations for key in row.keys()})
             print("Updating database...")
-            save_to_db(self,"calculations",calculations, keys=keys)
+            save_to_db(self.db,"nodeCalculations",nodeCalculations, keys=keys)
             for table in mainTableNames:
-                save_to_db(self,table, allDynTables[table])
+                save_to_db(self.db,table, allDynTables[table])
             print("Database updated.")
             try:
-                save_to_db(self,None,None,query="UPDATE history SET [lastImport] = ?", inputs=(self.apiCallTime,), action="replace")
+                save_to_db(self.db,None,None,query="UPDATE history SET [lastImport] = ?", inputs=(self.apiCallTime,), action="replace")
                 self.lastImportLabel.setText(f"Last Data Import: {self.apiCallTime}")
                 self.lastImportDB[0]['lastImport'] = self.apiCallTime
             except Exception as e:
                 QMessageBox.warning(self,"Warning",f"Failed to update internal data for last import time. Data will likely reimport soon: {e} {e.args}")
                 print(f"failed to update last import time {e} {e.args}")
+            def openWindow():
+                window = tableWindow(parentSource=self,all_rows=nodeCalculations,table="Node Calculations")
+                self.tableWindows[table] = window
+                window.show()
+            gui_queue.put(lambda: openWindow())
             gui_queue.put(self.pullLevelNames)
-            gui_queue.put( lambda: self.populate(self.calculationTable,calculations,keys = keys))
+            gui_queue.put( lambda: self.populate(self.calculationTable,nodeCalculations,keys = keys))
             gui_queue.put( lambda: self.buildReturnTable())
             gui_queue.put(lambda: self.calculationLoadingBox.setVisible(False))
             gui_queue.put(lambda: self.importButton.setEnabled(True))
@@ -2300,7 +2238,7 @@ class returnsApp(QWidget):
         self.currentVersionAccess = False
         self.globalVersion = None
         try:
-            row = load_from_db(self,"history")[0]
+            row = load_from_db(self.db,"history")[0]
             self.globalVersion = row["currentVersion"]
             if row["currentVersion"] == currentVersion:
                 self.currentVersionAccess = True

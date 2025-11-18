@@ -607,7 +607,7 @@ class underlyingDataWindow(QWidget):
                             inputs.extend(filterSelections)
                 inputs.extend([highTables[table],allEnd])
                 try:
-                    rows = load_from_db(self.parent,table,query.removesuffix("AND") + " AND [Date] BETWEEN ? AND ?", tuple(inputs))
+                    rows = load_from_db(self.parent.db,table,query.removesuffix("AND") + " AND [Date] BETWEEN ? AND ?", tuple(inputs))
                 except Exception as e:
                     print(f"Error in call : {e} ; {e.args}")
                     rows = []
@@ -653,7 +653,7 @@ class underlyingDataWindow(QWidget):
                             inputs.extend(filterSelections)
                 inputs.extend([highTables[table],allEnd])
                 try:
-                    rows = load_from_db(self.parent,table,query.removesuffix("AND") + " AND [Date] BETWEEN ? AND ?", tuple(inputs))
+                    rows = load_from_db(self.parent.db,table,query.removesuffix("AND") + " AND [Date] BETWEEN ? AND ?", tuple(inputs))
                 except Exception as e:
                     print(f"Error in call : {e} ; {e.args}")
                     rows = []
@@ -711,7 +711,7 @@ class underlyingDataWindow(QWidget):
                         inputs.extend(filterSelections)
             inputs.extend([lowTables[table],allEnd])
             try:
-                rows = load_from_db(self.parent,table,query.removesuffix("AND") + " AND [Date] BETWEEN ? AND ?", tuple(inputs))
+                rows = load_from_db(self.parent.db,table,query.removesuffix("AND") + " AND [Date] BETWEEN ? AND ?", tuple(inputs))
             except Exception as e:
                 print(f"Error in call : {e}; {e.args}")
                 rows = []
@@ -789,9 +789,7 @@ class underlyingDataWindow(QWidget):
 @attach_logging_to_class
 class tableWindow(QWidget):
     """
-    A window that loads data from four database sources in the parent,
-    merges and sorts it by dateTime, and displays it in a QTableWidget
-    with a unified set of columns.
+    A window that loads basic rows and displays as a table
     """
     def __init__(self, parent=None, flags=Qt.WindowFlags(), parentSource = None, all_rows = [], table = "", headers = None):
         super().__init__(parent, flags)

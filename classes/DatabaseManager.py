@@ -1,6 +1,7 @@
 from scripts.importList import *
 from scripts.instantiate_basics import *
 from scripts.commonValues import *
+from scripts.basicFunctions import infer_sqlite_type
 class DatabaseManager:
     """Thread-safe SQLite database manager.
 
@@ -103,27 +104,21 @@ CREATE TABLE {table_name} (
             # calculations
             self.create_table_if_not_exists(
                 cur,
-                "calculations",
+                "nodeCalculations",
                 [
                     ("dateTime", "TEXT"),
-                    ("Investor", "TEXT"),
-                    ("Pool", "TEXT"),
-                    ("Fund", "TEXT"),
-                    ("assetClass", "TEXT"),
-                    ("subAssetClass", "TEXT"),
-                    ("subAssetSleeve", "TEXT"),
-                    ("NAV", "TEXT"),
-                    ("[Monthly Gain]", "TEXT"),
-                    ("[Return]", "TEXT"),
-                    ("MDdenominator", "TEXT"),
-                    ("Ownership", "TEXT"),
-                    ("Commitment", "TEXT"),
-                    ("Unfunded", "TEXT"),
-                    ("[IRR ITD]", "TEXT"),
-                    ("Classification", "TEXT"),
-                    ("[Calculation Type]", "TEXT"),
-                    ("[Family Branch]","TEXT"),
-                    ("ownershipAdjust", "TEXT"),
+                    ("Source name", "TEXT"),
+                    ("Node", "TEXT"),
+                    ("Target name", "TEXT"),
+                    ("NAV", "REAL"),
+                    ("[Monthly Gain]", "REAL"),
+                    ("[Return]", "REAL"),
+                    ("MDdenominator", "REAL"),
+                    ("Ownership", "REAL"),
+                    ("Commitment", "REAL"),
+                    ("Unfunded", "REAL"),
+                    ("[IRR ITD]", "REAL"),
+                    ("ownershipAdjust", "BOOL"),
                 ],
                 primary_keys=["dateTime", "Investor", "Pool", "Fund"]
             )
@@ -155,7 +150,7 @@ CREATE TABLE {table_name} (
                 [
                     ("dateTime", "TEXT"),
                     ("Pool", "TEXT"),
-                    ("[Transaction Sum]", "TEXT"),
+                    ("[Transaction Sum]", "REAL"),
                 ],
                 primary_keys=["dateTime", "Pool"]
             )
@@ -166,6 +161,18 @@ CREATE TABLE {table_name} (
                 ("currentVersion", "TEXT"),
                 ("lastCalculation", "TEXT"),
                 ("changeDate", "TEXT")]
+            )
+            self.create_table_if_not_exists(
+                cur,
+                'nodes',
+                [
+                    ('id', 'INTEGER'),
+                    ('name' , 'TEXT'),
+                    ('lowestLevel', 'INTEGER'),
+                    ('above', 'TEXT'),
+                    ('below','TEXT')
+                ],
+                primary_keys=['id',]
             )
             cur.execute("SELECT * FROM history")
             history = cur.fetchall()
@@ -223,11 +230,11 @@ CREATE TABLE {table_name} (
             pass
 
 
-def save_to_db(self, table, rows, action = "", query = "",inputs = None, keys = None):
+def save_to_db(db : DatabaseManager, table, rows, action = "", query = "",inputs = None, keys = None):
     try:
-        conn = self.db._conn
-        with self.db._lock:
-            cur = self.db._conn.cursor()
+        conn = db._conn
+        with db._lock:
+            cur = db._conn.cursor()
             if action == "reset":
                 cur.execute(f"DROP TABLE IF EXISTS {table}")
                 conn.commit()
@@ -294,7 +301,14 @@ def save_to_db(self, table, rows, action = "", query = "",inputs = None, keys = 
                 else:
                     cols = list(keys)
                 quoted_cols = ','.join(f'"{c}"' for c in cols)
-                col_defs = ','.join(f'"{c}" TEXT' for c in cols)
+                # Dynamically determine column types based on variable values in the first row
+                
+
+                # Use the first row to infer data types, fallback to TEXT if empty
+                sample_row = rows[0] if rows else {}
+                col_defs = ','.join(
+                    f'"{c}" {infer_sqlite_type(sample_row.get(c, ""))}' for c in cols
+                )
                 placeholders = ','.join(sqlPlaceholder for _ in cols)
                 sql = f'INSERT INTO "{table}" ({quoted_cols}) VALUES ({placeholders})'
                 
@@ -368,11 +382,11 @@ def save_to_db(self, table, rows, action = "", query = "",inputs = None, keys = 
         except:
             pass
         return False
-def load_from_db(self, table, condStatement = "",parameters = None):
+def load_from_db(db : DatabaseManager, table, condStatement = "",parameters = None):
     try:
-        conn = self.db._conn
-        with self.db._lock:
-            cur = self.db._conn.cursor()
+        conn = db._conn
+        with db._lock:
+            cur = db._conn.cursor()
             try:
                 if condStatement != "" and parameters is not None:
                     # Replace ? placeholders with the appropriate placeholder for the current DB mode
