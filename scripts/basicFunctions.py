@@ -41,7 +41,7 @@ def annualizeITD(cumITD, monthCount):
     if monthCount < 12: #ITD for less than a year is essentially YTD style
         return (cumITD - 1) * 100
     elif cumITD > 0:
-        return (cumITD ** (12/monthCount)) - 1
+        return ((cumITD ** (12/monthCount)) - 1) * 100
     else:
         return 'N/A'
 

@@ -13,7 +13,7 @@ import time
 import copy
 import re
 import pyxirr
-import pymssql
+import pyodbc
 from openpyxl import load_workbook
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Alignment, Font

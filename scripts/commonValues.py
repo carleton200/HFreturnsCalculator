@@ -52,7 +52,4 @@ percent_headers = {option for option in timeOptions}
 for header in ("Return","Ownership"):
     percent_headers.add(header)
 
-if remoteDBmode:
-    sqlPlaceholder = "%s"
-else:
-    sqlPlaceholder = "?"
+sqlPlaceholder = "?"

@@ -5,6 +5,18 @@ node_modules/
 #ignore specific files
 classes/__pycache__
 scripts/__pycache__
+dbEditor.py
+dbEditor.spec
+returnEnv/
+oldScripts/
+testExcelOutputs/
+build/
+assets/
+__pycache__
+Example_Documents/
+dist/
+Data_Testing_Excels/
+
 # Ignore environment variables file
 .env
 
@@ -27,3 +39,4 @@ yarn.lock
 *.iml
 .idea/
 .vscode/
+.tmp
