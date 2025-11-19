@@ -30,6 +30,11 @@ def infer_sqlite_type(val):
     except Exception:
         return "TEXT"
 
+def findSign(num: float):
+    if num == 0:
+        return 0
+    return num / abs(num)
+
 def handleFundClasses(entryList):
     split = {}
     foundDuplicate = False

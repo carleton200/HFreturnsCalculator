@@ -154,7 +154,7 @@ def processNode(nodeData : dict,selfData : dict, statusQueue, _, failed, transac
                 if sourceMDdenominator == 0:
                     sourceReturn = 0 #0 if investor has no value in pool. avoids error
                 else:
-                    sourceReturn = sourceGain / sourceMDdenominator
+                    sourceReturn = sourceGain / sourceMDdenominator * findSign(sourceGain)
                 if round(tempAboveDicts[source]["startVal"] + tempAboveDicts[source]["cashFlow"]) == 0 or len(EOMcheck) == 0 or round(float(EOMcheck[0].get(nameHier["Value"]["dynHigh"],0))) == 0: 
                     #zero values if exited source
                     #exit check: start value and cashflow sums to zero OR no end value OR end value is zero
@@ -196,7 +196,7 @@ def processNode(nodeData : dict,selfData : dict, statusQueue, _, failed, transac
                     targetSourceNAV = sourceOwnership / 100 * targetEntry["NAV"]
                     targetSourceGain = targetEntry["Monthly Gain"] / monthNodeCalc["Monthly Gain"] * sourceEntry["Monthly Gain"] if monthNodeCalc["Monthly Gain"] != 0 else 0
                     targetSourceMDdenominator = sourceEntry["MDdenominator"] / monthNodeCalc["MDdenominator"] * targetEntry["MDdenominator"] if monthNodeCalc["MDdenominator"] != 0 else 0
-                    targetSourceReturn = targetSourceGain / targetSourceMDdenominator if targetSourceMDdenominator != 0 else 0
+                    targetSourceReturn = targetSourceGain / targetSourceMDdenominator * findSign(targetSourceGain) if targetSourceMDdenominator != 0 else 0
                     targetSourceOwnership = targetSourceNAV /  targetEntry["NAV"] if targetEntry["NAV"] != 0 else 0
                     #account for commitment calculations on closed funds
                     tempFundOwnership = targetSourceOwnership if targetSourceOwnership != 0 else sourceOwnership / 100

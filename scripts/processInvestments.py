@@ -124,7 +124,7 @@ def processOneLevelInvestments(month, node, invSourceName, newMonths, cache, pos
             invGain = (float(endEntry[nameHier["Value"]["dynLow"]]) - float(startEntry[nameHier["Value"]["dynLow"]]) - invCashFlowSum)
             invMDdenominator = float(startEntry[nameHier["Value"]["dynLow"]]) + invWeightedCashFlow
             invNAV = float(endEntry[nameHier["Value"]["dynLow"]])
-            invReturn = invGain/invMDdenominator * 100 if invMDdenominator != 0 else 0
+            invReturn = invGain/invMDdenominator * 100 * findSign(invGain) if invMDdenominator != 0 else 0
             if investment in IRRtrack:
                 IRRitd = calculate_xirr([*IRRtrack[investment]["cashFlows"], invNAV], [*IRRtrack[investment]["dates"], datetime.strptime(month["endDay"], "%Y-%m-%dT%H:%M:%S")])
             else:
@@ -169,7 +169,7 @@ def processOneLevelInvestments(month, node, invSourceName, newMonths, cache, pos
             print(f"Skipped fund {investment} for {invSourceName} in {month["Month"]} because: {traceback.format_exc()}")
             #Testing flag. skips fund if the values are zero and cause an error
     skipUpper = nodeNAV == 0 and nodeCashFlow == 0#skips the pool if there is no cash flow or value in the pool
-    poolReturn = nodeGain/nodeMDdenominator * 100 if nodeMDdenominator != 0 else 0
+    poolReturn = nodeGain/nodeMDdenominator * 100 * findSign(nodeGain) if nodeMDdenominator != 0 else 0
     monthNodeCalc = {"dateTime" : month["dateTime"], "Source name" : invSourceName, "Target name" : None, "Node" : node,
                     "NAV" : nodeNAV, "Monthly Gain" : nodeGain, "Return" : poolReturn , "MDdenominator" : nodeMDdenominator,
                         "Ownership" : None} 

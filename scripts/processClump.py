@@ -13,6 +13,7 @@ def processClump(clumpData : list[dict],nodePaths : dict, selfData : dict, statu
         nodeList = list(clumpDataIdxs.keys())
         months = selfData['months']
         clumpCalculations = []
+        clumpCalculationsDict = {}
         clumpPositions = []
         clumpTransactions = []
         for nodeLevel in reversed(range(deepestNode + 1)): #iterate from the deepest nodes upward
