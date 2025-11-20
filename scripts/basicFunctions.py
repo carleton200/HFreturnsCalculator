@@ -28,6 +28,12 @@ def calculate_xirr(cash_flows, dates, guess : float = None):
         return None
 def descendingNavSort(input : dict):
     return sorted(input.keys(), key=lambda x: float(input.get(x,0.0)) * -1)
+
+def findSign(num: float):
+    if num == 0:
+        return 0
+    return num / abs(num)
+
 def accountBalanceKey(accEntry):
     try:
         key = accEntry["Date"] + "_" + accEntry["Source name"] + "_" + accEntry["Target name"]

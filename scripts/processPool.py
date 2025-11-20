@@ -265,7 +265,7 @@ def processPool(poolData : dict,selfData : dict, statusQueue, _, failed, transac
                     fundGain = (float(endEntry[nameHier["Value"]["dynLow"]]) - float(startEntry[nameHier["Value"]["dynLow"]]) - cashFlowSum)
                     fundMDdenominator = float(startEntry[nameHier["Value"]["dynLow"]]) + weightedCashFlow
                     fundNAV = float(endEntry[nameHier["Value"]["dynLow"]])
-                    fundReturn = fundGain/fundMDdenominator * 100 if fundMDdenominator != 0 else 0
+                    fundReturn = abs(fundGain/fundMDdenominator * 100) * findSign(fundGain) if fundMDdenominator != 0 else 0
                     if fund in IRRtrack:
                         IRRitd = calculate_xirr([*IRRtrack[fund]["cashFlows"], fundNAV], [*IRRtrack[fund]["dates"], datetime.strptime(month["endDay"], "%Y-%m-%dT%H:%M:%S")])
                     else:
@@ -318,7 +318,7 @@ def processPool(poolData : dict,selfData : dict, statusQueue, _, failed, transac
             if poolNAV == 0 and poolCashFlow == 0:
                 #skips the pool if there is no cash flow or value in the pool
                 continue
-            poolReturn = poolGainSum/poolMDdenominator * 100 if poolMDdenominator != 0 else 0
+            poolReturn = abs(poolGainSum/poolMDdenominator * 100) * findSign(poolGainSum) if poolMDdenominator != 0 else 0
             monthPoolEntry = {"dateTime" : month["dateTime"], "Investor" : "Total Pool", "Pool" : pool, "Fund" : None ,
                             "assetClass" : poolData.get("assetClass"), "subAssetClass" : poolData.get("subAssetClass") ,
                             "NAV" : poolNAV, "Monthly Gain" : poolGainSum, "Return" : poolReturn , "MDdenominator" : poolMDdenominator,
@@ -427,7 +427,7 @@ def processPool(poolData : dict,selfData : dict, statusQueue, _, failed, transac
                 if investorMDdenominator == 0:
                     investorReturn = 0 #0 if investor has no value in pool. avoids error
                 else:
-                    investorReturn = investorGain / investorMDdenominator
+                    investorReturn = abs(investorGain / investorMDdenominator) * findSign(investorGain)
                 if round(tempInvestorDicts[investor]["startVal"] + tempInvestorDicts[investor]["cashFlow"]) == 0 or len(EOMcheck) == 0 or round(float(EOMcheck[0].get(nameHier["Value"]["dynHigh"],0))) == 0: 
                     #zero values if exited investor
                     #exit check: start value and cashflow sums to zero OR no end value OR end value is zero
@@ -469,7 +469,7 @@ def processPool(poolData : dict,selfData : dict, statusQueue, _, failed, transac
                     fundInvestorNAV = investorOwnership / 100 * fundEntry["NAV"]
                     fundInvestorGain = fundEntry["Monthly Gain"] / monthPoolEntry["Monthly Gain"] * investorEntry["Monthly Gain"] if monthPoolEntry["Monthly Gain"] != 0 else 0
                     fundInvestorMDdenominator = investorEntry["MDdenominator"] / monthPoolEntry["MDdenominator"] * fundEntry["MDdenominator"] if monthPoolEntry["MDdenominator"] != 0 else 0
-                    fundInvestorReturn = fundInvestorGain / fundInvestorMDdenominator if fundInvestorMDdenominator != 0 else 0
+                    fundInvestorReturn = abs(fundInvestorGain / fundInvestorMDdenominator) * findSign(fundInvestorGain) if fundInvestorMDdenominator != 0 else 0
                     fundInvestorOwnership = fundInvestorNAV /  fundEntry["NAV"] if fundEntry["NAV"] != 0 else 0
                     #account for commitment calculations on closed funds
                     tempFundOwnership = fundInvestorOwnership if fundInvestorOwnership != 0 else investorOwnership / 100
