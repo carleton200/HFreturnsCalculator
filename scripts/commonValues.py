@@ -25,6 +25,7 @@ nameHier = {
                 "subClassification" : {"local" : "HF Sub-Classification", "dynLow" : "Target nameExposureHFClassificationLevel2ExposureHFClassificationLevel3", "dynHigh" : "Target nameExposureHFClassificationLevel2ExposureHFClassificationLevel3"}
             }
 mainTableNames = ["positions", "transactions"]
+nodePathSplitter = " > "
 #TODO: make this database stored variable later
 assetClass1Order = ["Illiquid", "Liquid","Cash"]
 assetClass2Order = ["Direct Private Equity", "Private Equity", "Direct Real Assets", "Real Assets", "Public Equity", "Long/Short", "Absolute Return", "Fixed Income", "Cash"] 

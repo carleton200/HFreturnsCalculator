@@ -1,5 +1,5 @@
 
-from scripts.basicFunctions import accountBalanceKey
+from scripts.basicFunctions import accountBalanceKey, nodalToLinkedCalculations, recursLinkCalcs
 from scripts.processNode import processNode
 import traceback, logging
 
@@ -10,8 +10,10 @@ def processClump(clumpData : list[dict],nodePaths : dict, selfData : dict, statu
     try:
         deepestNode = max((nodePaths[nodeDict['name']]['lowestLevel'] for nodeDict in clumpData))
         clumpDataIdxs = {nodeDict['name'] : idx for idx, nodeDict in enumerate(clumpData)}
+        Id2Node = {nodeDict['id'] : nodeDict['name'] for nodeDict in nodePaths}
         nodeList = list(clumpDataIdxs.keys())
         months = selfData['months']
+        linkedClumpCalculations = []
         clumpCalculations = []
         clumpCalculationsDict = {}
         clumpPositions = []
@@ -21,6 +23,7 @@ def processClump(clumpData : list[dict],nodePaths : dict, selfData : dict, statu
                 nodeName = nodeData['name']
                 nodeCalculations, nodeDynTables = processNode(nodeData,selfData,statusQueue,_,failed,transactionCalc)
                 clumpCalculations.extend(nodeCalculations)
+                clumpCalculationsDict.setdefault(nodeLevel,{})[nodeName] = nodeCalculations
                 #pull account balances relevant to an upper node
                 nodeAboves = nodePaths[nodeName]['above']
                 for aboveID in nodeAboves:
@@ -49,6 +52,14 @@ def processClump(clumpData : list[dict],nodePaths : dict, selfData : dict, statu
         #TODO: build connection of nodeCalculations to have final calculation output
         #TODO: can set if the max level is 0 (most pools) then use the method present in processInvestments (make into function in basicFUnctions)
         # otherwise, string them together using the above and below data
+        maxNodeLevel = max(list(clumpCalculationsDict.keys()))
+        for node, nCalcs in clumpCalculationsDict[maxNodeLevel].items():
+            if maxNodeLevel == 0: #one node, use the pool logic and just swap the node to nodePath
+                linkedClumpCalculations.extend(nodalToLinkedCalculations((calc for monthCalcs in nCalcs.items() for calc in monthCalcs),nodePath=[node,]))
+            else:
+                linkedClumpCalculations.extend(recursLinkCalcs(maxNodeLevel,node,nodePaths,clumpCalculationsDict))
+
+                
         return clumpCalculations, {'positions' : clumpPositions, 'transactions' : clumpTransactions}
     except Exception as e: #halt operations for failure or force close/cancel
         statusQueue.put(('DummyFail',99,"Failed"))

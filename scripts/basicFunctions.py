@@ -35,6 +35,12 @@ def findSign(num: float):
         return 0
     return num / abs(num)
 
+def nodalToLinkedCalculations(calcs, nodePath : list[int] = None):
+    for idx, _ in enumerate(calcs): #build to final calculation format from the node style
+        calcs[idx].pop('node')
+        calcs[idx]['nodePath'] = nodePathSplitter.join((str(n) for n in nodePath)) if nodePath else None
+    return calcs
+
 def handleFundClasses(entryList):
     split = {}
     foundDuplicate = False
@@ -121,6 +127,18 @@ def get_connected_node_groups(nodePaths):
                             q.append(neighbor)
             groups.append(group)
     return groups
+
+def recursLinkCalcs(maxNodeLvl : int, node :str, nodePaths : dict[dict], clumpCalculationsDict: dict[dict[list[dict]]]):
+    baseCalcs = clumpCalculationsDict[maxNodeLvl][node]
+    linkedCalcs = []
+    aboveIds = nodePaths[node]['above']
+    aboveNodes = (node['name'] for node in nodePaths if node['id'] in aboveIds)
+    for monthDT, monthCalcs in baseCalcs:
+        for calc in monthCalcs:
+            for aboveNode in aboveNodes:
+                pass
+
+
 
 def findNodeStructure(sources,nodes,targets, entries):
     nodeStruc = {node : {'id' : idx, 'name' : node, 'lowestLevel' : 0, 'above' : set(), 'below' : set()} for idx, node in enumerate(sorted(nodes))}

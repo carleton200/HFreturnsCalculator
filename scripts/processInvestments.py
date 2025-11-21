@@ -226,9 +226,7 @@ def processInvestments(nodeData : dict,selfData : dict, statusQueue, _, failed, 
             else:
                 for monthL in cache.get(table, {}).keys():
                     dynTables[table].extend(cache.get(table, {}).get(monthL, []))
-        for idx, _ in enumerate(calculations): #build to final calculation format from the node style
-            calculations[idx].pop('node')
-            calculations[idx]['nodePath'] = None
+        calculations = nodalToLinkedCalculations(calculations)
             
         statusQueue.put((node,len(newMonths),"Completed")) #push completed status update to the main thread
         return calculations, dynTables

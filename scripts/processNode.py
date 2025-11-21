@@ -15,7 +15,7 @@ def processNode(nodeData : dict,selfData : dict, statusQueue, _, failed, transac
         noCalculations = selfData.get("noCalculations") #boolean of whether or not previous calculations exist to pull from
         months = selfData.get("months") #list of pre-prepared data for each month
         fundList = selfData.get("fundList") #list of funds/investments and some accompanying data (such as asset class level 3)
-        calculations = []
+        calculationDict = {}
         earliestChangeDate = nodeData.get("earliestChangeDate") #earliest date for new data from last API pull
         node = nodeData.get('name')
         cache = nodeData.get("cache") #dataset of all relevant transactions and account balances for the pool
@@ -30,7 +30,7 @@ def processNode(nodeData : dict,selfData : dict, statusQueue, _, failed, transac
             for month in months:
                 #if the calculations for the month have already been complete, pull the old data
                 if earliestChangeDate > datetime.strptime(month["endDay"], "%Y-%m-%dT%H:%M:%S"):
-                    calculations.extend(cache.get("calculations", {}).get(month["dateTime"], []))
+                    calculationDict.setdefault(month['dateTime'],[]).extend(cache.get("calculations", {}).get(month["dateTime"], []))
                 else:
                     newMonths.append(month)
         else:
@@ -49,7 +49,7 @@ def processNode(nodeData : dict,selfData : dict, statusQueue, _, failed, transac
             positionsBelow = cache.get("positions_below", {}).get(month["dateTime"], []) #account balances for the pool
             transactionsBelow = cache.get("transactions_below", {}).get(month["dateTime"], []) #account balances for the pool
             calculationExtend, cache,aboveData = processOneLevelInvestments(month,node,node,newMonths,cache,positionsBelow,transactionsBelow,IRRtrack)
-            calculations.extend(calculationExtend)
+            calculationDict.setdefault(month['dateTime'],[]).extend(calculationExtend)
             if aboveData['skip']:
                 continue #if there is no below, dont calculate above
             monthFundIRRtrack = aboveData['monthFundIRRtrack']
@@ -225,7 +225,7 @@ def processNode(nodeData : dict,selfData : dict, statusQueue, _, failed, transac
                                     nameHier["Commitment"]["local"] : targetSourceCommitment, nameHier["Unfunded"]["local"] : targetSourceUnfunded, 
                                     "IRR ITD" : targetSourceIRR,
                                     "ownershipAdjust" : adjustedOwnershipBool}
-                    calculations.append(monthTargetSourceEntry) #add fund level data to calculations for use in aggregation and report generation
+                    calculationDict.setdefault(month['dateTime'],[]).append(monthTargetSourceEntry) #add fund level data to calculations for use in aggregation and report generation
             #end of months loop
         #commands to add database updates to the queues
         dynTables = {}
@@ -243,7 +243,7 @@ def processNode(nodeData : dict,selfData : dict, statusQueue, _, failed, transac
                     for monthL in cache.get(tableName, {}).keys():
                         dynTables[table].extend(cache.get(tableName, {}).get(monthL, []))
         statusQueue.put((node,len(newMonths),"Completed")) #push completed status update to the main thread
-        return calculations, dynTables
+        return calculationDict, dynTables
     except Exception as e: #halt operations for failure or force close/cancel
         statusQueue.put((node,len(newMonths),"Failed"))
         print(f"Worker for {nodeData.get('name')} failed.")
