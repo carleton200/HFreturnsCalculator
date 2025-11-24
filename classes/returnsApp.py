@@ -120,6 +120,24 @@ class returnsApp(QWidget):
         self.stack.setCurrentIndex(start_index)
         self.main_layout.addWidget(self.stack)
         self.setLayout(self.main_layout)
+    def closeEvent(self, event):
+        """Called when the widget is being closed."""
+        try:
+            # Close any pools
+            if hasattr(self, 'pool'):
+                self.pool.close()
+                self.pool.join()
+            # Close database connection
+            if hasattr(self, 'db') and hasattr(self.db, '_conn'):
+                print("Closing database connection...")
+                self.db._conn.close()
+            
+            
+        except Exception as e:
+            print(f"Error during cleanup: {e}")
+        
+        # Accept the close event to allow the window to close
+        event.accept()
     def init_global_widgets(self):
         headerBox = QWidget()
         headerLayout = QHBoxLayout()
@@ -1621,7 +1639,7 @@ class returnsApp(QWidget):
                 "tranCols": "Investment in, Investing Entity, Transaction Type, Effective date, Asset Class (E), Sub-asset class (E), HF Classification, Remaining commitment change, Transaction timing, Amount in system currency, Cash flow change (USD), Parent investor",
                 "tranName": "InvestmentTransaction",
                 "tranSort": "Effective date:desc",
-                "accountCols": "As of Date, Balance Type, Asset Class, Sub-asset class, Investing entity, Investment in, HF Classification, HF Sub-classification, Parent investor, Value in system currency, Fund class",
+                "accountCols": "As of Date, Balance Type, Asset Class, Sub-asset class, Investing entity, Investment in, HF Classification, HF Sub-classification, Parent investor, Value in system currency, Fund class, Sub-account",
                 "accountName": "InvestmentPosition",
                 "accountSort": "As of Date:desc",
                 "fundCols" : "Fund Name, Asset class category, Parent fund, Fund Pipeline Status",

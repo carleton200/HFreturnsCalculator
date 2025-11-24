@@ -138,19 +138,24 @@ def processPool(poolData : dict,selfData : dict, statusQueue, _, failed, transac
                     split = {}
                     foundDuplicate = False
                     for entry in startEntry: #split the entries by fundclass to check for duplicates
+                        fundSubKey = ""
                         fundClass = entry.get(nameHier["FundClass"]["dynLow"])
-                        if fundClass not in split:
-                            split[fundClass] = [entry,]
+                        subAccount = entry.get('InvestsThrough')
+                        for key in (fundClass, subAccount):
+                            if key is not None:
+                                fundSubKey += key
+                        if fundSubKey not in split:
+                            split[fundSubKey] = [entry,]
                         else:
-                            split[fundClass].append(entry)
+                            split[fundSubKey].append(entry)
                             foundDuplicate = True
                     singleEntries = []
                     if foundDuplicate: #if duplicates, loop through to find the best balance type
-                        for fundClass in split: #loop by fund
-                            if len(split.get(fundClass)) > 1: #check if duplicates
+                        for fundKeyEntries in split: #loop by fund
+                            if len(split.get(fundKeyEntries)) > 1: #check if duplicates
                                 foundType = False
                                 for balanceType in balanceTypePriority: #loop through balance types by priority
-                                    for entry in split.get(fundClass): #loop through the duplicate entries
+                                    for entry in split.get(fundKeyEntries): #loop through the duplicate entries
                                         if entry.get("Balancetype") == balanceType and entry.get(nameHier["Value"]["dynLow"]) not in (None,"None"): #if the balance type is preferred, add the entry and break
                                             singleEntries.append(entry)
                                             foundType = True
@@ -158,15 +163,15 @@ def processPool(poolData : dict,selfData : dict, statusQueue, _, failed, transac
                                     if foundType: #stop balance type checking if found
                                         break
                                 if not foundType: #reaches if nothing was found
-                                    for entry in split.get(fundClass): #loop through to find the first with a value
+                                    for entry in split.get(fundKeyEntries): #loop through to find the first with a value
                                         if entry.get(nameHier["Value"]["dynLow"]) not in (None,"None"): #if the balance type is preferred, add the entry and break
                                             singleEntries.append(entry)
                                             foundType = True
                                             break
                                     if not foundType: #final attempt just take the first entry
-                                        singleEntries.append(split.get(fundClass)[0])
+                                        singleEntries.append(split.get(fundKeyEntries)[0])
                             else: #no duplicates for this fund
-                                singleEntries.append(split.get(fundClass)[0])
+                                singleEntries.append(split.get(fundKeyEntries)[0])
                     else:
                         singleEntries.extend(startEntry)
                     NAV = 0
@@ -187,19 +192,24 @@ def processPool(poolData : dict,selfData : dict, statusQueue, _, failed, transac
                     split = {}
                     foundDuplicate = False
                     for entry in endEntry: #split the entries by fundclass to check for duplicates
+                        fundSubKey = ""
                         fundClass = entry.get(nameHier["FundClass"]["dynLow"])
-                        if fundClass not in split:
-                            split[fundClass] = [entry,]
+                        subAccount = entry.get('InvestsThrough')
+                        for key in (fundClass, subAccount):
+                            if key is not None:
+                                fundSubKey += key
+                        if fundSubKey not in split:
+                            split[fundSubKey] = [entry,]
                         else:
-                            split[fundClass].append(entry)
+                            split[fundSubKey].append(entry)
                             foundDuplicate = True
                     singleEntries = []
                     if foundDuplicate: #if duplicates, loop through to find the best balance type
-                        for fundClass in split: #loop by fund
-                            if len(split.get(fundClass)) > 1: #check if duplicates
+                        for fundKeyEntries in split: #loop by fund
+                            if len(split.get(fundKeyEntries)) > 1: #check if duplicates
                                 foundType = False
                                 for balanceType in balanceTypePriority: #loop through balance types by priority
-                                    for entry in split.get(fundClass): #loop through the duplicate entries
+                                    for entry in split.get(fundKeyEntries): #loop through the duplicate entries
                                         if entry.get("Balancetype") == balanceType and entry.get(nameHier["Value"]["dynLow"]) not in (None,"None"): #if the balance type is preferred, add the entry and break
                                             singleEntries.append(entry)
                                             foundType = True
@@ -207,15 +217,15 @@ def processPool(poolData : dict,selfData : dict, statusQueue, _, failed, transac
                                     if foundType: #stop balance type checking if found
                                         break
                                 if not foundType: #reaches if nothing was found
-                                    for entry in split.get(fundClass): #loop through to find the first with a value
+                                    for entry in split.get(fundKeyEntries): #loop through to find the first with a value
                                         if entry.get(nameHier["Value"]["dynLow"]) not in (None,"None"): #if the balance type is preferred, add the entry and break
                                             singleEntries.append(entry)
                                             foundType = True
                                             break
-                                    if not foundType: #final attempt take first entry
-                                        singleEntries.append(split.get(fundClass)[0])
+                                    if not foundType: #final attempt just take the first entry
+                                        singleEntries.append(split.get(fundKeyEntries)[0])
                             else: #no duplicates for this fund
-                                singleEntries.append(split.get(fundClass)[0])
+                                singleEntries.append(split.get(fundKeyEntries)[0])
                     else:
                         singleEntries.extend(endEntry)
                     NAV = 0
@@ -230,6 +240,14 @@ def processPool(poolData : dict,selfData : dict, statusQueue, _, failed, transac
                 fundTransactions = allPoolTransactions.get(fund,[]) 
                 cashFlowSum = 0
                 weightedCashFlow = 0
+                if noStartValue: #if the fund was not activate at BOM, find the active days
+                    activeDays = 0
+                    for transaction in (tran for tran in fundTransactions if tran[nameHier["CashFlow"]["dynLow"]] not in (None, "None",0.0)):
+                        backDate = calculateBackdate(transaction, noStartValue)
+                        activeDays = max(activeDays,totalDays - int(datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S").day) + backDate)
+                    dayCalcDenominator = activeDays
+                else:
+                    dayCalcDenominator = totalDays
                 for transaction in fundTransactions: #get fund data, cash flows, and commitment alterations
                     if assetClass is None or assetClass == "None":
                         assetClass = transaction["SysProp_FundTargetNameAssetClass(E)"]
@@ -240,7 +258,7 @@ def processPool(poolData : dict,selfData : dict, statusQueue, _, failed, transac
                     if transaction["TransactionType"] not in commitmentChangeTransactionTypes and transaction[nameHier["CashFlow"]["dynLow"]] not in (None, "None"):
                         cashFlowSum -= float(transaction[nameHier["CashFlow"]["dynLow"]])
                         backDate = calculateBackdate(transaction, noStartValue) #Uses dynamo transaction time logic to decide to subtract one day or not
-                        weightedCashFlow -= float(transaction[nameHier["CashFlow"]["dynLow"]])  *  (totalDays -int(datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S").day) + backDate)/totalDays
+                        weightedCashFlow -= float(transaction[nameHier["CashFlow"]["dynLow"]])  *  (totalDays -int(datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S").day) + backDate)/dayCalcDenominator if dayCalcDenominator != 0.0 else 0.0
                         if transaction.get(nameHier["Unfunded"]["dynLow"]) not in (None,"None"):
                             unfunded += float(transaction[nameHier["Unfunded"]["value"]])
                         if fund not in IRRtrack:
