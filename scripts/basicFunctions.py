@@ -1,3 +1,4 @@
+from classes import nodeLibrary
 from scripts.importList import *
 from scripts.commonValues import *
 from scripts.instantiate_basics import *
@@ -37,7 +38,7 @@ def findSign(num: float):
 
 def nodalToLinkedCalculations(calcs, nodePath : list[int] = None):
     for idx, _ in enumerate(calcs): #build to final calculation format from the node style
-        calcs[idx].pop('node')
+        calcs[idx].pop('Node')
         calcs[idx]['nodePath'] = nodePathSplitter.join((str(n) for n in nodePath)) if nodePath else None
     return calcs
 
@@ -128,51 +129,47 @@ def get_connected_node_groups(nodePaths):
             groups.append(group)
     return groups
 
-def recursLinkCalcs(maxNodeLvl : int, node :str, nodePaths : dict[dict], clumpCalculationsDict: dict[dict[list[dict]]]):
-    baseCalcs = clumpCalculationsDict[maxNodeLvl][node]
+def recursLinkCalcs(baseCalcs, monthDT, nodeLvl : int, node :str, currPath: list, nodeLib : nodeLibrary, clumpCalculationsDict: dict[dict[list[dict]]]):
     linkedCalcs = []
-    aboveIds = nodePaths[node]['above']
-    aboveNodes = (node['name'] for node in nodePaths if node['id'] in aboveIds)
-    for monthDT, monthCalcs in baseCalcs:
-        for calc in monthCalcs:
-            for aboveNode in aboveNodes:
-                pass
+    aboveIds = nodeLib.nodePaths[node]['above']
+    aboveNodes = list(nodeLib.id2node[aboveID] for aboveID in aboveIds)
+    aboveCalcDict = {aboveNode : [] for aboveNode in aboveNodes}
+    baseCalcs = [calc for calc in baseCalcs if calc['Target name'] in nodeLib.targets]
+    for belowCalc in baseCalcs:
+        if belowCalc['Source name'] not in aboveNodes:
+            #Scenario 1: calcs have linked to their highest level (investor) Return with nodePath
+            tempCalc = belowCalc.copy()
+            tempCalc.pop('Node')
+            tempCalc['nodePath'] = nodePathSplitter.join([str(item) for item in reversed(currPath)])
+            linkedCalcs.append(tempCalc)
+        else:
+            #Scenario 2: Calc needs to be linked and divided amongst the higher nodal levels and split by node for further recursion
+            aboveNode = belowCalc['Source name']
+            aboveCnctCalcs = [calc for calc in clumpCalculationsDict[nodeLvl - 1].get(aboveNode,{}).get(monthDT,[]) if calc['Target name'] == node]
+            for aboveCalc in aboveCnctCalcs: #string the higher level calculations directly to the node's lower level target by ownership
+                tempCalc = belowCalc.copy()
+                tempCalc['Source name'] = aboveCalc['Source name']
+                nodeOwnershipFrac = aboveCalc['Ownership'] / 100
+                targetOwnershipFrac = nodeOwnershipFrac * belowCalc['Ownership'] / 100
+                for field in ('NAV','Monthly Gain', 'MDdenominator'): #split by ownership of the node's investment
+                    tempCalc[field] = tempCalc[field] * nodeOwnershipFrac
+                tempCalc['Ownership'] = targetOwnershipFrac * 100
+                tempCalc['IRR ITD'] = None
+                tempCalc['Return'] = tempCalc['Monthly Gain'] / tempCalc['MDdenominator'] * 100 if tempCalc['MDdenominator'] != 0.0 else 0.0
+                aboveCalcDict[aboveNode].append(tempCalc)
+    for aboveNode, aboveCalcs in aboveCalcDict.items(): 
+        #split all higher linked calculations to their recursion. Ones already at their peak will be returned by scenario 1
+        aboveID = nodeLib.node2id[aboveNode]
+        linkedCalcs.extend(recursLinkCalcs(aboveCalcs,monthDT,nodeLvl - 1, aboveNode, [*currPath,aboveID], nodeLib, clumpCalculationsDict))
+    return linkedCalcs
+                
 
 
 
-def findNodeStructure(sources,nodes,targets, entries):
-    nodeStruc = {node : {'id' : idx, 'name' : node, 'lowestLevel' : 0, 'above' : set(), 'below' : set()} for idx, node in enumerate(sorted(nodes))}
-    searchEntryDict = {f"{entry['Source name']} > {entry['Target name']}" : entry for entry in entries if entry['Source name'] not in sources and entry['Target name'] not in targets} #only node to node data is helpful
-    #cuts down to only unique source --> target values
-    searchEntries = [entry for entry in searchEntryDict.values()]
-    idx = 0
-    while True and idx < 10: #max idx as 10 as a safety measure
-        changeMade = False
-        for entry in searchEntries:
-            src = entry['Source name']
-            tgt = entry['Target name']
-            #if a target is from a source, it must be at LEAST one level beneath. Another source may push it further
-            if nodeStruc[tgt]['lowestLevel'] < nodeStruc[src]['lowestLevel'] + 1:
-                nodeStruc[tgt]['lowestLevel'] = nodeStruc[src]['lowestLevel'] + 1
-                changeMade = True
-            nodeStruc[src]['below'].add(nodeStruc[tgt]['id'])
-            nodeStruc[tgt]['above'].add(nodeStruc[src]['id'])
-        if not changeMade:
-            break
-        idx += 1
-        if idx == 9:
-            print("Warning: node structure search has reached maximum index. Should not occur")
-    print(f"maximum node depth [zero index]: {idx}")
-    return nodeStruc
 
-def findNodes(table1, table2 = None):
-    tableEntries = [*table1,*table2] if table2 else table1
-    targets = set(entry.get("Target name") for entry in tableEntries)
-    sources = set(entry.get("Source name") for entry in tableEntries)
-    nodes = targets & sources
-    targets = targets - nodes
-    sources = sources - nodes
-    return targets,sources,nodes
+
+
+
 
 def calculate_xirr(cash_flows, dates, guess : float = None):
     try:

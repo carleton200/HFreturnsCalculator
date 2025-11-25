@@ -49,7 +49,7 @@ def processNode(nodeData : dict,selfData : dict, statusQueue, _, failed, transac
             positionsBelow = cache.get("positions_below", {}).get(month["dateTime"], []) #account balances for the pool
             transactionsBelow = cache.get("transactions_below", {}).get(month["dateTime"], []) #account balances for the pool
             calculationExtend, cache,aboveData = processOneLevelInvestments(month,node,node,newMonths,cache,positionsBelow,transactionsBelow,IRRtrack)
-            calculationDict.setdefault(month['dateTime'],[]).extend(calculationExtend)
+            #calculationDict.setdefault(month['dateTime'],[]).extend(calculationExtend)
             if aboveData['skip']:
                 continue #if there is no below, dont calculate above
             monthFundIRRtrack = aboveData['monthFundIRRtrack']

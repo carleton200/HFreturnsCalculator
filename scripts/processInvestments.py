@@ -156,7 +156,7 @@ def processOneLevelInvestments(month, node, invSourceName, newMonths, cache, pos
             nodeWeightedCashFlow += invWeightedCashFlow
             monthInvCalc = {"dateTime" : month["dateTime"], "Source name" : invSourceName ,  "Target name" : investment , "Node" : node,
                             "NAV" : invNAV, "Monthly Gain" : invGain, "Return" : invReturn , 
-                            "MDdenominator" : invMDdenominator, "Ownership" : "", 
+                            "MDdenominator" : invMDdenominator, "Ownership" : None, 
                             "IRR ITD" : IRRitd,
                             nameHier["Commitment"]["local"] : commitment,
                             nameHier["Unfunded"]["local"] : unfunded,

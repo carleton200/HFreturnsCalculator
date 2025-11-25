@@ -11,6 +11,7 @@ from scripts.basicFunctions import *
 from classes.transactionApp import transactionApp
 from classes.windowClasses import *
 from classes.tableWidgets import *
+from classes.nodeLibrary import nodeLibrary
 
 @attach_logging_to_class
 class returnsApp(QWidget):
@@ -735,27 +736,24 @@ class returnsApp(QWidget):
                 self.currentTableData = None #resets so a failed build won't be used
                 complexMode = self.tableBtnGroup.checkedButton().text() == "Complex Table"
                 gui_queue.put(lambda: self.dataTypeBox.setVisible(not complexMode))
-                if self.filterDict["Investor"].checkedItems() == [] and self.filterDict[nameHier["Family Branch"]["local"]].checkedItems() == []:
-                    #if no investor level selections,show full portfolio information
-                    parameters = ["Total Fund"]
-                    condStatement = " WHERE [Investor] = ? "
-                else:
+                if self.filterDict["Investor"].checkedItems() != [] and self.filterDict[nameHier["Family Branch"]["local"]].checkedItems() != []:
                     #show investor level fund data
                     condStatement = " WHERE"
                     parameters = []
                     if self.filterDict["Investor"].checkedItems() != []:
                         paramTemp = self.filterDict["Investor"].checkedItems()
                         placeholders = ','.join('?' for _ in paramTemp) 
-                        condStatement += f" [Investor] IN ({placeholders}) "
+                        condStatement += f" [Source name] IN ({placeholders}) "
                         for param in paramTemp:
                             parameters.append(param)
                     if self.filterDict[nameHier["Family Branch"]["local"]].checkedItems() != []:
-                        paramTemp = self.filterDict[nameHier["Family Branch"]["local"]].checkedItems()
+                        famBranches = self.filterDict[nameHier["Family Branch"]["local"]].checkedItems()
+                        paramTemp = self.db.pullInvestorsFromFamilies(famBranches)
                         placeholders = ','.join('?' for _ in paramTemp)
                         if condStatement == " WHERE":
-                            condStatement += f" [{nameHier["Family Branch"]["local"]}] IN ({placeholders}) "
+                            condStatement += f" [Source name] IN ({placeholders}) "
                         else:
-                            condStatement += f" AND [{nameHier["Family Branch"]["local"]}] IN ({placeholders}) "
+                            condStatement += f" AND [Source name] IN ({placeholders}) "
                         for param in paramTemp:
                             parameters.append(param)
                 for filter in self.filterOptions:
@@ -1768,7 +1766,7 @@ class returnsApp(QWidget):
                                 pass
                     if len(rows) == 0: #prevents bad calculations from missing data. Appears if partial re-calculation but new data is corrupted
                         raise RuntimeError("API import did not function properly. Try again.")
-                    targets, sources, nodes = findNodes(rows)
+                    targets, sources, nodes = nodeLibrary.findNodes(None,rows)
                     tables = checkNewestData(tableName,rows, nodes, sources, targets)
                     with completeLock:
                         self.complete += 1
@@ -1974,62 +1972,56 @@ class returnsApp(QWidget):
                 # proces pool section----------------------------------------------------------------
                 self.workerProgress = {}
 
-                targets, sources, nodes = findNodes(dynImportData['transactions'],dynImportData['positions'])
-                nodePaths = findNodeStructure(sources,nodes,targets, [*dynImportData['transactions'],*dynImportData['positions']])
-                for nodeP in nodePaths.values():
+                nodeLib = nodeLibrary([*dynImportData['transactions'],*dynImportData['positions']])
+                for nodeP in nodeLib.nodePaths.values():
                     print(nodeP)
                 # INSERT_YOUR_CODE
-                nodeClumps = get_connected_node_groups(nodePaths)
+                nodeClumps = get_connected_node_groups(nodeLib.nodePaths)
                 clumpIdxs = {node : idx for idx, clump in enumerate(nodeClumps) for node in clump}
 
                 # ------------------- build data cache ----------------------
                 tables = mainTableNames
                 table_rows = {t: dynImportData[t] for t in tables}
-                table_rows["nodeCalculations"] = load_from_db(self.db,"nodeCalculations")
                 cache = {}
                 for table, rows in table_rows.items(): 
                     #split the data by nodes for calculations
                     for row in rows:
-                        if row['Target name'] in targets and row['Source name'] in sources:
+                        if row['Target name'] in nodeLib.targets and row['Source name'] in nodeLib.sources:
                             #investments directly from investor to fund
-                            if table == "nodeCalculations":
-                                cache.setdefault(-1, {}).setdefault('noNodeData', {}).setdefault(table, {}).setdefault(row["dateTime"], []).append(row)
-                            else:
-                                for m in months: #find the month the account balance or transaction belongs in
-                                    start = m["accountStart"] if table == "positions" else m["tranStart"]
-                                    date = row.get("Date")
-                                    if not (start <= date <= m["endDay"]):
-                                        continue
-                                    cache.setdefault(-1, {}).setdefault('noNodeData', {}).setdefault(table, {}).setdefault(m["dateTime"], []).append(row)
+                            for m in months: #find the month the account balance or transaction belongs in
+                                start = m["accountStart"] if table == "positions" else m["tranStart"]
+                                date = row.get("Date")
+                                if not (start <= date <= m["endDay"]):
+                                    continue
+                                cache.setdefault(-1, {}).setdefault('noNodeData', {}).setdefault(table, {}).setdefault(m["dateTime"], []).append(row)
                         else:
                             for direction in ["Target name" , "Source name", 'node']:
                                 potNode = row.get(direction)
-                                if potNode not in nodes:
+                                if potNode not in nodeLib.nodes:
                                     continue
                                 else:
-                                    if table == "nodeCalculations":
-                                        cache.setdefault(clumpIdxs[potNode], {}).setdefault(potNode, {}).setdefault(table, {}).setdefault(row["dateTime"], []).append(row)
-                                    else:
-                                        if table == 'positions': #if the node is the source, it is below. Otherwise, above
-                                            tableName = 'positions_below' if 'Source' in direction else 'positions_above'
-                                        elif table == 'transactions':
-                                            tableName = 'transactions_below' if 'Source' in direction else 'transactions_above'
-                                        for m in months: #find the month the account balance or transaction belongs in
-                                            start = m["accountStart"] if table == "positions" else m["tranStart"]
-                                            date = row.get("Date")
-                                            if not (start <= date <= m["endDay"]):
-                                                continue
-                                            cache.setdefault(clumpIdxs[potNode], {}).setdefault(potNode, {}).setdefault(tableName, {}).setdefault(m["dateTime"], []).append(row)
+                                    if table == 'positions': #if the node is the source, it is below. Otherwise, above
+                                        tableName = 'positions_below' if 'Source' in direction else 'positions_above'
+                                    elif table == 'transactions':
+                                        tableName = 'transactions_below' if 'Source' in direction else 'transactions_above'
+                                    for m in months: #find the month the account balance or transaction belongs in
+                                        start = m["accountStart"] if table == "positions" else m["tranStart"]
+                                        date = row.get("Date")
+                                        if not (start <= date <= m["endDay"]):
+                                            continue
+                                        cache.setdefault(clumpIdxs[potNode], {}).setdefault(potNode, {}).setdefault(tableName, {}).setdefault(m["dateTime"], []).append(row)
                 self.cachedDynTables = {table : [] for table in mainTableNames}
-                self.cachedNodeCalculations = []
+                self.cachedLinkedCalculations = []
+                self.nodeChangeDates['active'] = False #no more using cached data. Full calculations every time
+                self.earliestChangeDate = self.dataTimeStart
                 if self.nodeChangeDates.get("active",False): #iterate through nodes that have custom calculation dates
                     runClumps = {idx : [] for idx in range(nodeClumps)}
                     for idx, cNodes in enumerate(nodeClumps):
-                        if any(node in self.nodeChangeDates for node in cNodes) or (idx == 0 and not any(node in self.nodeChangeDates for node in nodes)):
+                        if any(node in self.nodeChangeDates for node in cNodes) or (idx == 0 and not any(node in self.nodeChangeDates for node in nodeLib.nodes)):
                             runClumps[clumpIdxs[node]] = [{'name' : node} for node in cNodes]
                         else:
                             for node in cNodes:
-                                self.cachedNodeCalculations.extend([calcRow for _, rows in  cache[idx].get(node,{}).get("nodeCalculations", {}).items() for calcRow in rows])
+                                self.cachedLinkedCalculations.extend([calcRow for _, rows in  cache[idx].get(node,{}).get("calculations", {}).items() for calcRow in rows])
                                 for table in mainTableNames: #add the dynTable data to maintain the pool data and add it again after calculations
                                     if "positions" == table: #remove the duplicate account balances (EOM = next BOM)
                                         uniqueBalances = {accountBalanceKey(dynRow): dynRow for month in  cache[idx].get(node,{}).get(table, {}) for dynRow in cache[idx].get(node,{}).get(table, {}).get(month)}
@@ -2088,7 +2080,7 @@ class returnsApp(QWidget):
                     res = self.pool.apply_async(processInvestments, args=(noNodeDataDict, commonData,self.workerStatusQueue, self.workerDBqueue, self.calcFailedFlag))
                     self.futures.append(res)
                     for clumpData in runClumps:
-                        res = self.pool.apply_async(processClump, args=(clumpData,nodePaths, commonData,self.workerStatusQueue, self.workerDBqueue, self.calcFailedFlag))
+                        res = self.pool.apply_async(processClump, args=(clumpData,nodeLib, commonData,self.workerStatusQueue, self.workerDBqueue, self.calcFailedFlag))
                         self.futures.append(res)
                     print("Workers all built. Processing...")
                     self.pool.close()
@@ -2201,12 +2193,12 @@ class returnsApp(QWidget):
                 except Exception as e:
                     print(traceback.format_exc())
                     print(f"Error appending calculations: {e}")
-            nodeCalculations.extend(self.cachedNodeCalculations)
+            nodeCalculations.extend(self.cachedLinkedCalculations)
             for table in dynTables: #add dynamo table data in for pools that were not calculated again
                 allDynTables[table].extend(self.cachedDynTables[table])
             keys = list({key for row in nodeCalculations for key in row.keys()})
             print("Updating database...")
-            save_to_db(self.db,"nodeCalculations",nodeCalculations, keys=keys)
+            save_to_db(self.db,"calculations",nodeCalculations, keys=keys)
             for table in mainTableNames:
                 save_to_db(self.db,table, allDynTables[table])
             print("Database updated.")

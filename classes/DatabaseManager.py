@@ -107,9 +107,9 @@ CREATE TABLE {table_name} (
                 "nodeCalculations",
                 [
                     ("dateTime", "TEXT"),
-                    ("Source name", "TEXT"),
+                    ("[Source name]", "TEXT"),
                     ("Node", "TEXT"),
-                    ("Target name", "TEXT"),
+                    ("[Target name]", "TEXT"),
                     ("NAV", "REAL"),
                     ("[Monthly Gain]", "REAL"),
                     ("[Return]", "REAL"),
@@ -120,7 +120,7 @@ CREATE TABLE {table_name} (
                     ("[IRR ITD]", "REAL"),
                     ("ownershipAdjust", "BOOL"),
                 ],
-                primary_keys=["dateTime", "Investor", "Pool", "Fund"]
+                primary_keys=["dateTime", "[Target name]", "Node", "[Source name]"]
             )
             # options
             self.create_table_if_not_exists(
@@ -222,6 +222,19 @@ CREATE TABLE {table_name} (
                 self.benchmarks = [row[0] for row in cursor.fetchall()]
                 cursor.close()
         return self.benchmarks
+    def fetchInvestors(self, update: bool = False):
+        if not hasattr(self, "investors") or update:
+            with self._lock:
+                cursor = self._conn.cursor()
+                cursor.execute("SELECT * FROM investors")
+                headers = [d[0] for d in cursor.description()]
+                rows = [dict(zip(headers,row)) for row in cursor.fetchall()]
+                self.benchmarks = rows
+                cursor.close()
+        return self.investors
+    def pullInvestorsFromFamilies(self, familyBranches: list[str]):
+        investors = self.fetchInvestors()
+        return [investor['Name'] for investor in investors if investor['Parentinvestor'] in familyBranches]
     def close(self) -> None:
         try:
             with self._lock:
