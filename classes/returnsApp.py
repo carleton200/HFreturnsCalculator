@@ -1705,6 +1705,10 @@ class returnsApp(QWidget):
                                                         {
                                                             "_op": "not_null",
                                                             "_prop": "Investing entity"
+                                                        },
+                                                        {
+                                                            "_op": "is_null",
+                                                            "_prop": "Cash flow model"
                                                         }
                                                     ]
                                                 },
@@ -1764,6 +1768,10 @@ class returnsApp(QWidget):
                                                                     }
                                                                 ]
                                                             ]
+                                                        },
+                                                        {
+                                                            "_op": "is_null",
+                                                            "_prop": "Cash flow model"
                                                         }
                                                     ]
                                                 }
@@ -1790,6 +1798,10 @@ class returnsApp(QWidget):
                                                         {
                                                             "_op": "not_null",
                                                             "_prop": "Investing entity"
+                                                        },
+                                                        {
+                                                            "_op": "is_null",
+                                                            "_prop": "Cash flow model"
                                                         }
                                                     ]
                                                 }

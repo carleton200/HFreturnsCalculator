@@ -1,6 +1,6 @@
 from scripts.importList import *
 
-currentVersion = "1.1.14"
+currentVersion = "1.1.15"
 demoMode = True
 remoteDBmode = False
 ownershipCorrect = True
