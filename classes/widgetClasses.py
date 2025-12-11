@@ -71,8 +71,10 @@ class MultiSelectBox(QWidget):
         main.setContentsMargins(0,0,0,0)
         self.setLayout(main)
     def updateOptionVisibility(self):
+        sbText = self.popup.searchBar.text().lower()
         for cbKey in self._checkboxes.keys():
-            self._checkboxes[cbKey].setVisible(self.popup.searchBar.text().lower() in self._checkboxes[cbKey].text().lower())
+            cb = self._checkboxes[cbKey]
+            cb.setVisible(sbText in cb.text().lower())
     def hierarchyMode(self):
         self.hierarchy = True
     def _togglePopup(self):

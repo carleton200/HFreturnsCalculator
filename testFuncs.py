@@ -179,3 +179,13 @@ if True:
             print(f"Missing or mismatched row {idx+1}: {extra[idx]}")
     else:
         print("No extra calculations missing from expected results")
+
+
+
+#Testing node recursion methods directly:
+
+hier = ['step1', 'step2', 'step3', 'step4']
+levelIdx = 1
+print(f"Level Idx currently points to: {hier[levelIdx]}")
+newHier = [*hier[:levelIdx], 'newStep', *hier[levelIdx:]]
+print(f"New hier is {newHier} with levelIdx pointing to {newHier[levelIdx]}")

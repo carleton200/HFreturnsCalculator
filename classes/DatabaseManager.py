@@ -91,10 +91,10 @@ class DatabaseManager:
             if primary_keys:
                 col_defs.append(f"PRIMARY KEY ({', '.join(primary_keys)})")
             sql = f"""IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'dbo.{table_name}') AND type in (N'U'))
-CREATE TABLE {table_name} (
-    {',\n    '.join(col_defs)}
-)
-"""
+                    CREATE TABLE {table_name} (
+                        {',\n    '.join(col_defs)}
+                    )
+                    """
         cur.execute(sql)
 
     def instantiateTables(self) -> None:
@@ -227,14 +227,99 @@ CREATE TABLE {table_name} (
             with self._lock:
                 cursor = self._conn.cursor()
                 cursor.execute("SELECT * FROM investors")
-                headers = [d[0] for d in cursor.description()]
+                headers = [d[0] for d in cursor.description]
                 rows = [dict(zip(headers,row)) for row in cursor.fetchall()]
-                self.benchmarks = rows
+                self.investors = rows
                 cursor.close()
+            self.investor2family = self.connectInvestor2family()
         return self.investors
+    def connectInvestor2family(self):
+        investors = self.investors
+        inv2fam = {}
+        for investor in investors:
+            inv2fam[investor['Name']] = investor['Parentinvestor']
+        return inv2fam
+    def fetchFunds(self, update: bool = False):
+        if not hasattr(self, "funds") or update:
+            with self._lock:
+                rows = []
+                for tableName in ('funds', 'securities'):
+                    cursor = self._conn.cursor()
+                    cursor.execute(f"SELECT * FROM {tableName}")
+                    headers = [d[0] for d in cursor.description]
+                    rows.extend([dict(zip(headers,row)) for row in cursor.fetchall()])
+                self.funds = rows
+                cursor.close()
+            self.fund2trait = self.connectFund2Trait()
+        return self.funds
+    def fetchDyn2Key(self):
+        filtOpts = masterFilterOptions
+        dyn2key = {filt['fundDyn'] : filt['key'] for filt in filtOpts if filt['key'] not in nonFundCols}
+        return dyn2key
+    def connectFund2Trait(self):
+        dyn2key = self.fetchDyn2Key()
+        filtOpts = masterFilterOptions
+        dyn2key = {filt['fundDyn'] : filt['key'] for filt in filtOpts if filt['key'] not in nonFundCols}
+        fund2trait = {}
+        for fund in self.funds:
+            fund2trait[fund['Name']] = {}
+            for key, data in fund.items():
+                if key in dyn2key:
+                    fund2trait[fund['Name']][dyn2key[key]] = data
+        return fund2trait
+    def fetchFund2Trait(self):
+        if not hasattr(self,'fund2trait'):
+            self.fetchFunds()
+        return self.fund2trait
+    def fetchNodes(self, update: bool = False):
+        if not hasattr(self, "nodes") or update:
+            with self._lock:
+                cursor = self._conn.cursor()
+                cursor.execute("SELECT * FROM nodes")
+                headers = [d[0] for d in cursor.description]
+                rows = [dict(zip(headers,row)) for row in cursor.fetchall()]
+                self.nodes = rows
+                cursor.close()
+        return self.nodes
+    def pullId2Node(self):
+        nodes = self.fetchNodes()
+        id2Node = {node['id'] : node['name'] for node in nodes}
+        return id2Node
     def pullInvestorsFromFamilies(self, familyBranches: list[str]):
         investors = self.fetchInvestors()
         return [investor['Name'] for investor in investors if investor['Parentinvestor'] in familyBranches]
+    def pullFundsFromFilters(self, filDict : dict[list[str]]):
+        try:
+            fund2trait = self.fetchFund2Trait()
+            filteredFunds = []
+            for fund_name, traits in fund2trait.items():
+                # Check if this fund matches all filter criteria
+                matches_all = True
+                for filKey, Options in filDict.items():
+                    # Get the trait value for this filter key
+                    trait_value = traits.get(filKey, "")
+                    if trait_value not in Options:
+                        matches_all = False
+                        break
+                if matches_all:
+                    filteredFunds.append(fund_name)
+            return filteredFunds
+        except Exception as e:
+            print(f"Error for filter func")
+    def pullFundsFromFiltersDummy(self, filDict : dict[list[str]]):
+        try:
+            funds = self.fetchFunds()
+            local2api = {filOpt['key'] : filOpt.get('fundDyn') or filOpt.get('fundDyn') for filOpt in masterFilterOptions if filOpt['key'] not in nonFundCols}
+            filteredFunds = []
+            for fund in funds:
+                for filKey,Options in filDict.items():
+                    if fund[local2api[filKey]] not in Options:
+                        continue #skip if any criteria is not met
+                filteredFunds.append(fund['Name']) #if passes all criteria, add to filtered funds
+            return filteredFunds
+        except Exception as e:
+            print(f"Error: in filter func")
+            return []
     def close(self) -> None:
         try:
             with self._lock:
@@ -416,12 +501,7 @@ def load_from_db(db : DatabaseManager, table, condStatement = "",parameters = No
                 return rows
             except Exception as e:
                 try:
-                    if parameters is not None and table != "calculations":
-                        print(f"Error loading from database: {e}, table: {table} condStatment: {condStatement}, parameters: {parameters}")
-                    elif table != "calculations":
-                        print(f"Error loading from database: {e}, table: {table} condStatment: {condStatement}")
-                    else:
-                        print(f"Info: {e}, {e.args}")
+                    print(f"Error loading from database: {e}, table: {table} condStatment: {condStatement}, parameters: {parameters or ""}")
                     cur.close()
                 except:
                     pass

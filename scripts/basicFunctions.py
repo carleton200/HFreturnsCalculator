@@ -39,7 +39,7 @@ def findSign(num: float):
 def nodalToLinkedCalculations(calcs, nodePath : list[int] = None):
     for idx, _ in enumerate(calcs): #build to final calculation format from the node style
         calcs[idx].pop('Node')
-        calcs[idx]['nodePath'] = nodePathSplitter.join((str(n) for n in nodePath)) if nodePath else None
+        calcs[idx]['nodePath'] = " " + nodePathSplitter.join((str(n) for n in nodePath)) + " " if nodePath else None
     return calcs
 
 def handleFundClasses(entryList):
@@ -140,7 +140,7 @@ def recursLinkCalcs(baseCalcs, monthDT, nodeLvl : int, node :str, currPath: list
             #Scenario 1: calcs have linked to their highest level (investor) Return with nodePath
             tempCalc = belowCalc.copy()
             tempCalc.pop('Node')
-            tempCalc['nodePath'] = nodePathSplitter.join([str(item) for item in reversed(currPath)])
+            tempCalc['nodePath'] = " " + nodePathSplitter.join([str(item) for item in reversed(currPath)]) + " "
             linkedCalcs.append(tempCalc)
         else:
             #Scenario 2: Calc needs to be linked and divided amongst the higher nodal levels and split by node for further recursion

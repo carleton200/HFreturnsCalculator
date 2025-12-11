@@ -24,6 +24,19 @@ nameHier = {
                 "FundClass" : {"dynLow" : "Fundclass" , "dynHigh" : "Fundclass"},
                 "subClassification" : {"local" : "HF Sub-Classification", "dynLow" : "Target nameExposureHFClassificationLevel2ExposureHFClassificationLevel3", "dynHigh" : "Target nameExposureHFClassificationLevel2ExposureHFClassificationLevel3"}
             }
+masterFilterOptions = [
+                            {"key": "Classification", "name": "HF Classification", "dataType" : None, "dynNameLow" : "Target nameExposureHFClassificationLevel2", 'fundDyn' : 'ExposureAssetClassCategoryExposureHFClassificationLevel2'},
+                            {"key" : nameHier["subClassification"]["local"], "name" : nameHier["subClassification"]["local"], "dataType" : None, "dynNameLow" : nameHier["subClassification"]["dynLow"], 'fundDyn' : 'ExposureAssetClassCategoryExposureHFClassificationExposureHFClassificationLevel3'},
+                            {"key" : nameHier["Family Branch"]["local"], "name" : nameHier["Family Branch"]["local"], "dataType" : None, "dynNameLow" : None, "dynNameHigh" : nameHier["Family Branch"]["dynHigh"]},
+                            {"key": "Source name",       "name": "Investor", "dataType" : "Investor", "dynNameLow" : None, "dynNameHigh" : "Source name"},
+                            {"key": "assetClass",     "name": "Asset Level 1", "dataType" : "Total Asset", "dynNameLow" : "ExposureAssetClass", "dynNameHigh" : "ExposureAssetClass", 'fundDyn' : 'assetClass'},
+                            {"key": "subAssetClass",  "name": "Asset Level 2", "dataType" : "Total subAsset", "dynNameLow" : "ExposureAssetClassSub-assetClass(E)", "dynNameHigh" : "ExposureAssetClassSub-assetClass(E)", 'fundDyn' : 'subAssetClass'},
+                            {"key" : nameHier["sleeve"]["local"], "name" : "Asset Level 3", "dataType" : "Total sleeve", "dynNameLow" : nameHier["sleeve"]["local"], 'fundDyn' : 'sleeve'},
+                            {"key": "Node",           "name": "Node", "dataType" : "Total Node"},
+                            {"key": "Target name",  "name": "Fund/Investment",  "dynNameLow" : "Target name", 'fundDyn' : 'Name'}
+                            
+                        ]
+nonFundCols = ('Source name', 'Node', nameHier["Family Branch"]["local"])
 mainTableNames = ["positions", "transactions"]
 nodePathSplitter = " > "
 #TODO: make this database stored variable later
@@ -35,6 +48,7 @@ headerOptions = ["Return","NAV", "Monthly Gain", "Ownership" , "MDdenominator", 
 if not demoMode:
     headerOptions.append("IRR ITD")
 dataOptions = ["Investor","Family Branch","Classification", "dateTime"]
+dataOptions = ["Classification", "subClassification"]
 tranAppHeaderOptions = ["Transaction Sum"]
 tranAppDataOptions = ["Investor","Family Branch", "dateTime"]
 assetLevelLinks = {1: {"Display" : "Asset Level 1", "Link" : "assetClass"}, 
