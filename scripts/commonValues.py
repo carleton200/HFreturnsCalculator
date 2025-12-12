@@ -1,6 +1,6 @@
 from scripts.importList import *
 
-currentVersion = "1.1.12"
+currentVersion = "1.2.0"
 demoMode = True
 remoteDBmode = False
 ownershipCorrect = True
@@ -26,7 +26,7 @@ nameHier = {
             }
 masterFilterOptions = [
                             {"key": "Classification", "name": "HF Classification", "dataType" : None, "dynNameLow" : "Target nameExposureHFClassificationLevel2", 'fundDyn' : 'ExposureAssetClassCategoryExposureHFClassificationLevel2'},
-                            {"key" : nameHier["subClassification"]["local"], "name" : nameHier["subClassification"]["local"], "dataType" : None, "dynNameLow" : nameHier["subClassification"]["dynLow"], 'fundDyn' : 'ExposureAssetClassCategoryExposureHFClassificationExposureHFClassificationLevel3'},
+                            {"key" : 'subClassification', "name" : nameHier["subClassification"]["local"], "dataType" : None, "dynNameLow" : nameHier["subClassification"]["dynLow"], 'fundDyn' : 'ExposureAssetClassCategoryExposureHFClassificationExposureHFClassificationLevel3'},
                             {"key" : nameHier["Family Branch"]["local"], "name" : nameHier["Family Branch"]["local"], "dataType" : None, "dynNameLow" : None, "dynNameHigh" : nameHier["Family Branch"]["dynHigh"]},
                             {"key": "Source name",       "name": "Investor", "dataType" : "Investor", "dynNameLow" : None, "dynNameHigh" : "Source name"},
                             {"key": "assetClass",     "name": "Asset Level 1", "dataType" : "Total Asset", "dynNameLow" : "ExposureAssetClass", "dynNameHigh" : "ExposureAssetClass", 'fundDyn' : 'assetClass'},
@@ -56,9 +56,9 @@ assetLevelLinks = {1: {"Display" : "Asset Level 1", "Link" : "assetClass"},
                     3: {"Display" : "Asset Level 3", "Link" : "subAssetSleeve"},
                     0 : {"Display" : "Total Portfolio" , "Link" : "Total"},
                     -1 : {"Link" : "Family Branch"}}
-displayLinks = {"assetClass" : "Asset Level 1", "subAssetClass" : "Asset Level 2" , "subAssetSleeve" : "Asset Level 3"}
-for link in displayLinks.copy(): #builds out in reverse so it can work both ways
-    displayLinks[displayLinks.get(link)] = link
+displayLinks = {"assetClass" : "Asset Level 1", "subAssetClass" : "Asset Level 2" ,
+                 "subAssetSleeve" : "Asset Level 3", 'Source name' : 'Investor', 'Target name' : 'Investment',
+                'subClassification' : 'HF Sub-Classification', 'Classification' : 'HF Classification'}
 balanceTypePriority = ["Actual", "Adjusted", "Manager Estimate"]
 yearOptions = (1,2,3,5,7,10,12,15,20)
 

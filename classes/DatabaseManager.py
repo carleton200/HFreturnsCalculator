@@ -2,6 +2,8 @@ from scripts.importList import *
 from scripts.instantiate_basics import *
 from scripts.commonValues import *
 from scripts.basicFunctions import infer_sqlite_type
+from classes.nodeLibrary import nodeLibrary
+
 class DatabaseManager:
     """Thread-safe SQLite database manager.
 
@@ -305,21 +307,17 @@ class DatabaseManager:
                     filteredFunds.append(fund_name)
             return filteredFunds
         except Exception as e:
-            print(f"Error for filter func")
-    def pullFundsFromFiltersDummy(self, filDict : dict[list[str]]):
-        try:
-            funds = self.fetchFunds()
-            local2api = {filOpt['key'] : filOpt.get('fundDyn') or filOpt.get('fundDyn') for filOpt in masterFilterOptions if filOpt['key'] not in nonFundCols}
-            filteredFunds = []
-            for fund in funds:
-                for filKey,Options in filDict.items():
-                    if fund[local2api[filKey]] not in Options:
-                        continue #skip if any criteria is not met
-                filteredFunds.append(fund['Name']) #if passes all criteria, add to filtered funds
-            return filteredFunds
-        except Exception as e:
-            print(f"Error: in filter func")
-            return []
+            print(f"ERROR: Connecting funds to filter options failed: {e.args}")
+    def userDisplayLib(self):
+        dispDict = {'id2disp' : {}, 'disp2id' : {}}
+        dispDict['id2disp'] = {str(key) : str(val) for key,val in self.pullId2Node().items()}
+        for key, val in displayLinks.items():
+            dispDict['id2disp'][key] = val
+        dispDict['disp2id'] = {val : key for key,val in dispDict['id2disp'].items()} #reverse id2disp
+        return dispDict
+    def buildNodeLib(self, update:bool = False):
+        if not hasattr(self,'nodeLib'):
+            self.nodeLib = nodeLibrary([*load_from_db(self,'transactions'),*load_from_db(self,'positions')])
     def close(self) -> None:
         try:
             with self._lock:

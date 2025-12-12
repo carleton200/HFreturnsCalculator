@@ -272,7 +272,7 @@ class returnsApp(QWidget):
         self.benchmarkSelection.popup.closed.connect(self.buildReturnTable)
         optionsGrid.addWidget(self.benchmarkSelection,1,4)
         optionsGrid.addWidget(QLabel("Group by: "),0,5)
-        self.sortHierarchy = MultiSelectBox()
+        self.sortHierarchy = MultiSelectBox(dispLib=self.db.userDisplayLib())
         self.sortHierarchy.hierarchyMode()
         self.sortHierarchy.setCheckedItems(["assetClass","subAssetClass"])
         self.sortHierarchy.popup.closed.connect(self.groupingChange)
@@ -297,7 +297,7 @@ class returnsApp(QWidget):
         line.setFrameShape(QFrame.HLine)
         line.setFrameShadow(QFrame.Sunken)
         optionsGrid.addWidget(line, 2, 1, 1, optionsGrid.columnCount() - 1)
-        self.assetClass3Visibility = MultiSelectBox()
+        self.assetClass3Visibility = MultiSelectBox(dispLib=self.db.userDisplayLib())
         self.assetClass3Visibility.popup.closed.connect(self.assetClass3VisibilityChanged)
         optionsGrid.addWidget(QLabel("Hidden Asset Level 3s:"),3,1)
         optionsGrid.addWidget(self.assetClass3Visibility,4,1)
@@ -344,7 +344,7 @@ class returnsApp(QWidget):
                 mainFilterLayout.addWidget(QLabel(f"{filter["name"]}:"), row, col)
             if filter["key"] != "Target name":
                 self.sortHierarchy.addItem(filter["key"])
-            self.filterDict[filter["key"]] = MultiSelectBox()
+            self.filterDict[filter["key"]] = MultiSelectBox(dispLib=self.db.userDisplayLib())
             self.filterDict[filter["key"]].popup.closed.connect(lambda: self.filterUpdate())
             mainFilterLayout.addWidget(self.filterDict[filter["key"]],row + 1,col)
         self.sortHierarchy.setCheckedItems(["assetClass","subAssetClass"])
@@ -728,36 +728,38 @@ class returnsApp(QWidget):
                 gui_queue.put(lambda: self.dataTypeBox.setVisible(not complexMode))
                 condStatement = ""
                 parameters = []
-                if self.filterDict["Source name"].checkedItems() != [] or self.filterDict[nameHier["Family Branch"]["local"]].checkedItems() != []:
-                    #show investor level fund data
-                    condStatement = " WHERE"
-                    if self.filterDict["Source name"].checkedItems() != []:
-                        paramTemp = self.filterDict["Source name"].checkedItems()
-                        placeholders = ','.join('?' for _ in paramTemp) 
-                        condStatement += f" [Source name] IN ({placeholders}) "
-                        for param in paramTemp:
-                            parameters.append(param)
-                    if self.filterDict[nameHier["Family Branch"]["local"]].checkedItems() != []:
-                        famBranches = self.filterDict[nameHier["Family Branch"]["local"]].checkedItems()
-                        paramTemp = self.db.pullInvestorsFromFamilies(famBranches)
-                        placeholders = ','.join('?' for _ in paramTemp)
-                        if condStatement == " WHERE":
-                            condStatement += f" [Source name] IN ({placeholders}) "
-                        else:
-                            condStatement += f" AND [Source name] IN ({placeholders}) "
-                        for param in paramTemp:
-                            parameters.append(param)
+                invSelections = self.filterDict["Source name"].checkedItems()
+                famSelections = self.filterDict["Family Branch"].checkedItems()
+                if invSelections != [] or famSelections != []: #handle investor level
+                    invsF = set()
+                    for fam in famSelections:
+                        invsF.update(self.db.pullInvestorsFromFamilies(fam))
+                    invsI = set(invSelections)
+                    if invSelections != [] and famSelections != []: #Union if both are selected
+                        invs = invsF and invsI
+                    else: #combine if only one is valid
+                        invs = invsF or invsI
+                    placeholders = ','.join('?' for _ in invs)
+                    if condStatement in ("", " WHERE"):
+                        condStatement = f' WHERE [Source name] in ({placeholders})'
+                    else:
+                        condStatement += f' AND [Source name] in ({placeholders})'
+                    parameters.extend(invs)
                 if self.filterDict['Node'].checkedItems() != []:
-                    if condStatement == "":
-                        condStatement = " WHERE"
                     selectedNodes = self.filterDict['Node'].checkedItems()
-                    sNodeIds = [" "+ str(node['id'])+" " for node in self.db.fetchNodes() if node['name'] in selectedNodes]
+                    sNodeIds = [" "+ str(node['id'])+" " for node in self.db.fetchNodes() if str(node['id']) in selectedNodes]
                     # Build LIKE conditions to check if any node ID appears within the nodePath column
-                    likeConditions = ' OR '.join('[nodePath] LIKE ?' for _ in sNodeIds)
-                    condStatement += f" AND ({likeConditions})"
-                    # Add each node ID with wildcards to search for it within the column
-                    for sNodeId in sNodeIds:
-                        parameters.append(f'%{sNodeId}%')
+                    if sNodeIds:
+                        likeConditions = ' OR '.join('[nodePath] LIKE ?' for _ in sNodeIds)
+                        if condStatement in (""," WHERE"):
+                            condStatement = f"WHERE ({likeConditions})"
+                        else:
+                            condStatement += f" AND ({likeConditions})"
+                        # Add each node ID with wildcards to search for it within the column
+                        for sNodeId in sNodeIds:
+                            parameters.append(f'%{sNodeId}%')
+                    else:
+                        print(f"Warning: Failed to find corresponding node Id's for {selectedNodes}")
                 filterParamDict = {}
                 for filter in self.filterOptions:
                     if filter["key"] not in nonFundCols:
@@ -1137,7 +1139,7 @@ class returnsApp(QWidget):
             elif levelName == nameHier["Family Branch"]["local"]:
                 inv2fam = self.db.investor2family
                 for _e in data:
-                    grouped_by_level[inv2fam.get(_e[levelName])].append(_e)
+                    grouped_by_level[inv2fam.get(_e['Source name'])].append(_e)
             elif levelName == 'Node':
                 nodePathOptDict = {}
                 grouped_by_level = defaultdict(list)
@@ -1146,23 +1148,6 @@ class returnsApp(QWidget):
                     baseNode = str(nodePath).split(nodePathSplitter)[0].strip() if nodePath not in (None,'None') else nodePath
                     grouped_by_level[baseNode].append(_e)
                     nodePathOptDict.setdefault(baseNode,set()).update(nodePath.split(nodePathSplitter))
-                for key in list(grouped_by_level.keys()):
-                    if len(nodePathOptDict[key]) > 1: #Break apart to lower node levels and remove from processing in this function call
-                        print(f"Data splitting for: {id2Node[int(key)]}")
-                        struc, upperEntriesExtend, allEntriesExtend = nodeRecursion(hier, levelName,levelIdx, struc,grouped_by_level[key],path, insertedOption,key)
-                        if id2Node[int(key)] == 'ABW Partnership':
-                            print("Iterating lower entries: ")
-                            for entry in (entry for entry in allEntriesExtend if entry['dateTime'] == '2025-11-01 00:00:00'):
-                                print(f"    {entry}")
-                            print("Iterating upper entries: ")
-                            for entry in (entry for entry in upperEntriesExtend if entry['dateTime'] == '2025-11-01 00:00:00'):
-                                print(f"    {entry}")
-                            print("struc state:")
-                        upperEntries.extend(upperEntriesExtend)
-                        allEntries.extend(allEntriesExtend)
-                        grouped_by_level.pop(key)
-                    if key not in (None,'None') and id2Node[int(key)] == 'ABW Olathe LLC':
-                        print("\n \n \n \n \n \n THE NODE HAS BEEN FOUND \n \n \n \n \n \n ")
             # Derive options from grouped keys
             options = list(grouped_by_level.keys())
             if levelName == "subAssetClass":
@@ -1171,12 +1156,21 @@ class returnsApp(QWidget):
                 options = [v for v in assetClass2Order if v in options] + sorted([v for v in options if v not in assetClass2Order])
             elif levelName == "assetClass":
                 options = [v for v in assetClass1Order if v in options] + sorted([v for v in options if v not in assetClass1Order])
+            elif levelName == 'Node':
+                def nodeSortKey(n):
+                    return id2Node[int(n)] if n not in (None, 'None') else n
+                options.sort(key=lambda n: nodeSortKey(n))
             else:
                 options.sort()
             if len(hier) > levelIdx: #more hierarchy levels to parse
                 for option in options:
-                    tempPath = path.copy()
-                    tempPath.append(option)
+                    if levelName == 'Node' and len(nodePathOptDict[option]) > 1: #Break apart to lower node levels and remove from processing in this loop
+                        struc, upperEntriesExtend, allEntriesExtend = nodeRecursion(hier, levelName,levelIdx, struc,grouped_by_level[option],path, insertedOption,option)
+                        upperEntries.extend(upperEntriesExtend)
+                        allEntries.extend(allEntriesExtend)
+                        continue
+
+                    
                     
                     highEntries = {}
                     if levelName == 'assetClass' and option == 'Cash':
@@ -1185,6 +1179,10 @@ class returnsApp(QWidget):
                         name = id2Node.get(int(option),"Node Name Not Found") if option not in (None, 'None') else "No Node"
                     else:
                         name = option 
+
+                    tempPath = path.copy()
+                    tempPath.append(name)
+
                     code = buildCode(tempPath)
                     if not noHeader:
                         struc[name + code] = {} #place table space for that level selection
@@ -1242,6 +1240,11 @@ class returnsApp(QWidget):
                     options = ["hiddenLayer"]
                 NAVsort = "NAV" in self.sortStyle.text()
                 for option in options:
+                    if levelName == 'Node' and len(nodePathOptDict[option]) > 1: #Break apart to lower node levels and remove from processing in this loop
+                        struc, upperEntriesExtend, allEntriesExtend = nodeRecursion(hier, levelName,levelIdx, struc,grouped_by_level[option],path, insertedOption,option)
+                        upperEntries.extend(upperEntriesExtend)
+                        allEntries.extend(allEntriesExtend)
+                        continue
                     totalEntriesLow = {}
                     if levelName == 'assetClass' and option == 'Cash':
                         name = 'Cash ' #adds a space to cash L1 for differentiation
@@ -1249,7 +1252,7 @@ class returnsApp(QWidget):
                         name = id2Node.get(int(option),"Node Name Not Found") if option not in (None, 'None') else option
                     else:
                         name = option 
-                    code = buildCode([*path,option])
+                    code = buildCode([*path,name])
                     if option != "hiddenLayer":
                         if not noHeader:
                             struc[name + code] = {} #place table space for that level selection
@@ -1387,7 +1390,7 @@ class returnsApp(QWidget):
 
         if self.showBenchmarkLinksBtn.isChecked():
             benchmarkLinks = self.db.fetchBenchmarkLinks()
-            tableStructure = applyLinkedBenchmarks(tableStructure,self.buildCode("Total"), "Total", "Total") #apply benchmark links to total
+            tableStructure = applyLinkedBenchmarks(tableStructure,self.buildCode(["Total",]), "Total", "Total") #apply benchmark links to total
         levelIdx = 0
         buildHier = sortHierarchy
         tableStructure, highestEntries, newEntries = buildLevel(buildHier, buildHier[0],levelIdx,tableStructure,data, [])
@@ -1553,7 +1556,7 @@ class returnsApp(QWidget):
             monthEntry = {"dateTime" : monthDT, "Month" : dateString, "tranStart" : tranStart.removesuffix(".000Z"), "endDay" : bothEnd.removesuffix(".000Z"), "accountStart" : accountStart.removesuffix(".000Z")}
             dbDates.append(monthEntry)
         save_to_db(self.db,"Months",dbDates)
-    def instantiateFilters(self,*_):
+    def instantiateFilters(self,*_, keepChoices: bool = False):
         investors = self.db.fetchInvestors()
         for filKey, invKey in (['Source name', 'Name'],['Family Branch','Parentinvestor']):
             self.filterDict[filKey].clearItems()
@@ -1567,9 +1570,10 @@ class returnsApp(QWidget):
         for filKey in filOptDict.keys():
             self.filterDict[filKey].clearItems()
             self.filterDict[filKey].addItems(sorted(filOptDict[filKey]))
+        self.filterDict['Node'].addItems([str(n) for n in list(self.db.pullId2Node().keys())])
         self.assetClass3Visibility.addItems(sorted(filOptDict['subAssetClass']))
         self.benchmarkSelection.addItems(sorted(self.db.fetchBenchmarks()))
-        #self.filterDict["Classification"].setCheckedItem("HFC")
+        self.filterDict["Classification"].setCheckedItem("HFC")
 
     def groupingChange(self):
         groupOpts = self.sortHierarchy.checkedItems()
@@ -2043,9 +2047,9 @@ class returnsApp(QWidget):
             if skipCalculations:
                 print("Earliest change: ", self.earliestChangeDate)
                 if self.nodeChangeDates.get("active", False):
-                    print(f"Changes dates by pools:")
-                    for pool in self.nodeChangeDates:
-                        print(f"        {pool} : {self.nodeChangeDates.get(pool)}")
+                    print(f"Change dates by node:")
+                    for node in self.nodeChangeDates:
+                        print(f"        {node} : {self.nodeChangeDates.get(node)}")
             gui_queue.put(lambda: self.apiLoadingBar.setValue(100))
 
 
@@ -2079,7 +2083,6 @@ class returnsApp(QWidget):
                     fundList[fund["Name"]] = fund[nameHier["sleeve"]["sleeve"]]
                 months = load_from_db(self.db,"Months", f"ORDER BY [dateTime] ASC")
                 calculations = []
-                monthIdx = 0
                 if load_from_db(self.db,"calculations") == []:
                     noCalculations = True
                 else:
@@ -2103,8 +2106,6 @@ class returnsApp(QWidget):
                 self.workerProgress = {}
 
                 nodeLib = nodeLibrary([*dynImportData['transactions'],*dynImportData['positions']])
-                for nodeP in nodeLib.nodePaths.values():
-                    print(nodeP)
                 # INSERT_YOUR_CODE
                 nodeClumps = get_connected_node_groups(nodeLib.nodePaths)
                 clumpIdxs = {node : idx for idx, clump in enumerate(nodeClumps) for node in clump}
@@ -2393,153 +2394,158 @@ class returnsApp(QWidget):
             keys = ordered
         return keys
     def populateReturnsTable(self, origRows: dict, flagStruc : dict = {}):
-        self.buildTableLoadingBar.setValue(7)
-        mode = self.tableBtnGroup.checkedButton().text()
-        if not origRows:
-            # nothing to show
-            self.returnsTable.clear()
-            self.returnsTable.setRowCount(0)
-            self.returnsTable.setColumnCount(0)
-            self.buildTableLoadingBox.setVisible(False)
-            return
+        try:
+            self.buildTableLoadingBar.setValue(7)
+            mode = self.tableBtnGroup.checkedButton().text()
+            if not origRows:
+                # nothing to show
+                self.returnsTable.clear()
+                self.returnsTable.setRowCount(0)
+                self.returnsTable.setColumnCount(0)
+                self.buildTableLoadingBox.setVisible(False)
+                return
 
-        rows = copy.deepcopy(origRows) #prevents alteration of self.returnsTableData
-        for f in self.filterOptions:
-            if f["key"] not in self.filterBtnExclusions and not self.filterRadioBtnDict[f["key"]].isChecked():
-                for k,v in rows.items():
-                    if "dataType" not in v:
-                        print(f"Bad row. Key: {k} \n       row: {v}")
-                to_delete = [k for k,v in rows.items() if v["dataType"] == "Total " + f["key"]]
-                for k in to_delete:
-                    rows.pop(k)
-        to_delete = []
-        for row in rows.keys():
-            row_label, _ = self.separateRowCode(row)
-            if row_label == "hiddenLayer":
-                to_delete.append(row)
-        for row in to_delete:
-            rows.pop(row)
-        
-        self.filteredReturnsTableData = copy.deepcopy(rows) #prevents removal of dataType key for data lookup
-
-        # 1) Build a flat list of row-entries:
-        #    each entry = (fund_label, unique_code, row_dict)
-        row_entries = []
-        for fund_label, row_dict in rows.items():
-            row_label, code = self.separateRowCode(fund_label)
-            row_entries.append((row_label, code, row_dict, fund_label))
-
-        # 2) Determine columns exactly as before, using cleanedRows for header order
-        cleaned = {fund: d.copy() for fund, _, d, _ in row_entries}
-        for d in cleaned.values():
-            d.pop("dataType", None)
-
-        if not self.headerSort.active or mode == "Monthly Table":
-            col_keys = set()
-            for d in cleaned.values():
-                col_keys |= set(d.keys())
-            col_keys = list(col_keys)
-
-            exceptions = ["Return", "Ownership", "MDdenominator", "Monthly Gain"]
-            col_keys = self.orderColumns(col_keys, exceptions=exceptions)
-            if mode == "Complex Table":
-                allKeys = col_keys.copy()
-                allKeys.extend(exceptions) #all key options for the header selections
-                self.headerSort.set_items(allKeys,[item for item in allKeys if item not in exceptions])
-                self.headerSort.setEnabled(True)
-            else:
-                self.headerSort.setEnabled(False)
-        else:
-            col_keys = self.headerSort.popup.get_checked_sorted_items()
-            self.headerSort.setEnabled(True)
-        self.filteredHeaders = col_keys
-        # 3) Resize & set horizontal headers (we no longer call setVerticalHeaderLabels)
-        self.returnsTable.setRowCount(len(row_entries))
-        self.returnsTable.setColumnCount(len(col_keys))
-        self.returnsTable.setHorizontalHeaderLabels(col_keys)
-
-        bg = None
-        # 4) Populate each row
-        colorDepths = [code.count("::") + 1 * (row_dict['dataType'] == 'Total Target name') for _, code, row_dict,_ in row_entries]
-        maxDepth = max(colorDepths)
-        trackIdx = 0
-        trackDepth = 0
-        for i in range(len(colorDepths)):
-            d = colorDepths[i]
-            if trackDepth < d: #further depth
-                trackIdx = i
-                trackDepth = d
-            elif trackDepth > d and d != maxDepth: #back up  from depth, but did not go full depth
-                colorDepths[trackIdx:i] = [maxDepth] * (i-trackIdx) #set the depth for low section all the way down
-            trackDepth = d
-        colorDepths = [c/maxDepth for c in colorDepths]
-        for r, (fund_label, code, row_dict, rowKey) in enumerate(row_entries):
-            # pull & remove dataType for coloring
-            dataType = row_dict.pop("dataType", "")
-            if dataType != "benchmark": #benchmark will use previous rounds color
-                startColor = (160, 160, 160)
-                if dataType == "Total":
-                    color = tuple(
-                        int(startColor[i] * 0.8)
-                        for i in range(3)
-                    )
-                    bg =  QColor(*color)
-                elif dataType == "benchmark":
-                    color = (182, 205, 245)
-                    bg = QColor(*color)
-                else:
-                    cRange     = 255 - startColor[0]
-                    color = tuple(
-                        int(startColor[i] + cRange * colorDepths[r])
-                        for i in range(3)
-                    )
-                    bg = QColor(*color)
+            rows = copy.deepcopy(origRows) #prevents alteration of self.returnsTableData
+            for f in self.filterOptions:
+                if f["key"] not in self.filterBtnExclusions and not self.filterRadioBtnDict[f["key"]].isChecked():
+                    for k,v in rows.items():
+                        if "dataType" not in v:
+                            print(f"Bad row. Key: {k} \n       row: {v}")
+                    to_delete = [k for k,v in rows.items() if v["dataType"] == "Total " + f["key"]]
+                    for k in to_delete:
+                        rows.pop(k)
+            to_delete = []
+            for row in rows.keys():
+                row_label, _ = self.separateRowCode(row)
+                if row_label == "hiddenLayer":
+                    to_delete.append(row)
+            for row in to_delete:
+                rows.pop(row)
             
-                
+            self.filteredReturnsTableData = copy.deepcopy(rows) #prevents removal of dataType key for data lookup
 
-            # — vertical header: only show the fund, stash the code —
-            hdr = QTableWidgetItem(fund_label)
-            hdr.setData(Qt.UserRole, code)
-            if dataType not in  ("Total Target name","benchmark"):
-                font = hdr.font()
-                font.setBold(True)
-                hdr.setFont(font)
-            if bg:
-                hdr.setBackground(QBrush(bg))
-                if dataType == "benchmark":
-                    hdr.setBackground(QBrush(QColor("0000FF")))
-            self.returnsTable.setVerticalHeaderItem(r, hdr)
+            # 1) Build a flat list of row-entries:
+            #    each entry = (fund_label, unique_code, row_dict)
+            row_entries = []
+            for fund_label, row_dict in rows.items():
+                row_label, code = self.separateRowCode(fund_label)
+                row_entries.append((row_label, code, row_dict, fund_label))
 
-            # — fill cells —
-            for c, col in enumerate(col_keys):
-                raw = row_dict.get(col, "")
-                if raw not in (None, "", "None"):
-                    try:
-                        v = round(float(raw), 2)
-                        if c in percent_headers or (mode == "Monthly Table" and self.returnOutputType.currentText() in percent_headers):
-                            text = f"{v:.2f}%"
-                        else:
-                            text = f"{v:,.2f}"
-                    except:
-                        text = str(raw)
+            # 2) Determine columns exactly as before, using cleanedRows for header order
+            cleaned = {fund: d.copy() for fund, _, d, _ in row_entries}
+            for d in cleaned.values():
+                d.pop("dataType", None)
+
+            if not self.headerSort.active or mode == "Monthly Table":
+                col_keys = set()
+                for d in cleaned.values():
+                    col_keys |= set(d.keys())
+                col_keys = list(col_keys)
+
+                exceptions = ["Return", "Ownership", "MDdenominator", "Monthly Gain"]
+                col_keys = self.orderColumns(col_keys, exceptions=exceptions)
+                if mode == "Complex Table":
+                    allKeys = col_keys.copy()
+                    allKeys.extend(exceptions) #all key options for the header selections
+                    self.headerSort.set_items(allKeys,[item for item in allKeys if item not in exceptions])
+                    self.headerSort.setEnabled(True)
                 else:
-                    text = ""
+                    self.headerSort.setEnabled(False)
+            else:
+                col_keys = self.headerSort.popup.get_checked_sorted_items()
+                self.headerSort.setEnabled(True)
+            self.filteredHeaders = col_keys
+            # 3) Resize & set horizontal headers (we no longer call setVerticalHeaderLabels)
+            self.returnsTable.setRowCount(len(row_entries))
+            self.returnsTable.setColumnCount(len(col_keys))
+            self.returnsTable.setHorizontalHeaderLabels(col_keys)
 
-                item = QTableWidgetItem(text)
-                if text:
-                    # store raw number for sorting or later retrieval
-                    item.setData(Qt.UserRole, v)
-                if bg:
-                    if flagStruc.get(rowKey,{}).get(col,False):
-                        colorL = (color[0], color[1], int(color[2] * 0.8))
-                        item.setBackground(QBrush(QColor(*colorL))) #yellow tints the cell for ownership adjustment
+            bg = None
+            # 4) Populate each row
+            colorDepths = [code.count("::") + 1 * (row_dict['dataType'] == 'Total Target name') for _, code, row_dict,_ in row_entries]
+            maxDepth = max(colorDepths)
+            trackIdx = 0
+            trackDepth = 0
+            for i in range(len(colorDepths)):
+                d = colorDepths[i]
+                if trackDepth < d: #further depth
+                    trackIdx = i
+                    trackDepth = d
+                if (trackDepth > d or i == len(colorDepths) - 1) and d != maxDepth: #back up  from depth or the end, but did not go full depth
+                    if i == len(colorDepths) - 1:
+                        i += 1
+                    colorDepths[trackIdx:i] = [maxDepth] * (i-trackIdx) #set the depth for low section all the way down
+                trackDepth = d
+            colorDepths = [c/maxDepth for c in colorDepths] if maxDepth != 0 else colorDepths
+            for r, (fund_label, code, row_dict, rowKey) in enumerate(row_entries):
+                # pull & remove dataType for coloring
+                dataType = row_dict.pop("dataType", "")
+                if dataType != "benchmark": #benchmark will use previous rounds color
+                    startColor = (160, 160, 160)
+                    if dataType == "Total":
+                        color = tuple(
+                            int(startColor[i] * 0.8)
+                            for i in range(3)
+                        )
+                        bg =  QColor(*color)
+                    elif dataType == "benchmark":
+                        color = (182, 205, 245)
+                        bg = QColor(*color)
                     else:
-                        item.setBackground(QBrush(bg))
-                if dataType == "benchmark":
-                    item.setForeground(QColor(0,0,255))
-                item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-                self.returnsTable.setItem(r, c, item)
-        self.buildTableLoadingBox.setVisible(False)
+                        cRange     = 255 - startColor[0]
+                        color = tuple(
+                            int(startColor[i] + cRange * colorDepths[r])
+                            for i in range(3)
+                        )
+                        bg = QColor(*color)
+                
+                    
+
+                # — vertical header: only show the fund, stash the code —
+                hdr = QTableWidgetItem(fund_label)
+                hdr.setData(Qt.UserRole, code)
+                if dataType not in  ("Total Target name","benchmark"):
+                    font = hdr.font()
+                    font.setBold(True)
+                    hdr.setFont(font)
+                if bg:
+                    hdr.setBackground(QBrush(bg))
+                    if dataType == "benchmark":
+                        hdr.setBackground(QBrush(QColor("0000FF")))
+                self.returnsTable.setVerticalHeaderItem(r, hdr)
+
+                # — fill cells —
+                for c, col in enumerate(col_keys):
+                    raw = row_dict.get(col, "")
+                    if raw not in (None, "", "None"):
+                        try:
+                            v = round(float(raw), 2)
+                            if c in percent_headers or (mode == "Monthly Table" and self.returnOutputType.currentText() in percent_headers):
+                                text = f"{v:.2f}%"
+                            else:
+                                text = f"{v:,.2f}"
+                        except:
+                            text = str(raw)
+                    else:
+                        text = ""
+
+                    item = QTableWidgetItem(text)
+                    if text:
+                        # store raw number for sorting or later retrieval
+                        item.setData(Qt.UserRole, v)
+                    if bg:
+                        if flagStruc.get(rowKey,{}).get(col,False):
+                            colorL = (color[0], color[1], int(color[2] * 0.8))
+                            item.setBackground(QBrush(QColor(*colorL))) #yellow tints the cell for ownership adjustment
+                        else:
+                            item.setBackground(QBrush(bg))
+                    if dataType == "benchmark":
+                        item.setForeground(QColor(0,0,255))
+                    item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                    self.returnsTable.setItem(r, c, item)
+            self.buildTableLoadingBox.setVisible(False)
+        except:
+            QMessageBox.warning(self,'Build Table Failed','Error occured attempting to format the table. Please try again.')
     def populate(self, table, rows, keys = None):
         if not rows:
             return

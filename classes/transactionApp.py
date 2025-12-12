@@ -267,7 +267,7 @@ class transactionApp(QWidget):
         mainFilterLayout.addWidget(filterTitle,0,0,2,1)
 
         self.filterOptions = [
-                            {"key": "Pool",           "name": "Pool", "dataType" : "Total Pool" , "dynNameLow" : "Source name", "dynNameHigh" : "Target name"},                            
+                            {"key": "Node",           "name": "Node", "dataType" : "Total Node"},                            
                         ]
         self.filterBtnExclusions = ["Investor","Classification", nameHier["Family Branch"]["local"]]
         self.highOnlyFilters = ["Investor", nameHier["Family Branch"]["local"]]
@@ -286,7 +286,7 @@ class transactionApp(QWidget):
                 mainFilterLayout.addWidget(QLabel(f"{filter["name"]}:"), 0, col)
             if filter["key"] != "Fund":
                 self.sortHierarchy.addItem(filter["key"])
-            self.filterDict[filter["key"]] = MultiSelectBox()
+            self.filterDict[filter["key"]] = MultiSelectBox(dispLib=self.db.userDisplayLib())
             self.filterDict[filter["key"]].popup.closed.connect(lambda: self.filterUpdate())
             
             mainFilterLayout.addWidget(self.filterDict[filter["key"]],1,col)
@@ -321,7 +321,7 @@ class transactionApp(QWidget):
         page.setLayout(layout)
         self.stack.addWidget(page)
 
-        self.pullLevelNames()
+        self.instantiateFilters()
         self.updateMonthOptions()
         if self.start_index != 0:
             self.filterUpdate()
@@ -341,11 +341,9 @@ class transactionApp(QWidget):
             #run calculations if they do not match the last import from returns Calculator, otherwise, continue as normal
             if lastImportDB[0]["lastImport"] != lastImportDB[0].get("lastCalculation", "None"):
                 self.earliestChangeDate = datetime.strptime(lastImportDB[0].get("changeDate"), "%B %d, %Y @ %I:%M %p")
-                self.processFunds()
                 self.calculateReturn()
             else:
                 calculations = load_from_db(self.db,"tranCalculations")
-                self.processFunds()
                 if calculations != []:
                     self.populate(self.calculationTable,calculations)
                     self.buildReturnTable()
@@ -573,37 +571,6 @@ class transactionApp(QWidget):
                 gui_queue.put(lambda: QMessageBox.information(self, "Saved", f"Excel saved to:\n{path}"))
                 gui_queue.put(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(path)))
         executor.submit(processExport)
-    def processFunds(self):
-        self.cFundsCalculated = True
-        self.sleeveFundLinks = {}
-        self.cFundToFundLinks = {}
-        self.pools = []
-        poolList = set()
-        funds = load_from_db(self.db,"funds")
-        if funds != []:
-            consolidatorFunds = {}
-            for row in funds: #find sleeve values and consolidated funds
-                assetClass = row["assetClass"]
-                subAssetClass = row["subAssetClass"]
-                sleeve = row["sleeve"]
-                if row.get("Fundpipelinestatus") is not None and "Z - Placeholder" in row.get("Fundpipelinestatus"):
-                    consolidatorFunds[row["Name"]] = {"cFund" : row["Name"], "assetClass" : assetClass, "subAssetClass" : subAssetClass, "sleeve" : sleeve}
-                    self.cFundToFundLinks[row["Name"]] = []
-                if row["sleeve"] not in self.sleeveFundLinks:
-                    self.sleeveFundLinks[row["sleeve"]] = [row["Name"]]
-                else:
-                    self.sleeveFundLinks[row["sleeve"]].append(row["Name"])
-                if row["Fundpipelinestatus"] == "I - Internal":
-                    self.pools.append({"poolName" : row["Name"], "assetClass" : assetClass, "subAssetClass" : subAssetClass})
-                    poolList.add(row["Name"])
-            self.consolidatedFunds = {}
-            for row in funds: #assign funds to their consolidators
-                if row.get("Parentfund") in consolidatorFunds:
-                    self.consolidatedFunds[row["Name"]] = consolidatorFunds.get(row.get("Parentfund"))
-                    self.cFundToFundLinks[row.get("Parentfund")].append(row["Name"])
-            self.fullLevelOptions["Pool"] = list(poolList)
-        else:
-            self.consolidatedFunds = {}
     def filterBtnUpdate(self, button, checked):
         if not self.filterCallLock:
             self.buildTableLoadingBox.setVisible(True)
@@ -640,8 +607,6 @@ class transactionApp(QWidget):
     def buildReturnTable(self, *_):
         self.buildTableLoadingBox.setVisible(True)
         self.buildTableLoadingBar.setValue(2)
-        if not self.cFundsCalculated:
-            self.processFunds()
         def buildTable(cancelEvent):
             try:
                 print("Building transactions table...")
@@ -657,9 +622,10 @@ class transactionApp(QWidget):
                 for filter in self.filterOptions:
                     if filter["key"] != "Investor" and filter["key"] != nameHier["Family Branch"]["local"]:
                         if self.filterDict[filter["key"]].checkedItems() != []:
+                            id2Node = self.db.pullId2Node()
                             paramTemp = self.filterDict[filter["key"]].checkedItems()
                             for param in paramTemp:
-                                parameters.append(param)
+                                parameters.append((id2Node.get(int(param),param)) if param not in (None,'None') else param)
                             placeholders = ','.join('?' for _ in paramTemp)
                             if condStatement:
                                 condStatement += f" AND [{filter["key"]}] IN ({placeholders})"
@@ -677,14 +643,14 @@ class transactionApp(QWidget):
                 complexOutput = copy.deepcopy(output)
                 multiPoolFunds = {}
                 dataOutputType = self.returnOutputType.currentText()
-                Dtype = "Total Pool"
+                Dtype = "Total Node"
                 for entry in (entry for entry in data if entry.get('dateTime') not in (None,'')):
                     if (datetime.strptime(entry["dateTime"], "%Y-%m-%d %H:%M:%S") >  datetime.strptime(self.dataEndSelect.currentText(),"%B %Y") or 
                         datetime.strptime(entry["dateTime"], "%Y-%m-%d %H:%M:%S") <  datetime.strptime(self.dataStartSelect.currentText(),"%B %Y")):
                         #don't build in data outside the selection
                         continue
                     date = datetime.strftime(datetime.strptime(entry["dateTime"], "%Y-%m-%d %H:%M:%S"), "%B %Y")
-                    level = entry.get("Pool") + "##(" + entry.get("Pool") + ")##"
+                    level = entry.get("Node") + "##(" + entry.get("Node") + ")##"
 
                     
                     if level not in output.keys():
@@ -897,65 +863,8 @@ class transactionApp(QWidget):
         return tableStructure,newEntries
                     
     def filterUpdate(self):
-        def resetOptions(key,options):
-            currentSelections = self.filterDict[key].checkedItems()
-            multiBox = self.filterDict[key]
-            multiBox.clearItems()
-            multiBox.addItems(sorted(options))
-            for currentText in currentSelections:
-                if currentText in options:
-                    multiBox.setCheckedItem(currentText)
-        def exitFunc():
-            self.filterCallLock = False
-            gui_queue.put(lambda: self.buildReturnTable())
-        if not self.filterCallLock:
-            def processFilter():
-                try:
-                    #prevents recursion on calls from comboboxes being updated
-                    self.filterCallLock = True
-                    currentChoices = {}
-                    for key in self.filterDict.keys():
-                        if key not in self.highOnlyFilters:
-                            currentChoices[key] = self.filterDict[key].checkedItems()
-                    if all(choices == [] for _, choices in currentChoices.items()):
-                        for key in currentChoices.keys():
-                            gui_queue.put(lambda: resetOptions(key,self.fullLevelOptions[key]))
-                        exitFunc()
-                        return
-                    for filterSwitch in self.filterOptions:
-                        if filterSwitch["key"] not in self.highOnlyFilters:
-                            condStatement = ""
-                            first = True
-                            parameters = []
-                            for filter in self.filterOptions:
-                                if filter["key"] != filterSwitch["key"] and filter["key"] not in self.highOnlyFilters:
-                                    if self.filterDict[filter["key"]].checkedItems() != []:
-                                        paramTemp = self.filterDict[filter["key"]].checkedItems()
-                                        placeholders = ','.join('?' for _ in paramTemp)
-                                        if first:
-                                            condStatement = f"WHERE [{filter["dynNameLow"]}] IN ({placeholders})"
-                                            first = False
-                                        else:
-                                            condStatement += f" AND [{filter["dynNameLow"]}] IN ({placeholders})"
-                                        for param in paramTemp:
-                                            parameters.append(param)
-                            lowTran = load_from_db(self.db,"transactions_low", condStatement,tuple(parameters))
-                            
-                            options = {}
-                            for filter in self.filterOptions:
-                                options[filter["key"]] = []
-                            for account in lowTran:
-                                for filter in self.filterOptions:
-                                    if filter["key"] not in self.highOnlyFilters:
-                                        option = account.get(filter["dynNameLow"])
-                                        if option and option not in options[filter["key"]]:
-                                            options[filter["key"]].append(option)
-                            gui_queue.put(lambda key = filterSwitch["key"], opts = options[filterSwitch["key"]]: resetOptions(key,opts))
-                except:
-                    gui_queue.put(lambda: QMessageBox.warning(self,"Filter Error", "Error occured updating filters"))
-                exitFunc()
-            executor.submit(processFilter)
-            return
+        self.buildReturnTable()
+        return
     def updateMonths(self):
         start = self.dataTimeStart
         end = datetime.now()
@@ -991,42 +900,9 @@ class transactionApp(QWidget):
             monthEntry = {"dateTime" : monthDT, "Month" : dateString, "tranStart" : tranStart.removesuffix(".000Z"), "endDay" : bothEnd.removesuffix(".000Z"), "accountStart" : accountStart.removesuffix(".000Z")}
             dbDates.append(monthEntry)
         save_to_db(self.db,"Months",dbDates)
-
-    def pullLevelNames(self):
-        allOptions = {}
-        fundPoolLink = {}
-        for filter in self.filterOptions:
-            if filter["key"] not in self.highOnlyFilters:
-                allOptions[filter["key"]] = []
-        accountsHigh = load_from_db(self.db,"transactions_high")
-        if accountsHigh is not None:
-            for account in accountsHigh:
-                for filter in self.filterOptions:
-                    if (filter["key"] in allOptions and "dynNameHigh" in filter.keys() and
-                        account.get(filter["dynNameHigh"]) is not None and
-                        account.get(filter["dynNameHigh"]) not in allOptions[filter["key"]]):
-                        allOptions[filter["key"]].append(account.get(filter["dynNameHigh"]))
-        else:
-            print("no investor to pool accounts found")
-        accountsLow = load_from_db(self.db,"transactions_low")
-        if accountsLow is not None:
-            for lowAccount in accountsLow:
-                for filter in self.filterOptions:
-                    if (filter["key"] in allOptions and "dynNameLow" in filter.keys() and
-                        lowAccount.get(filter["dynNameLow"]) is not None and
-                        lowAccount.get(filter["dynNameLow"]) not in allOptions[filter["key"]]):
-                        allOptions[filter["key"]].append(lowAccount.get(filter["dynNameLow"]))
-                fundPoolLink[lowAccount["Target name"]] = lowAccount.get("Source name")
-        else:
-            print("no pool to fund accounts found")
-        self.fullLevelOptions = {}
-        for filter in self.filterOptions:
-            if filter["key"] in allOptions:
-                allOptions[filter["key"]].sort()
-                self.filterDict[filter["key"]].addItems(allOptions[filter["key"]])
-                self.fullLevelOptions[filter["key"]] = allOptions[filter["key"]]
-        self.fundPoolLinks = fundPoolLink
-        self.filterUpdate()
+    def instantiateFilters(self,*_):
+        self.filterDict['Node'].clearItems()
+        self.filterDict['Node'].addItems([str(n) for n in list(self.db.pullId2Node().keys())])
 
     def groupingChange(self, *_):
         groupOpts = self.sortHierarchy.checkedItems()
@@ -1070,7 +946,6 @@ class transactionApp(QWidget):
         def initalizeCalc():
             try:
                 gui_queue.put(lambda: self.calculationLoadingBox.setVisible(True))
-                gui_queue.put(lambda: self.pullLevelNames())
                 print("Calculating differences....")
                 fundListDB = load_from_db(self.db,"funds")
                 fundList = {}
@@ -1078,7 +953,6 @@ class transactionApp(QWidget):
                     fundList[fund["Name"]] = fund[nameHier["sleeve"]["sleeve"]]
                 months = load_from_db(self.db,"Months", f"ORDER BY [dateTime] ASC")
                 calculations = []
-                monthIdx = 0
                 if load_from_db(self.db,"tranCalculations") == []:
                     noCalculations = True
                 else:
@@ -1103,46 +977,39 @@ class transactionApp(QWidget):
                 self.workerProgress = {}
 
                 # ------------------- build data cache ----------------------
-                tables = [ "transactions_low", "transactions_high", "tranCalculations"]
+                tables = ["transactions",]
                 table_rows = {t: load_from_db(self.db, t) for t in tables}
+                nodes = self.db.pullId2Node().values()
                 cache = {}
                 for table, rows in table_rows.items():
                     for row in rows:
-                        if table in ("transactions_low"):
-                            poolKey = row.get("Source name")
-                        elif table in ("transactions_high"):
-                            poolKey = row.get("Target name")
-                        else:
-                            poolKey = row.get("Pool")
-                        if poolKey is None:
-                            continue
-                        for m in months:
-                            if table == "tranCalculations":
-                                if row.get("dateTime") != m["dateTime"]:
-                                    continue
+                        for direction in ["Target name" , "Source name", 'node']:
+                            potNode = row.get(direction)
+                            if potNode not in nodes:
+                                continue
                             else:
-                                start =  m["tranStart"]
-                                date = row.get("Date")
-                                if not (start <= date <= m["endDay"]):
-                                    continue
-                            cache.setdefault(poolKey, {}).setdefault(table, {}).setdefault(m["dateTime"], []).append(row)
-                for idx, pool in enumerate(self.pools):
-                    self.pools[idx]["cache"] = cache.get(pool.get("poolName"))
-                    if self.poolChangeDates.get("active",False): #if the pool changes have been calculated, use it or set to current date if no changes occured
-                        self.pools[idx]["earliestChangeDate"] = self.poolChangeDates.get(pool.get("poolName"),datetime.now())
-                    else: #if pool changes have not been calculated but calculation requirements were imported, set to earliest global date
-                        self.pools[idx]["earliestChangeDate"] =  self.earliestChangeDate 
+                                tableName = 'transactions_below' if 'Source' in direction else 'transactions_above'
+                                for m in months: #find the month the account balance or transaction belongs in
+                                    start = m["accountStart"] if table == "positions" else m["tranStart"]
+                                    date = row.get("Date")
+                                    if not (start <= date <= m["endDay"]):
+                                        continue
+                                    cache.setdefault(potNode, {}).setdefault(tableName, {}).setdefault(m["dateTime"], []).append(row)
+                runNodes = [{'name' : node} for node in nodes]
+                for idx, node in enumerate(runNodes):
+                    runNodes[idx]["cache"] = cache.get(node.get("name"))
+                    runNodes[idx]["earliestChangeDate"] =  self.earliestChangeDate 
                     newMonths = []
                     if not noCalculations: #if there are calculations, find all months before the data pull, and then pull those calculations
                         for month in months:
                             #if the calculations for the month have already been complete, pull the old data
-                            if self.pools[idx]["earliestChangeDate"] > datetime.strptime(month["endDay"], "%Y-%m-%dT%H:%M:%S"):
+                            if runNodes[idx]["earliestChangeDate"] > datetime.strptime(month["endDay"], "%Y-%m-%dT%H:%M:%S"):
                                 pass
                             else:
                                 newMonths.append(month)
                     else:
                         newMonths = months
-                    _ = updateStatus(self,pool.get("poolName"),len(newMonths),status="Initialization")
+                    _ = updateStatus(self,node.get("name"),len(newMonths),status="Initialization")
                 def initializeWorkerPool():
                     self.manager = Manager()
                     self.lock = self.manager.Lock()
@@ -1153,15 +1020,15 @@ class transactionApp(QWidget):
 
                     self.pool = Pool()
                     self.futures = []
-                    executor.submit(self.watch_db)
+                    executor.submit(self.watch_db, len(runNodes))
 
                     commonData = {"noCalculations" : noCalculations,
                                     "months" : months, "fundList" : fundList
                                     }
                     
                     self.calcStartTime = datetime.now()
-                    for pool in self.pools:
-                        res = self.pool.apply_async(processPool, args=(pool, commonData,self.workerStatusQueue, self.workerDBqueue, self.calcFailedFlag, True))
+                    for node in runNodes:
+                        res = self.pool.apply_async(processNode, args=(node, commonData,self.workerStatusQueue, self.workerDBqueue, self.calcFailedFlag, True))
                         self.futures.append(res)
                     self.pool.close()
 
@@ -1174,7 +1041,7 @@ class transactionApp(QWidget):
                 # maybe also:
                 print(traceback.format_exc())
         executor.submit(initalizeCalc)
-    def watch_db(self):
+    def watch_db(self, nodeCount):
         while True:
             count = 0
             while not self.workerStatusQueue.empty() and count < 300:
@@ -1204,7 +1071,7 @@ class transactionApp(QWidget):
                     print(f"Halting progress watch due to worker '{failed[0].get("pool","Bad Pull")}' failure.")
                     self.queue.append(-86) #will halt the queue
                     break
-                elif len(completed) == len(self.pools):
+                elif len(completed) == nodeCount:
                     print("All workers have declared complete.")
                     self.queue.append(100) #backup in case the numbers below fail
                     break
@@ -1275,6 +1142,7 @@ class transactionApp(QWidget):
                 self.lastImportLabel.setText(f"Last Data Calculation: {apiPullTime}")
             except:
                 print("failed to update last calculation time")
+            gui_queue.put(self.instantiateFilters)
             gui_queue.put( lambda: self.populate(self.calculationTable,calculations,keys = keys))
             gui_queue.put( lambda: self.buildReturnTable())
             gui_queue.put(lambda: self.calculationLoadingBox.setVisible(False))

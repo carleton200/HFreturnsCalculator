@@ -7,9 +7,30 @@ class nodeLibrary:
         self.nodePaths = self.findNodeStructure(self.sources,self.nodes,self.targets,listInput)
         self.id2node = {nodeDict['id'] : nodeDict['name'] for nodeDict in self.nodePaths.values()}
         self.node2id = {nodeDict['name'] : nodeDict['id'] for nodeDict in self.nodePaths.values()}
+        self.node2Funds = self.findNode2Funds(listInput, self.nodes)
+        self.lowNodes = [e['Target name'] for e in listInput if e['Target name'] in self.nodes and e['Source name'] in self.nodes] #Nodes that are targets of other nodes
  
 
-
+    def findNode2Funds(self,tableEntries,nodes):
+        node2Funds = {node : set() for node in nodes}
+        for entry in tableEntries:
+            src = entry['Source name']
+            if src in nodes:
+                node2Funds[src].add(entry['Target name'])
+        searching = True
+        loopIdx = 0
+        while searching and loopIdx < 10:
+            searching = False 
+            loopIdx += 1
+            if loopIdx == 10:
+                print("WARNING: node2Funds build iteration reached maximum depth")
+            for node, targets in ([n,ts] for n,ts in node2Funds.items() if any(t in nodes for t in ts)): #iteratively assign any node's targets to the node's source
+                searching = True #turns back on if anything found to alter
+                tCopy = targets.copy()
+                for target in (t for t in tCopy if t in nodes):
+                    node2Funds[node].remove(target)
+                    node2Funds[node].update(node2Funds[target])
+        return node2Funds
     def findNodes(self,table1, table2 = None):
         tableEntries = [*table1,*table2] if table2 else table1
         targets = set(entry.get("Target name") for entry in tableEntries)
