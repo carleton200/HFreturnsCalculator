@@ -43,7 +43,7 @@ class PopupPanel(QWidget):
 
 
 class MultiSelectBox(QWidget):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, dispLib:dict = {'id2disp' : {}, 'disp2id' : {}}):
         super().__init__(parent)
 
         # ——— top line edit ———
@@ -53,6 +53,8 @@ class MultiSelectBox(QWidget):
         self.line_edit.clicked.connect(self._togglePopup)
         self.hierarchy = False
         self.currentItems = []
+        self.disp2id = dispLib['disp2id'].get
+        self.id2disp = dispLib['id2disp'].get
 
         # ——— pop-up panel ———
         self.popup = PopupPanel(self)
@@ -71,8 +73,10 @@ class MultiSelectBox(QWidget):
         main.setContentsMargins(0,0,0,0)
         self.setLayout(main)
     def updateOptionVisibility(self):
+        sbText = self.popup.searchBar.text().lower()
         for cbKey in self._checkboxes.keys():
-            self._checkboxes[cbKey].setVisible(self.popup.searchBar.text().lower() in self._checkboxes[cbKey].text().lower())
+            cb = self._checkboxes[cbKey]
+            cb.setVisible(sbText in cb.text().lower())
     def hierarchyMode(self):
         self.hierarchy = True
     def _togglePopup(self):
@@ -109,7 +113,7 @@ class MultiSelectBox(QWidget):
         for item in items:
             self.addItem(item)
     def addItem(self, text):
-        text = displayLinks.get(text,text) #put checkboxes to show the display version
+        text = self.id2disp(text,text) #put checkboxes to show the display version
         if text in self._checkboxes:
             return
         cb = QCheckBox(text, self.popup)
@@ -128,25 +132,22 @@ class MultiSelectBox(QWidget):
 
     def setCheckedItems(self, items):
         for text, cb in self._checkboxes.items():
-            text = displayLinks.get(text,text) # check as display version
+            text = self.disp2id(text,text) #check as display version
             if text in items:
                 cb.setChecked(True)
         self._updateLine()
     def setCheckedItem(self, item):
         for text, cb in self._checkboxes.items():
-            text = displayLinks.get(text,text) # check as display version
+            text = self.disp2id(text,text) #check as display version
             if text == item:
                 cb.setChecked(True)
         self._updateLine()
 
     def checkedItems(self):
         if self.hierarchy:
-            items = []
-            for item in self.currentItems:
-                items.append(displayLinks.get(item,item)) #revert to normal version for output
-            return items
+            return [self.disp2id(item,item) for item in self.currentItems]
         else:
-            return [displayLinks.get(t,t) for t, cb in self._checkboxes.items() if cb.isChecked()]
+            return [self.disp2id(t,t) for t, cb in self._checkboxes.items() if cb.isChecked()]
 
     def clearSelection(self):
         for cb in self._checkboxes.values():
@@ -163,7 +164,7 @@ class MultiSelectBox(QWidget):
         temp = self.hierarchy
         self.hierarchy = False
         sel = self.checkedItems()
-        sel = [displayLinks.get(item,item) for item in sel.copy()]
+        sel = [self.id2disp(item,item) for item in sel.copy()]
         self.hierarchy = temp
         if self.hierarchy:
             for idx, item in enumerate(self.currentItems): #check if item is removed.

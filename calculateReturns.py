@@ -10,7 +10,6 @@ from classes.windowClasses import *
 from classes.tableWidgets import *
 from classes.widgetClasses import *
 
-from scripts.processPool import processPool
 from scripts.basicFunctions import *
 from scripts.exportTableToExcel import exportTableToExcel
 from scripts.loggingFuncs import *

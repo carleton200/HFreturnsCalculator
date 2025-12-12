@@ -1,4 +1,5 @@
 from scripts.importList import *
+from scripts.commonValues import databaseName
 def instantiate_basics(BASE_DIR):
     # Determine assets path, works in PyInstaller bundle or script
     global ASSETS_DIR
@@ -15,7 +16,7 @@ def instantiate_basics(BASE_DIR):
     global executor
     global APIexecutor
     global gui_queue
-    DATABASE_PATH = os.path.join(ASSETS_DIR, 'Acc_Tran.db')
+    DATABASE_PATH = os.path.join(ASSETS_DIR, databaseName)
     TRAN_DATABASE_PATH = os.path.join(ASSETS_DIR, 'tranCalc.db')
     HELP_PATH = os.path.join(ASSETS_DIR,"helpInfo.txt")
 

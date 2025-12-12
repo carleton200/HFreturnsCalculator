@@ -1,6 +1,9 @@
 from scripts.importList import *
 from scripts.instantiate_basics import *
 from scripts.commonValues import *
+from scripts.basicFunctions import infer_sqlite_type
+from classes.nodeLibrary import nodeLibrary
+
 class DatabaseManager:
     """Thread-safe SQLite database manager.
 
@@ -118,29 +121,23 @@ class DatabaseManager:
             # calculations
             self.create_table_if_not_exists(
                 cur,
-                "calculations",
+                "nodeCalculations",
                 [
                     ("dateTime", "TEXT"),
-                    ("Investor", "TEXT"),
-                    ("Pool", "TEXT"),
-                    ("Fund", "TEXT"),
-                    ("assetClass", "TEXT"),
-                    ("subAssetClass", "TEXT"),
-                    ("subAssetSleeve", "TEXT"),
-                    ("NAV", "TEXT"),
-                    ("[Monthly Gain]", "TEXT"),
-                    ("[Return]", "TEXT"),
-                    ("MDdenominator", "TEXT"),
-                    ("Ownership", "TEXT"),
-                    ("Commitment", "TEXT"),
-                    ("Unfunded", "TEXT"),
-                    ("[IRR ITD]", "TEXT"),
-                    ("Classification", "TEXT"),
-                    ("[Calculation Type]", "TEXT"),
-                    ("[Family Branch]","TEXT"),
-                    ("ownershipAdjust", "TEXT"),
+                    ("[Source name]", "TEXT"),
+                    ("Node", "TEXT"),
+                    ("[Target name]", "TEXT"),
+                    ("NAV", "REAL"),
+                    ("[Monthly Gain]", "REAL"),
+                    ("[Return]", "REAL"),
+                    ("MDdenominator", "REAL"),
+                    ("Ownership", "REAL"),
+                    ("Commitment", "REAL"),
+                    ("Unfunded", "REAL"),
+                    ("[IRR ITD]", "REAL"),
+                    ("ownershipAdjust", "BOOL"),
                 ],
-                primary_keys=["dateTime", "Investor", "Pool", "Fund"]
+                primary_keys=["dateTime", "[Target name]", "Node", "[Source name]"]
             )
             # options
             self.create_table_if_not_exists(
@@ -170,7 +167,7 @@ class DatabaseManager:
                 [
                     ("dateTime", "TEXT"),
                     ("Pool", "TEXT"),
-                    ("[Transaction Sum]", "TEXT"),
+                    ("[Transaction Sum]", "REAL"),
                 ],
                 primary_keys=["dateTime", "Pool"]
             )
@@ -181,6 +178,18 @@ class DatabaseManager:
                 ("currentVersion", "TEXT"),
                 ("lastCalculation", "TEXT"),
                 ("changeDate", "TEXT")]
+            )
+            self.create_table_if_not_exists(
+                cur,
+                'nodes',
+                [
+                    ('id', 'INTEGER'),
+                    ('name' , 'TEXT'),
+                    ('lowestLevel', 'INTEGER'),
+                    ('above', 'TEXT'),
+                    ('below','TEXT')
+                ],
+                primary_keys=['id',]
             )
             cur.execute("SELECT * FROM history")
             history = cur.fetchall()
@@ -230,6 +239,100 @@ class DatabaseManager:
                 self.benchmarks = [row[0] for row in cursor.fetchall()]
                 cursor.close()
         return self.benchmarks
+    def fetchInvestors(self, update: bool = False):
+        if not hasattr(self, "investors") or update:
+            with self._lock:
+                cursor = self._conn.cursor()
+                cursor.execute("SELECT * FROM investors")
+                headers = [d[0] for d in cursor.description]
+                rows = [dict(zip(headers,row)) for row in cursor.fetchall()]
+                self.investors = rows
+                cursor.close()
+            self.investor2family = self.connectInvestor2family()
+        return self.investors
+    def connectInvestor2family(self):
+        investors = self.investors
+        inv2fam = {}
+        for investor in investors:
+            inv2fam[investor['Name']] = investor['Parentinvestor']
+        return inv2fam
+    def fetchFunds(self, update: bool = False):
+        if not hasattr(self, "funds") or update:
+            with self._lock:
+                rows = []
+                for tableName in ('funds', 'securities'):
+                    cursor = self._conn.cursor()
+                    cursor.execute(f"SELECT * FROM {tableName}")
+                    headers = [d[0] for d in cursor.description]
+                    rows.extend([dict(zip(headers,row)) for row in cursor.fetchall()])
+                self.funds = rows
+                cursor.close()
+            self.fund2trait = self.connectFund2Trait()
+        return self.funds
+    def fetchDyn2Key(self):
+        filtOpts = masterFilterOptions
+        dyn2key = {filt['fundDyn'] : filt['key'] for filt in filtOpts if filt['key'] not in nonFundCols}
+        return dyn2key
+    def connectFund2Trait(self):
+        dyn2key = self.fetchDyn2Key()
+        filtOpts = masterFilterOptions
+        dyn2key = {filt['fundDyn'] : filt['key'] for filt in filtOpts if filt['key'] not in nonFundCols}
+        fund2trait = {}
+        for fund in self.funds:
+            fund2trait[fund['Name']] = {}
+            for key, data in fund.items():
+                if key in dyn2key:
+                    fund2trait[fund['Name']][dyn2key[key]] = data
+        return fund2trait
+    def fetchFund2Trait(self):
+        if not hasattr(self,'fund2trait'):
+            self.fetchFunds()
+        return self.fund2trait
+    def fetchNodes(self, update: bool = False):
+        if not hasattr(self, "nodes") or update:
+            with self._lock:
+                cursor = self._conn.cursor()
+                cursor.execute("SELECT * FROM nodes")
+                headers = [d[0] for d in cursor.description]
+                rows = [dict(zip(headers,row)) for row in cursor.fetchall()]
+                self.nodes = rows
+                cursor.close()
+        return self.nodes
+    def pullId2Node(self):
+        nodes = self.fetchNodes()
+        id2Node = {node['id'] : node['name'] for node in nodes}
+        return id2Node
+    def pullInvestorsFromFamilies(self, familyBranches: list[str]):
+        investors = self.fetchInvestors()
+        return [investor['Name'] for investor in investors if investor['Parentinvestor'] in familyBranches]
+    def pullFundsFromFilters(self, filDict : dict[list[str]]):
+        try:
+            fund2trait = self.fetchFund2Trait()
+            filteredFunds = []
+            for fund_name, traits in fund2trait.items():
+                # Check if this fund matches all filter criteria
+                matches_all = True
+                for filKey, Options in filDict.items():
+                    # Get the trait value for this filter key
+                    trait_value = traits.get(filKey, "")
+                    if trait_value not in Options:
+                        matches_all = False
+                        break
+                if matches_all:
+                    filteredFunds.append(fund_name)
+            return filteredFunds
+        except Exception as e:
+            print(f"ERROR: Connecting funds to filter options failed: {e.args}")
+    def userDisplayLib(self):
+        dispDict = {'id2disp' : {}, 'disp2id' : {}}
+        dispDict['id2disp'] = {str(key) : str(val) for key,val in self.pullId2Node().items()}
+        for key, val in displayLinks.items():
+            dispDict['id2disp'][key] = val
+        dispDict['disp2id'] = {val : key for key,val in dispDict['id2disp'].items()} #reverse id2disp
+        return dispDict
+    def buildNodeLib(self, update:bool = False):
+        if not hasattr(self,'nodeLib'):
+            self.nodeLib = nodeLibrary([*load_from_db(self,'transactions'),*load_from_db(self,'positions')])
     def close(self) -> None:
         try:
             with self._lock:
@@ -253,13 +356,12 @@ def _batched_executemany(cursor, sql, values, batch_size, progress_label=None):
                 if progress == total_rows or (i // batch_size) % 5 == 0:
                     print(f"    {progress_label}: {progress}/{total_rows} rows inserted ({progress*100//total_rows}%)")
 
-def save_to_db(self, table, rows, action = "", query = "",inputs = None, keys = None):
+def save_to_db(db : DatabaseManager, table, rows, action = "", query = "",inputs = None, keys = None):
     cur = None
     try:
-        conn = self.db._conn
-        with self.db._lock:
-            cur = self.db.get_cursor()
-            batch_size = getattr(self.db, "batch_size", 50000)
+        conn = db._conn
+        with db._lock:
+            cur = db._conn.cursor()
             if action == "reset":
                 cur.execute(f"DROP TABLE IF EXISTS {table}")
                 conn.commit()
@@ -317,7 +419,14 @@ def save_to_db(self, table, rows, action = "", query = "",inputs = None, keys = 
                 else:
                     cols = list(keys)
                 quoted_cols = ','.join(f'"{c}"' for c in cols)
-                col_defs = ','.join(f'"{c}" TEXT' for c in cols)
+                # Dynamically determine column types based on variable values in the first row
+                
+
+                # Use the first row to infer data types, fallback to TEXT if empty
+                sample_row = rows[0] if rows else {}
+                col_defs = ','.join(
+                    f'"{c}" {infer_sqlite_type(sample_row.get(c, ""))}' for c in cols
+                )
                 placeholders = ','.join(sqlPlaceholder for _ in cols)
                 sql = f'INSERT INTO "{table}" ({quoted_cols}) VALUES ({placeholders})'
                 vals = [tuple(str(row.get(c, '')) for c in cols) for row in rows]
@@ -360,12 +469,12 @@ def save_to_db(self, table, rows, action = "", query = "",inputs = None, keys = 
                 cur.close()
         except:
             pass
-def load_from_db(self, table, condStatement = "",parameters = None):
-    cur = None
+        return False
+def load_from_db(db : DatabaseManager, table, condStatement = "",parameters = None):
     try:
-        conn = self.db._conn
-        with self.db._lock:
-            cur = self.db.get_cursor()
+        conn = db._conn
+        with db._lock:
+            cur = db._conn.cursor()
             try:
                 if condStatement != "" and parameters is not None:
                     processed_cond = condStatement.replace('?', sqlPlaceholder)
@@ -376,7 +485,7 @@ def load_from_db(self, table, condStatement = "",parameters = None):
                     cur.execute(f'SELECT * FROM {table}')
                 cols = [d[0] for d in cur.description]
                 rows = []
-                fetch_size = getattr(self.db, "fetch_batch_size", 2000)
+                fetch_size = getattr(db, "fetch_batch_size", 2000)
                 while True:
                     batch = cur.fetchmany(fetch_size)
                     if not batch:
@@ -385,12 +494,11 @@ def load_from_db(self, table, condStatement = "",parameters = None):
                 conn.commit()
                 return rows
             except Exception as e:
-                if parameters is not None and table != "calculations":
-                    print(f"Error loading from database: {e}, table: {table} condStatment: {condStatement}, parameters: {parameters}")
-                elif table != "calculations":
-                    print(f"Error loading from database: {e}, table: {table} condStatment: {condStatement}")
-                else:
-                    print(f"Info: {e}, {e.args}")
+                try:
+                    print(f"Error loading from database: {e}, table: {table} condStatment: {condStatement}, parameters: {parameters or ""}")
+                    cur.close()
+                except:
+                    pass
                 return []
     except:
         print("DB load failed. closing connections")

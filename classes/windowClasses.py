@@ -555,194 +555,159 @@ class underlyingDataWindow(QWidget):
             header = "Cash"
         hier = code.removeprefix("##(").removesuffix(")##").split("::")
         hierSelections = self.parent.sortHierarchy.checkedItems()
-        if dataType == "Fund":
+        if dataType == "Target name":
             hier.append(header)
             hierSelections.append(dataType)
-        if self.db:
-            highTables = {"transactions_high" : tranStart}
-            lowTables = {"transactions_low": tranStart}
-        else:
-            highTables = {"positions_high": accountStart,"transactions_high" : tranStart}
-            lowTables = {"positions_low": accountStart,"transactions_low": tranStart}
-        all_rows = []
-        if not self.db and (self.parent.filterDict["Investor"].checkedItems() != [] or self.parent.filterDict["Family Branch"].checkedItems() != []): #investor to pool level entries
-            for idx, table in enumerate(highTables.keys()):
-                query = "WHERE"
-                inputs = []
-                for hierIdx, tier in enumerate(hier):
-                    if tier == "hiddenLayer":
-                        continue #hidden layer should not affect the query
-                    for filter in self.parent.filterOptions:
-                        dynName = filter.get("dynNameHigh")
-                        if hierSelections[hierIdx] == filter["key"] and dynName is not None:
-                            if filter["key"] == "assetClass" and idx == 1:
-                                dynName = "SysProp_FundTargetNameAssetClass(E)"
-                            elif filter["key"] == "subAssetClass" and idx == 1:
-                                dynName = "SysProp_FundTargetNameSub-assetClass(E)"
-                            query += f" [{dynName}] = ? AND"
-                            inputs.append(tier)
-                            break #continue to next tier
-                if dataType == "Fund":
-                    query += " [Target name] = ? AND"
-                    inputs.append(self.parent.fundPoolLinks.get(header))
-                for filter in self.parent.filterOptions:
-                    filterSelections = self.parent.filterDict[filter["key"]].checkedItems()
-                    dynName = filter.get("dynNameHigh")
-                    if filter["key"] not in ("Classification") and filterSelections != [] and dynName is not None:
-                        if filter["key"] == "assetClass" and idx == 1:
-                            dynName = "SysProp_FundTargetNameAssetClass(E)"
-                        elif filter["key"] == "subAssetClass" and idx == 1:
-                            dynName = "SysProp_FundTargetNameSub-assetClass(E)"
-                        if filter["key"] == "subAssetSleeve":
-                            for sleeve in filterSelections:
-                                if self.parent.sleeveFundLinks.get(sleeve) is not None:
-                                    placeholders = ','.join('?' for _ in self.parent.sleeveFundLinks.get(tier)) 
-                                    query += f" [Target name] in ({placeholders}) AND"
-                                    inputs.extend(self.parent.sleeveFundLinks.get(tier))
-                                else:
-                                    print("Failed to find subAssetSleeve")
-                        else:
-                            placeholders = ','.join('?' for _ in filterSelections) 
-                            query += f" [{dynName}] in ({placeholders}) AND"
-                            inputs.extend(filterSelections)
-                inputs.extend([highTables[table],allEnd])
-                try:
-                    rows = load_from_db(self.parent,table,query.removesuffix("AND") + " AND [Date] BETWEEN ? AND ?", tuple(inputs))
-                except Exception as e:
-                    print(f"Error in call : {e} ; {e.args}")
-                    rows = []
-                for row in rows or []:
-                    row['_source'] = table
-                    all_rows.append(row)
-        elif self.db:
-            for idx, table in enumerate(highTables.keys()):
-                query = "WHERE"
-                inputs = []
-                for hierIdx, tier in enumerate(hier):
-                    if tier == "hiddenLayer":
-                        continue #hidden layer should not affect the query
-                    for filter in self.parent.filterOptions:
-                        dynName = filter.get("dynNameHigh")
-                        if hierSelections[hierIdx] == filter["key"] and dynName is not None:
-                            if filter["key"] == "assetClass" and idx == 1:
-                                dynName = "SysProp_FundTargetNameAssetClass(E)"
-                            elif filter["key"] == "subAssetClass" and idx == 1:
-                                dynName = "SysProp_FundTargetNameSub-assetClass(E)"
-                            query += f" [{dynName}] = ? AND"
-                            inputs.append(tier)
-                            break #continue to next tier
-                for filter in self.parent.filterOptions:
-                    filterSelections = self.parent.filterDict[filter["key"]].checkedItems()
-                    dynName = filter.get("dynNameHigh")
-                    if filter["key"] not in ("Classification") and filterSelections != [] and dynName is not None:
-                        if filter["key"] == "assetClass" and idx == 1:
-                            dynName = "SysProp_FundTargetNameAssetClass(E)"
-                        elif filter["key"] == "subAssetClass" and idx == 1:
-                            dynName = "SysProp_FundTargetNameSub-assetClass(E)"
-                        if filter["key"] == "subAssetSleeve":
-                            for sleeve in filterSelections:
-                                if self.parent.sleeveFundLinks.get(sleeve) is not None:
-                                    placeholders = ','.join('?' for _ in self.parent.sleeveFundLinks.get(tier)) 
-                                    query += f" [Target name] in ({placeholders}) AND"
-                                    inputs.extend(self.parent.sleeveFundLinks.get(tier))
-                                else:
-                                    print("Failed to find subAssetSleeve")
-                        else:
-                            placeholders = ','.join('?' for _ in filterSelections) 
-                            query += f" [{dynName}] in ({placeholders}) AND"
-                            inputs.extend(filterSelections)
-                inputs.extend([highTables[table],allEnd])
-                try:
-                    rows = load_from_db(self.parent,table,query.removesuffix("AND") + " AND [Date] BETWEEN ? AND ?", tuple(inputs))
-                except Exception as e:
-                    print(f"Error in call : {e} ; {e.args}")
-                    rows = []
-                for row in rows or []:
-                    row['_source'] = table
-                    all_rows.append(row)
-        for idx, table in enumerate(lowTables.keys()):
-            query = "WHERE"
-            inputs = []
-            for hierIdx, tier in enumerate(hier): #iterate through each tier down to selection
-                if tier == "hiddenLayer":
-                        continue #hidden layer should not affect the query
-                for filter in self.parent.filterOptions: #iterate through filter to find the matching keys
-                    dynName = filter.get("dynNameLow")
-                    if hierSelections[hierIdx] == filter["key"] and dynName is not None: #matching filter key
-                        if filter["key"] == "assetClass" and idx == 1:
-                            dynName = "SysProp_FundTargetNameAssetClass(E)"
-                        elif filter["key"] == "subAssetClass" and idx == 1:
-                            dynName = "SysProp_FundTargetNameSub-assetClass(E)"
-                        if filter["key"] == "subAssetSleeve":
-                            if self.parent.sleeveFundLinks.get(tier) is not None:
-                                placeholders = ','.join('?' for _ in self.parent.sleeveFundLinks.get(tier)) 
-                                query += f" [Target name] in ({placeholders}) AND"
-                                inputs.extend(self.parent.sleeveFundLinks.get(tier))
-                            else:
-                                print("Failed to find subAssetSleeve")
-                        elif filter["key"] == "Fund" and self.parent.cFundToFundLinks.get(tier) is not None: #account for consolidated funds
-                            funds = self.parent.cFundToFundLinks.get(tier)
-                            placeholders = ','.join('?' for _ in funds) 
-                            inputs.extend(funds)
-                            query += f" [Target name] in ({placeholders}) AND"
-                        else:
-                            query += f" [{dynName}] = ? AND"
-                            inputs.append(tier)
-                        break #continue to next tier
-            for filter in self.parent.filterOptions:
-                filterSelections = self.parent.filterDict[filter["key"]].checkedItems()
-                dynName = filter.get("dynNameLow")
-                if filterSelections != [] and dynName is not None:
-                    if filter["key"] == "assetClass" and idx == 1:
-                        dynName = "SysProp_FundTargetNameAssetClass(E)"
-                    elif filter["key"] == "subAssetClass" and idx == 1:
-                        dynName = "SysProp_FundTargetNameSub-assetClass(E)"
-                    if filter["key"] == "subAssetSleeve":
-                        for sleeve in filterSelections:
-                            if self.parent.sleeveFundLinks.get(sleeve) is not None:
-                                placeholders = ','.join('?' for _ in self.parent.sleeveFundLinks.get(sleeve)) 
-                                query += f" [Target name] in ({placeholders}) AND"
-                                inputs.extend(self.parent.sleeveFundLinks.get(sleeve))
-                            else:
-                                print("Failed to find subAssetSleeve")
+        self.parent.db.buildNodeLib()
+        nodeLib = self.parent.db.nodeLib
+        nodes = nodeLib.nodes
+        if 'Node' in hierSelections: 
+            #Check if needs extra node places. occurs from recursive node hierarchy
+            nodeIdx = hierSelections.index('Node')
+            # We want to ensure hierSelections matches up with hier; for every extra node at the appropriate positions, insert "Node"
+            # We iterate from nodeIdx forwards over hier, checking which items represent nodes that should be declared as such in hierSelections
+            i = nodeIdx
+            delta = 0  # How many have been inserted (shifts index in hierSelections)
+            while i + delta < len(hier):
+                val = hier[i + delta]
+                if val in nodes:
+                    # Only insert if this isn't already 'Node' at this position (in case already inserted)
+                    if i + delta >= len(hierSelections) or hierSelections[i + delta] != 'Node':
+                        hierSelections.insert(i + delta, 'Node')
+                        delta += 1
                     else:
-                        placeholders = ','.join('?' for _ in filterSelections) 
-                        query += f" [{dynName}] in ({placeholders}) AND"
-                        inputs.extend(filterSelections)
-            inputs.extend([lowTables[table],allEnd])
+                        # Already correct, move on
+                        pass
+                i += 1
+            nodeIdx = hierSelections.index('Node')
+            hierSelections = [*hierSelections[:nodeIdx], *(['Node'] * (len(hier) - len(hierSelections))), *hierSelections[nodeIdx:]]
+        tables = {"positions": accountStart,"transactions": tranStart} if not self.db else {"transactions": tranStart}
+        all_rows = []
+        if not self.db:
+            condStatement = "WHERE"
+            fundOptionSets = []
+            filterDict = {}
+            for hierIdx, tier in enumerate(hier): #iterate through each tier down to selection
+                tierType = hierSelections[hierIdx]
+                if tier == "hiddenLayer":
+                    continue #hidden layer should not affect the query
+                elif tierType == 'Node':
+                    #find all funds under node
+                    nodeName = tier
+                    if tier == '': #occurs from base nodes
+                        nodeName = header
+                    fundOptionSets.append(set(nodeLib.node2Funds[nodeName]))
+                elif tierType == 'Target name':
+                    fundOptionSets.append(set(self.parent.cFundToFundLinks.get(tier,[tier,])))
+                elif tierType not in nonFundCols:
+                    filterDict[tierType] = [tier,]
+            for key, cb in self.parent.filterDict.items():
+                opts = cb.checkedItems()
+                if key not in nonFundCols and opts and key not in filterDict.keys():
+                    filterDict[key] = opts
+            if filterDict:
+                fundOptionSets.append(set(self.parent.db.pullFundsFromFilters(filterDict)))
+            if fundOptionSets:
+                fundOpts = set.intersection(*(set(funds) for funds in fundOptionSets))
+                placeholders = ','.join('?' for _ in fundOpts)
+                condStatement = f"WHERE [Target name] in ({placeholders}) AND [Date] BETWEEN ? AND ?"
+                inputs = list(fundOpts)
+            else:
+                print("WARNING: No relevant funds found for the cell selected.")
+                condStatement = f"WHERE [Date] BETWEEN ? AND ?"
+                inputs = []
+            sourceNames = set()
+            for table, start in tables.items():
+                try:
+                    baseRows = load_from_db(self.parent.db,table,condStatement, tuple((*inputs,start,allEnd)))
+                except Exception as e:
+                    print(f"Error in call : {e} ; {e.args}")
+                    baseRows = []
+                sourceNames.update([row['Source name'] for row in baseRows])
+                all_rows.extend(baseRows)
+            loopIdx = 0
+            nodeCrosses = set()
+            lowNodes = nodeLib.lowNodes
+            while any(src in lowNodes for src in sourceNames) and loopIdx < 10: #handle intermediate (nodal) entries/connections
+                loopIdx += 1
+                if loopIdx == 10:
+                    print('WARNING: Iterative search through lowNodes for underlying data has reached maximum iteration')
+                currentSearch = [src for src in sourceNames if src in lowNodes]
+                nodeCrosses.update(n for n in sourceNames if n in nodes)
+                sourceNames = [src for src in sourceNames if src not in currentSearch] #remove middle nodes found for next search
+                placeholders = ','.join('?' for _ in currentSearch)
+                condStatement = f'WHERE [Target name] in ({placeholders})  AND [Date] BETWEEN ? AND ?'
+                interRows = []
+                for table, start in tables.items():
+                    try:
+                        rows = load_from_db(self.parent.db,table,condStatement, tuple((*currentSearch,start,allEnd)))
+                    except Exception as e:
+                        print(f"Error in call : {e} ; {e.args}")
+                        rows = []
+                    interRows.extend(rows)
+                sourceNames.extend([row['Source name'] for row in interRows])
+                all_rows.extend([row for row in interRows if row['Source name'] in nodes]) #tracks intermediate entries only as investors are filtered later
+            nodeCrosses = nodeCrosses | set((src for src in sourceNames if src in nodes))
+            if loopIdx > 0:
+                print(f"INFO: Completed iterative underlying data search in {loopIdx} iterations.")
+            else:
+                nodeCrosses = sourceNames
+            invSelections = self.parent.filterDict["Source name"].checkedItems()
+            famSelections = self.parent.filterDict["Family Branch"].checkedItems()
+            if invSelections != [] or famSelections != []: #handle investor level     
+                invsF = set()
+                for fam in famSelections:
+                    invsF.update(self.parent.db.pullInvestorsFromFamilies(fam))
+                invsI = set(invSelections)
+                if invSelections != [] and famSelections != []: #Union if both are selected
+                    invs = invsF and invsI
+                else: #combine if only one is valid
+                    invs = invsF or invsI
+                placeholders = ','.join('?' for _ in invs)
+                sourcePlaceHolders = ','.join('?' for _ in nodeCrosses)
+                condStatement = f'WHERE ([Source name] in ({placeholders}) AND [Target name] in ({sourcePlaceHolders}))'
+                inputs = list(invs)
+                inputs.extend(nodeCrosses)
+                for table, start in tables.items():
+                    try:
+                        upperRows = load_from_db(self.parent.db,table,condStatement.removesuffix("AND") + " AND [Date] BETWEEN ? AND ?", tuple((*inputs,start,allEnd)))
+                    except Exception as e:
+                        print(f"Error in call : {e} ; {e.args}")
+                        baseRows = []
+                    all_rows.extend(upperRows)
+        elif self.db:
             try:
-                rows = load_from_db(self.parent,table,query.removesuffix("AND") + " AND [Date] BETWEEN ? AND ?", tuple(inputs))
+                condStatement = 'WHERE ([Source name] = ? OR [Target name] = ?)'
+                inputs = (header,header, tranStart, allEnd)
+                all_rows = load_from_db(self.parent.db,'transactions',condStatement.removesuffix("AND") + " AND [Date] BETWEEN ? AND ?", tuple(inputs))
             except Exception as e:
-                print(f"Error in call : {e}; {e.args}")
-                rows = []
-            for row in rows or []:
-                row['_source'] = table
-                all_rows.append(row) 
+                print(f"Error in call : {e} ; {e.args}")
+                all_rows = []
         self.allData = all_rows
 
         if self.db:
             #build organized differences by pool/investor versus transaction type
-            diffTableDict = { "Total" : {"Transaction Type" : "Total", "Pool Cashflow" : 0, "Investor Cashflow" : 0}} 
+            diffTableDict = { "Total" : {"Transaction Type" : "Total", "Below Cashflow" : 0, "Above Cashflow" : 0}} 
             for transaction in all_rows: #build dict for easy sorting
                 if transaction.get("CashFlowSys") not in (None,"None"):
                     tranType = transaction.get("TransactionType")
                     if tranType not in diffTableDict:
-                        diffTableDict[tranType] = {"Transaction Type" : tranType, "Pool Cashflow" : 0, "Investor Cashflow" : 0}
-                    if transaction.get("_source") == "transactions_low":
-                        diffTableDict[tranType]["Pool Cashflow"] += float(transaction.get("CashFlowSys"))
-                        diffTableDict["Total"]["Pool Cashflow"] += float(transaction.get("CashFlowSys"))
-                    elif transaction.get("_source") == "transactions_high":
-                        diffTableDict[tranType]["Investor Cashflow"] += float(transaction.get("CashFlowSys"))
-                        diffTableDict["Total"]["Investor Cashflow"] += float(transaction.get("CashFlowSys"))
+                        diffTableDict[tranType] = {"Transaction Type" : tranType, "Below Cashflow" : 0, "Above Cashflow" : 0}
+                    if transaction.get("Source name") == header:
+                        diffTableDict[tranType]["Below Cashflow"] += float(transaction.get("CashFlowSys"))
+                        diffTableDict["Total"]["Below Cashflow"] += float(transaction.get("CashFlowSys"))
+                    elif transaction.get("Target name") == header:
+                        diffTableDict[tranType]["Above Cashflow"] += float(transaction.get("CashFlowSys"))
+                        diffTableDict["Total"]["Above Cashflow"] += float(transaction.get("CashFlowSys"))
                     
             diffTable = []
             for tranType in diffTableDict: #calculate differences and put in list of dicts for table
                 if tranType != "Total":
-                    diffTableDict[tranType]["Difference"] = diffTableDict.get(tranType).get("Pool Cashflow") - diffTableDict.get(tranType).get("Investor Cashflow")
+                    diffTableDict[tranType]["Difference"] = diffTableDict.get(tranType).get("Below Cashflow") - diffTableDict.get(tranType).get("Above Cashflow")
                     diffTable.append(diffTableDict.get(tranType))
-            diffTableDict["Total"]["Difference"] = diffTableDict.get("Total").get("Pool Cashflow") - diffTableDict.get("Total").get("Investor Cashflow")
+            diffTableDict["Total"]["Difference"] = diffTableDict.get("Total").get("Below Cashflow") - diffTableDict.get("Total").get("Above Cashflow")
             diffTable.append(diffTableDict.get("Total"))
-            diffHeaders = ["Transaction Type", "Pool Cashflow", "Investor Cashflow", "Difference"]
+            diffHeaders = ["Transaction Type", "Below Cashflow", "Above Cashflow", "Difference"]
             self.parent.openTableWindow(diffTable, name = f"Transaction types for {hier} in {selectedMonth}", headers = diffHeaders)
 
         if len(all_rows) == 0:
@@ -789,9 +754,7 @@ class underlyingDataWindow(QWidget):
 @attach_logging_to_class
 class tableWindow(QWidget):
     """
-    A window that loads data from four database sources in the parent,
-    merges and sorts it by dateTime, and displays it in a QTableWidget
-    with a unified set of columns.
+    A window that loads basic rows and displays as a table
     """
     def __init__(self, parent=None, flags=Qt.WindowFlags(), parentSource = None, all_rows = [], table = "", headers = None):
         super().__init__(parent, flags)

@@ -1,6 +1,176 @@
+from classes import nodeLibrary
 from scripts.importList import *
 from scripts.commonValues import *
 from scripts.instantiate_basics import *
+
+def infer_sqlite_type(val):
+    # Try to infer column types in SQLite: INTEGER, REAL, TEXT, or BLOB
+    if val is None:
+        return "TEXT"
+    try:
+        # int, but not bool (bool is a subclass of int in Python)
+        if type(val) is int:
+            return "INTEGER"
+        if type(val) is float:
+            return "REAL"
+        if type(val) is bytes:
+            return "BLOB"
+        # Try conversion for number-like strings
+        sval = str(val)
+        try:
+            int(sval)
+            return "INTEGER"
+        except Exception:
+            pass
+        try:
+            float(sval)
+            return "REAL"
+        except Exception:
+            pass
+        return "TEXT"
+    except Exception:
+        return "TEXT"
+
+def findSign(num: float):
+    if num == 0:
+        return 0
+    return num / abs(num)
+
+def nodalToLinkedCalculations(calcs, nodePath : list[int] = None):
+    for idx, _ in enumerate(calcs): #build to final calculation format from the node style
+        calcs[idx].pop('Node')
+        calcs[idx]['nodePath'] = " " + nodePathSplitter.join((str(n) for n in nodePath)) + " " if nodePath else None
+    return calcs
+
+def handleFundClasses(entryList):
+    split = {}
+    foundDuplicate = False
+    for entry in entryList: #split the entries by fundclass to check for duplicates
+        fundClass = entry.get(nameHier["FundClass"]["dynLow"])
+        if fundClass not in split:
+            split[fundClass] = [entry,]
+        else:
+            split[fundClass].append(entry)
+            foundDuplicate = True
+    singleEntries = []
+    if foundDuplicate: #if duplicates, loop through to find the best balance type
+        for fundClass in split: #loop by fund
+            if len(split.get(fundClass)) > 1: #check if duplicates
+                foundType = False
+                for balanceType in balanceTypePriority: #loop through balance types by priority
+                    for entry in split.get(fundClass): #loop through the duplicate entries
+                        if entry.get("Balancetype") == balanceType and entry.get(nameHier["Value"]["dynLow"]) not in (None,"None"): #if the balance type is preferred, add the entry and break
+                            singleEntries.append(entry)
+                            foundType = True
+                            break
+                    if foundType: #stop balance type checking if found
+                        break
+                if not foundType: #reaches if nothing was found
+                    for entry in split.get(fundClass): #loop through to find the first with a value
+                        if entry.get(nameHier["Value"]["dynLow"]) not in (None,"None"): #if the balance type is preferred, add the entry and break
+                            singleEntries.append(entry)
+                            foundType = True
+                            break
+                    if not foundType: #final attempt take first entry
+                        singleEntries.append(split.get(fundClass)[0])
+            else: #no duplicates for this fund
+                singleEntries.append(split.get(fundClass)[0])
+    else:
+        singleEntries.extend(entryList)
+    tempNAV = 0
+    for entry in singleEntries:
+        if entry.get(nameHier["Value"]["dynLow"]) not in (None,0,"None"):
+            tempNAV += float(entry.get(nameHier["Value"]["dynLow"])) #adds values to the first index
+    entryList[0][nameHier["Value"]["dynLow"]] = str(tempNAV)
+    return entryList
+
+def get_connected_node_groups(nodePaths):
+    """
+    Returns a list of sets, each containing the names of nodes that are connected directly
+    or transitively via 'above' and 'below' relationships in nodePaths.
+    """
+    # Build undirected graph from above/below relationships
+    from collections import deque, defaultdict
+
+    # Make an adjacency list (undirected)
+    adjacency = defaultdict(set)
+    for node, info in nodePaths.items():
+        # Convert id sets to names
+        aboves = info.get('above', set())
+        belows = info.get('below', set())
+        for a_id in aboves:
+            # find node name for each id
+            for other_name, other_info in nodePaths.items():
+                if other_info['id'] == a_id:
+                    adjacency[node].add(other_name)
+                    adjacency[other_name].add(node)
+        for b_id in belows:
+            for other_name, other_info in nodePaths.items():
+                if other_info['id'] == b_id:
+                    adjacency[node].add(other_name)
+                    adjacency[other_name].add(node)
+
+    visited = set()
+    groups = []
+
+    # BFS to find connected components
+    for node in nodePaths:
+        if node not in visited:
+            group = set()
+            q = deque([node])
+            while q:
+                current = q.popleft()
+                if current not in visited:
+                    visited.add(current)
+                    group.add(current)
+                    for neighbor in adjacency[current]:
+                        if neighbor not in visited:
+                            q.append(neighbor)
+            groups.append(group)
+    return groups
+
+def recursLinkCalcs(baseCalcs, monthDT, nodeLvl : int, node :str, currPath: list, nodeLib : nodeLibrary, clumpCalculationsDict: dict[dict[list[dict]]]):
+    linkedCalcs = []
+    aboveIds = nodeLib.nodePaths[node]['above']
+    aboveNodes = list(nodeLib.id2node[aboveID] for aboveID in aboveIds)
+    aboveCalcDict = {aboveNode : [] for aboveNode in aboveNodes}
+    baseCalcs = [calc for calc in baseCalcs if calc['Target name'] in nodeLib.targets]
+    for belowCalc in baseCalcs:
+        if belowCalc['Source name'] not in aboveNodes:
+            #Scenario 1: calcs have linked to their highest level (investor) Return with nodePath
+            tempCalc = belowCalc.copy()
+            tempCalc.pop('Node')
+            tempCalc['nodePath'] = " " + nodePathSplitter.join([str(item) for item in reversed(currPath)]) + " "
+            linkedCalcs.append(tempCalc)
+        else:
+            #Scenario 2: Calc needs to be linked and divided amongst the higher nodal levels and split by node for further recursion
+            aboveNode = belowCalc['Source name']
+            aboveCnctCalcs = [calc for calc in clumpCalculationsDict[nodeLvl - 1].get(aboveNode,{}).get(monthDT,[]) if calc['Target name'] == node]
+            for aboveCalc in aboveCnctCalcs: #string the higher level calculations directly to the node's lower level target by ownership
+                tempCalc = belowCalc.copy()
+                tempCalc['Source name'] = aboveCalc['Source name']
+                nodeOwnershipFrac = aboveCalc['Ownership'] / 100
+                targetOwnershipFrac = nodeOwnershipFrac * belowCalc['Ownership'] / 100
+                for field in ('NAV','Monthly Gain', 'MDdenominator'): #split by ownership of the node's investment
+                    tempCalc[field] = tempCalc[field] * nodeOwnershipFrac
+                tempCalc['Ownership'] = targetOwnershipFrac * 100
+                tempCalc['IRR ITD'] = None
+                tempCalc['Return'] = tempCalc['Monthly Gain'] / tempCalc['MDdenominator'] * 100 if tempCalc['MDdenominator'] != 0.0 else 0.0
+                aboveCalcDict[aboveNode].append(tempCalc)
+    for aboveNode, aboveCalcs in aboveCalcDict.items(): 
+        #split all higher linked calculations to their recursion. Ones already at their peak will be returned by scenario 1
+        aboveID = nodeLib.node2id[aboveNode]
+        linkedCalcs.extend(recursLinkCalcs(aboveCalcs,monthDT,nodeLvl - 1, aboveNode, [*currPath,aboveID], nodeLib, clumpCalculationsDict))
+    return linkedCalcs
+                
+
+
+
+
+
+
+
+
 def calculate_xirr(cash_flows, dates, guess : float = None):
     try:
         if cash_flows[-1] == 0:
@@ -34,7 +204,7 @@ def findSign(num: float):
         return 0
     return num / abs(num)
 
-def accountBalanceKey(accEntry):
+def accountBalanceKey(accEntry : dict):
     try:
         key = accEntry["Date"] + "_" + accEntry["Source name"] + "_" + accEntry["Target name"]
         for accountField in ("Balancetype"):
@@ -79,7 +249,9 @@ def submitAPIcall(self, fn, *args, **kwargs):
 def updateStatus(self, pool,totalLoops, status = "Working"):
     try:
         failure = any(self.workerProgress.get(progKey).get("status") == "Failed" for progKey in self.workerProgress)
-        if status == "Initialization":
+        if pool == 'DummyFail':
+            self.workerProgress['DummyFail'] = {'pool' : pool, 'completed' : 1, 'total' : totalLoops, 'status' : status}
+        elif status == "Initialization":
             self.workerProgress[pool] = {'pool' : pool, 'completed' : -1, 'total' : totalLoops, 'status' : status}
         elif status == "Working":
             self.workerProgress[pool]["completed"] += 1
