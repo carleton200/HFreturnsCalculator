@@ -124,6 +124,24 @@ class returnsApp(QWidget):
         self.stack.setCurrentIndex(start_index)
         self.main_layout.addWidget(self.stack)
         self.setLayout(self.main_layout)
+    def closeEvent(self, event):
+        """Called when the widget is being closed."""
+        try:
+            # Close any pools
+            if hasattr(self, 'pool'):
+                self.pool.close()
+                self.pool.join()
+            # Close database connection
+            if hasattr(self, 'db') and hasattr(self.db, '_conn'):
+                print("Closing database connection...")
+                self.db._conn.close()
+            
+            
+        except Exception as e:
+            print(f"Error during cleanup: {e}")
+        
+        # Accept the close event to allow the window to close
+        event.accept()
     def init_global_widgets(self):
         headerBox = QWidget()
         headerLayout = QHBoxLayout()

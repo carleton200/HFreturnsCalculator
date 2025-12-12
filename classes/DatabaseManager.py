@@ -19,8 +19,9 @@ class DatabaseManager:
         self.database = "CRSPRdata"
         self.username = "carleton2022"
         self.password = "Griffine1124"
-        driver = 'ODBC Driver 17 for SQL Server'  # Ensure this driver is installed
-        #self.connString = f"DRIVER={{{driver}}}; SERVER={server}; DATABASE={database}; UID={username}; PWD={password}; Connect Timeout=3" 
+        self.driver = 'ODBC Driver 18 for SQL Server'
+        self.batch_size = 50000
+        self.fetch_batch_size = 2000
         self.instantiateConnections()
         self.instantiateTables()
 
@@ -48,23 +49,37 @@ class DatabaseManager:
                     print("Connection successful!")
                     break
 
-                except pymssql.Error as e:
+                except pyodbc.Error as e:
                     print("Error connecting to the database:", e)
                     pass
     def makeConnection(self):
         if not remoteDBmode:
             conn = sqlite3.connect(self.db_path, check_same_thread=False)
         else:
-            print("Attempting connection with pymssql...")
-            conn = pymssql.connect(
-                server=self.server,
-                database=self.database,
-                user=self.username,
-                password=self.password,
-                timeout=30
+            print("Attempting connection with pyodbc...")
+            conn = pyodbc.connect(
+                f"DRIVER={{{self.driver}}};"
+                f"SERVER={self.server};"
+                f"DATABASE={self.database};"
+                f"UID={self.username};"
+                f"PWD={self.password};"
+                "Encrypt=yes;"
+                "TrustServerCertificate=yes;"
+                "Connection Timeout=30;",
+                autocommit=False,
             )
-            print("✓ pymssql connection successful!")
+            print("✓ pyodbc connection successful!")
         return conn
+
+    def get_cursor(self):
+        cursor = self._conn.cursor()
+        if remoteDBmode:
+            try:
+                cursor.fast_executemany = True
+            except AttributeError:
+                pass
+            cursor.arraysize = self.fetch_batch_size
+        return cursor
     def create_table_if_not_exists(self, cur, table_name, columns, primary_keys=None):
         """
         Helper to create table for both sqlite and remote modes.
@@ -102,7 +117,7 @@ class DatabaseManager:
     def instantiateTables(self) -> None:
         """Instantiate the tables in the database."""
         with self._lock:
-            cur = self._conn.cursor()
+            cur = self.get_cursor()
             # calculations
             self.create_table_if_not_exists(
                 cur,
@@ -189,7 +204,7 @@ class DatabaseManager:
             self.options = {}
         if not hasattr(self.options, grouping) or update:
             with self._lock:
-                cursor = self._conn.cursor()
+                cursor = self.get_cursor()
                 cursor.execute(f"SELECT * FROM options WHERE grouping = {sqlPlaceholder}", (grouping,))
                 headers = [d[0] for d in cursor.description]
                 options = [dict(zip(headers, row)) for row in cursor.fetchall()]
@@ -198,7 +213,7 @@ class DatabaseManager:
         return self.options[grouping]
     def saveAsset3Visibility(self, visibility : list):
         with self._lock:
-            cursor = self._conn.cursor()
+            cursor = self.get_cursor()
             cursor.execute(f"DELETE FROM options WHERE grouping = {sqlPlaceholder}", ("asset3Visibility",))
             for vis in visibility:
                 cursor.execute(f"INSERT INTO options (grouping, id, value) VALUES ({sqlPlaceholder}, {sqlPlaceholder}, {sqlPlaceholder})", ("asset3Visibility", vis, "hide"))
@@ -210,7 +225,7 @@ class DatabaseManager:
     def fetchBenchmarkLinks(self, update: bool = False):
         if not hasattr(self, "benchmarkLinks") or update:
             with self._lock:
-                cursor = self._conn.cursor()
+                cursor = self.get_cursor()
                 cursor.execute("SELECT * FROM benchmarkLinks")
                 headers = [d[0] for d in cursor.description]
                 self.benchmarkLinks = [dict(zip(headers, row)) for row in cursor.fetchall()]
@@ -219,7 +234,7 @@ class DatabaseManager:
     def fetchBenchmarks(self, update: bool = False):
         if not hasattr(self, "benchmarks") or update:
             with self._lock:
-                cursor = self._conn.cursor()
+                cursor = self.get_cursor()
                 cursor.execute("SELECT DISTINCT [Index] FROM benchmarks")
                 self.benchmarks = [row[0] for row in cursor.fetchall()]
                 cursor.close()
@@ -326,7 +341,23 @@ class DatabaseManager:
             pass
 
 
+def _batched_executemany(cursor, sql, values, batch_size, progress_label=None):
+        total_rows = len(values)
+        if total_rows == 0:
+            return
+        if total_rows <= batch_size:
+            cursor.executemany(sql, values)
+            return
+        for i in range(0, total_rows, batch_size):
+            batch_vals = values[i:i+batch_size]
+            cursor.executemany(sql, batch_vals)
+            if progress_label:
+                progress = min(i + batch_size, total_rows)
+                if progress == total_rows or (i // batch_size) % 5 == 0:
+                    print(f"    {progress_label}: {progress}/{total_rows} rows inserted ({progress*100//total_rows}%)")
+
 def save_to_db(db : DatabaseManager, table, rows, action = "", query = "",inputs = None, keys = None):
+    cur = None
     try:
         conn = db._conn
         with db._lock:
@@ -342,52 +373,43 @@ def save_to_db(db : DatabaseManager, table, rows, action = "", query = "",inputs
                 conn.commit()
             elif action == "add":
                 try:
-                    for row in rows:
-                        cols = list(row.keys())
+                    if not rows:
+                        print(f"No rows found for data input to '{table}'")
+                    else:
+                        cols = list(rows[0].keys())
                         quoted_cols = ','.join(f'"{c}"' for c in cols)
                         placeholders = ','.join(sqlPlaceholder for _ in cols)
                         sql = f'INSERT INTO "{table}" ({quoted_cols}) VALUES ({placeholders})'
-                        vals = tuple(str(row.get(c, '')) for c in cols)
-                        cur.execute(sql,vals)
+                        vals = [tuple(str(row.get(c, '')) for c in cols) for row in rows]
+                        _batched_executemany(cur, sql, vals, batch_size)
                         conn.commit()
                 except Exception as e:
                     print(f"Error inserting row into database: {e}")
                     print("e.args:", e.args)
-                    # maybe also:
                     try:
                         print(traceback.format_exc())
                     except:
                         pass
             elif action == "calculationUpdate":
                 try:
-                    cur.execute(f"DELETE FROM calculations WHERE [dateTime] = {sqlPlaceholder}", inputs) #inputs input should be the date for deletion
-                    # Batch the inserts for better performance
+                    cur.execute(f"DELETE FROM calculations WHERE [dateTime] = {sqlPlaceholder}", inputs)
                     if rows:
                         cols = list(rows[0].keys())
                         quoted_cols = ','.join(f'"{c}"' for c in cols)
                         placeholders = ','.join(sqlPlaceholder for _ in cols)
-                        sql = (f"INSERT INTO calculations ({quoted_cols}) VALUES ({placeholders})")
-                        
-                        BATCH_SIZE = 50000
-                        total_rows = len(rows)
-                        for i in range(0, total_rows, BATCH_SIZE):
-                            batch = rows[i:i+BATCH_SIZE]
-                            vals = [tuple(str(row.get(c, '')) for c in cols) for row in batch]
-                            cur.executemany(sql, vals)
-                            if i % (BATCH_SIZE * 10) == 0:  # Progress every 10 batches
-                                print(f"  Inserted {min(i+BATCH_SIZE, total_rows)}/{total_rows} calculations...")
-                        conn.commit()
+                        sql = f"INSERT INTO calculations ({quoted_cols}) VALUES ({placeholders})"
+                        vals = [tuple(str(row.get(c, '')) for c in cols) for row in rows]
+                        _batched_executemany(cur, sql, vals, batch_size, progress_label="calculations")
+                    conn.commit()
                 except Exception as e:
                     print(f"Error updating calculations in database: {e}")
                     print("e.args:", e.args)
-                    # maybe also:
                     try:
                         import traceback
                         print(traceback.format_exc())
                     except:
                         pass
             elif action == "replace":
-                # Replace ? placeholders with the appropriate placeholder for the current DB mode
                 processed_query = query.replace('?', sqlPlaceholder)
                 cur.execute(processed_query,inputs)
                 conn.commit()
@@ -407,74 +429,44 @@ def save_to_db(db : DatabaseManager, table, rows, action = "", query = "",inputs
                 )
                 placeholders = ','.join(sqlPlaceholder for _ in cols)
                 sql = f'INSERT INTO "{table}" ({quoted_cols}) VALUES ({placeholders})'
-                
-                # Prepare all values first
                 vals = [tuple(str(row.get(c, '')) for c in cols) for row in rows]
-                
                 colFail = False
                 try: 
-                    # Use TRUNCATE for remote DB (faster), DELETE for SQLite
                     if remoteDBmode:
                         cur.execute(f'TRUNCATE TABLE [{table}]')
                     else:
                         cur.execute(f'DELETE FROM "{table}"')
                     colFail = True
-                    
-                    # Batch the inserts for better performance with large datasets
                     total_rows = len(vals)
-                    BATCH_SIZE = 50000
-
-                    if total_rows > BATCH_SIZE:
-                        print(f"  Inserting {total_rows} rows into {table} in batches of {BATCH_SIZE}...")
-                        for i in range(0, total_rows, BATCH_SIZE):
-                            batch_vals = vals[i:i+BATCH_SIZE]
-                            cur.executemany(sql, batch_vals)
-                            conn.commit()  # Commit after each batch
-                            progress = min(i+BATCH_SIZE, total_rows)
-                            if (i // BATCH_SIZE) % 5 == 0 or progress == total_rows:  # Progress every 5 batches
-                                print(f"    {table}: {progress}/{total_rows} rows inserted ({progress*100//total_rows}%)")
-                    else:
-                        # Small datasets can be inserted all at once
-                        cur.executemany(sql, vals)
-                        conn.commit()
-                        
-                except Exception as e: #will fail if the table doesn't exist, so build the table from scratch
-                    if colFail: #occurs if the table exists, but the columns don't match
+                    if total_rows > batch_size:
+                        print(f"  Inserting {total_rows} rows into {table} in batches of {batch_size}...")
+                    _batched_executemany(cur, sql, vals, batch_size, progress_label=table if total_rows > batch_size else None)
+                    conn.commit()
+                except Exception as e:
+                    if colFail:
                         logging.warning(f"Bad columns were attempted to be inserted into table {table}. {e.args}")
                         print(f"Bad columns were attempted to be inserted into table {table}. {e.args}")
                         cur.execute(f"DROP TABLE {table}")
                     if not remoteDBmode:
                         cur.execute(f'CREATE TABLE IF NOT EXISTS "{table}" ({col_defs})')
                     else:
-                        # Compose a CREATE TABLE statement for pymssql/MS SQL Server
                         col_defs_mssql = ','.join(f'[{c}] NVARCHAR(MAX)' for c in cols)
                         cur.execute(f'IF OBJECT_ID(N\'{table}\', N\'U\') IS NULL CREATE TABLE [{table}] ({col_defs_mssql})')
-                    
-                    # Retry with batching after table creation
                     total_rows = len(vals)
-                    BATCH_SIZE = 50000
-                    if total_rows > BATCH_SIZE:
-                        print(f"  Inserting {total_rows} rows into {table} in batches of {BATCH_SIZE}...")
-                        for i in range(0, total_rows, BATCH_SIZE):
-                            batch_vals = vals[i:i+BATCH_SIZE]
-                            cur.executemany(sql, batch_vals)
-                            conn.commit()
-                            progress = min(i+BATCH_SIZE, total_rows)
-                            if (i // BATCH_SIZE) % 5 == 0 or progress == total_rows:
-                                print(f"    {table}: {progress}/{total_rows} rows inserted ({progress*100//total_rows}%)")
-                    else:
-                        cur.executemany(sql, vals)
-                        conn.commit()
-                
-                
-                cur.close()
+                    if total_rows > batch_size:
+                        print(f"  Inserting {total_rows} rows into {table} in batches of {batch_size}...")
+                    _batched_executemany(cur, sql, vals, batch_size, progress_label=table if total_rows > batch_size else None)
+                    conn.commit()
             else:
                 print(f"No rows found for data input to '{table}'")
-            return True
+        return True
     except Exception as e:
         print(f"DB save failed. closing connections {e}, {e.args}") 
+        return False
+    finally:
         try:
-            cur.close()
+            if cur:
+                cur.close()
         except:
             pass
         return False
@@ -485,7 +477,6 @@ def load_from_db(db : DatabaseManager, table, condStatement = "",parameters = No
             cur = db._conn.cursor()
             try:
                 if condStatement != "" and parameters is not None:
-                    # Replace ? placeholders with the appropriate placeholder for the current DB mode
                     processed_cond = condStatement.replace('?', sqlPlaceholder)
                     cur.execute(f'SELECT * FROM {table} {processed_cond}',parameters)
                 elif condStatement != "" and parameters is None:
@@ -493,9 +484,14 @@ def load_from_db(db : DatabaseManager, table, condStatement = "",parameters = No
                 else:
                     cur.execute(f'SELECT * FROM {table}')
                 cols = [d[0] for d in cur.description]
-                rows = [dict(zip(cols, row)) for row in cur.fetchall()]
+                rows = []
+                fetch_size = getattr(db, "fetch_batch_size", 2000)
+                while True:
+                    batch = cur.fetchmany(fetch_size)
+                    if not batch:
+                        break
+                    rows.extend(dict(zip(cols, row)) for row in batch)
                 conn.commit()
-                cur.close()
                 return rows
             except Exception as e:
                 try:
@@ -506,7 +502,10 @@ def load_from_db(db : DatabaseManager, table, condStatement = "",parameters = No
                 return []
     except:
         print("DB load failed. closing connections")
+        return []
+    finally:
         try:
-            cur.close()
+            if cur:
+                cur.close()
         except:
             pass

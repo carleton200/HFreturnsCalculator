@@ -67,6 +67,8 @@ percent_headers = {option for option in timeOptions}
 for header in ("Return","Ownership"):
     percent_headers.add(header)
 
+batch_size = 50000
+
 if remoteDBmode:
     sqlPlaceholder = "%s"
 else:

@@ -198,6 +198,12 @@ def calculate_xirr(cash_flows, dates, guess : float = None):
         return None
 def descendingNavSort(input : dict):
     return sorted(input.keys(), key=lambda x: float(input.get(x,0.0)) * -1)
+
+def findSign(num: float):
+    if num == 0:
+        return 0
+    return num / abs(num)
+
 def accountBalanceKey(accEntry : dict):
     try:
         key = accEntry["Date"] + "_" + accEntry["Source name"] + "_" + accEntry["Target name"]
@@ -211,7 +217,7 @@ def annualizeITD(cumITD, monthCount):
     if monthCount < 12: #ITD for less than a year is essentially YTD style
         return (cumITD - 1) * 100
     elif cumITD > 0:
-        return (cumITD ** (12/monthCount)) - 1
+        return ((cumITD ** (12/monthCount)) - 1) * 100
     else:
         return 'N/A'
 
