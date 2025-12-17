@@ -12,11 +12,13 @@ class nodeLibrary:
  
 
     def findNode2Funds(self,tableEntries,nodes):
-        node2Funds = {node : set() for node in nodes}
+        node2Funds = {node : set() for node in (*nodes,'None')}
         for entry in tableEntries:
             src = entry['Source name']
             if src in nodes:
                 node2Funds[src].add(entry['Target name'])
+            elif src in self.sources: #investors direct data. No node
+                node2Funds['None'].add(entry['Target name'])
         searching = True
         loopIdx = 0
         while searching and loopIdx < 10:

@@ -49,9 +49,6 @@ def processClump(clumpData : list[dict],nodeLib : nodeLibrary, selfData : dict, 
                 else: #if lower node, add only below data and above data if not attached to a node (direct to investor). The other above will be handled by the upper levels
                     clumpPositions.extend([pos for pos in nodeDynTables.get('positions',[]) if pos['Source name'] == nodeName or pos['Source name'] not in nodeList])
                     clumpTransactions.extend([tran for tran in nodeDynTables.get('transactions',[]) if tran['Source name'] == nodeName or tran['Source name'] not in nodeList])
-        #TODO: build connection of nodeCalculations to have final calculation output
-        #TODO: can set if the max level is 0 (most pools) then use the method present in processInvestments (make into function in basicFUnctions)
-        # otherwise, string them together using the above and below data
         maxNodeLevel = max(list(clumpCalculationsDict.keys()))
         for nodeLevel in reversed(range(maxNodeLevel + 1)): #iterate from the bottom up
             for node in clumpCalculationsDict[nodeLevel]:

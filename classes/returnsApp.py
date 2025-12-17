@@ -12,8 +12,37 @@ from classes.transactionApp import transactionApp
 from classes.windowClasses import *
 from classes.tableWidgets import *
 from classes.nodeLibrary import nodeLibrary
-
+from TreeScripts.dash_launcher import launch_dash_app
 from collections import defaultdict
+
+# Module-level function for multiprocessing (can't use instance methods with Process)
+def _run_dash_app_process(data_pickle, node=None, date=None, active_flag_dict=None, inactivity_timeout=30):
+    """Target function for multiprocessing - runs in separate process with pre-loaded data"""
+    import sys
+    import os
+    
+    # Add TreeScripts to path
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    tree_scripts_path = os.path.join(current_dir, '..', 'TreeScripts')
+    tree_scripts_path = os.path.abspath(tree_scripts_path)
+    
+    if tree_scripts_path not in sys.path:
+        sys.path.insert(0, tree_scripts_path)
+    
+    try:        
+        # Launch with pre-loaded pickled data
+        launch_dash_app(
+            data_pickle=data_pickle,
+            initial_node=node,
+            initial_date=date,
+            port=8052,
+            inactivity_timeout=inactivity_timeout,
+            active_flag_dict=active_flag_dict
+        )
+    except Exception as e:
+        print(f"Error in Dash app process: {e}")
+        import traceback
+        traceback.print_exc()
 
 @attach_logging_to_class
 class returnsApp(QWidget):
@@ -44,6 +73,11 @@ class returnsApp(QWidget):
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_from_queue)
         self.queue = []
+        
+        # Create multiprocessing Manager for Dash app lifecycle tracking
+        from multiprocessing import Manager
+        self.dash_manager = Manager()
+        self.dash_active_flag = self.dash_manager.dict({'active': True})
 
         # main stack
         self.main_layout = QVBoxLayout()
@@ -127,6 +161,11 @@ class returnsApp(QWidget):
     def closeEvent(self, event):
         """Called when the widget is being closed."""
         try:
+            # Signal Dash apps to shut down
+            if hasattr(self, 'dash_active_flag'):
+                self.dash_active_flag['active'] = False
+                print("Signaled Dash apps to shut down")
+            
             # Close any pools
             if hasattr(self, 'pool'):
                 self.pool.close()
@@ -135,7 +174,11 @@ class returnsApp(QWidget):
             if hasattr(self, 'db') and hasattr(self.db, '_conn'):
                 print("Closing database connection...")
                 self.db._conn.close()
+                print("Database connection closed.")
             
+            # Shutdown the manager (this will also signal subprocesses)
+            if hasattr(self, 'dash_manager'):
+                self.dash_manager.shutdown()
             
         except Exception as e:
             print(f"Error during cleanup: {e}")
@@ -244,6 +287,9 @@ class returnsApp(QWidget):
         tranAppBtn = QPushButton('Transaction App')
         tranAppBtn.clicked.connect(self.openTranApp)
         controlsLayout.addWidget(tranAppBtn, stretch=0)
+        dashAppBtn = QPushButton('Tree Hierarchy Viewer')
+        dashAppBtn.clicked.connect(self.openDashApp)
+        controlsLayout.addWidget(dashAppBtn, stretch=0)
         self.exportBtn = QPushButton("Export Current Table to Excel")
         self.exportBtn.clicked.connect(self.exportCurrentTable)
         self.exportBtn.setObjectName("exportBtn")
@@ -389,6 +435,9 @@ class returnsApp(QWidget):
         self.viewUnderlyingDataBtn = QPushButton("View Underlying Data")
         self.viewUnderlyingDataBtn.clicked.connect(self.viewUnderlyingData)
         unDataLayout.addWidget(self.viewUnderlyingDataBtn,stretch=0)
+        self.openDashWithSelectionBtn = QPushButton("View in Tree Hierarchy")
+        self.openDashWithSelectionBtn.clicked.connect(self.openDashAppWithSelection)
+        unDataLayout.addWidget(self.openDashWithSelectionBtn, stretch=0)
         unDataLayout.addStretch(1)
         unDataBox.setLayout(unDataLayout)
         layout.addWidget(unDataBox)
@@ -465,6 +514,167 @@ class returnsApp(QWidget):
         tranApp.init_data_processing()
         tranApp.show()
         self.tranApp = tranApp
+    def openDashApp(self, from_selection=False, *_):
+        """
+        Launch Dash Tree Hierarchy Viewer app.
+        
+        Args:
+            from_selection: If True, use current table selection for node/date pre-selection.
+                          If False, launch with no pre-selection (full view).
+        """
+        target_node = None
+        target_date = None
+        
+        # If launching from selection, extract node and date from current table selection
+        if from_selection:
+            row = self.returnsTable.currentRow()
+            col = self.returnsTable.currentColumn()
+            
+            if row < 0 or col < 0:
+                QMessageBox.warning(
+                    self,
+                    "No Selection",
+                    "Please select a cell in the returns table first."
+                )
+                return
+            
+            # Get row data
+            key = list(self.filteredReturnsTableData.keys())[row]
+            row_data = self.filteredReturnsTableData[key]
+            data_type = row_data.get("dataType", "")
+            
+            # Check if this is a Node or Target name
+            if "Node" in data_type or data_type == "Total Target name":
+                vh_item = self.returnsTable.verticalHeaderItem(row)
+                entity_name = vh_item.text() if vh_item else None
+                
+                if entity_name:
+                    # For nodes, extract the node path
+                    if "Node" in data_type:
+                        # Node paths use nodePathSplitter = " > "
+                        target_node = entity_name
+                    else:
+                        # Direct investment/fund name
+                        target_node = entity_name
+            
+            # Get date from selected column
+            hh_item = self.returnsTable.horizontalHeaderItem(col)
+            month_str = hh_item.text() if hh_item else None
+            
+            if month_str:
+                try:
+                    # Convert "Month Year" to datetime, get end of month
+                    dt = datetime.strptime(month_str, "%B %Y")
+                    # Get last day of month
+                    next_month = dt + relativedelta(months=1)
+                    target_date = (next_month - relativedelta(days=1)).strftime("%Y-%m-%d")
+                except:
+                    pass
+            
+            # If no date from column, use dataEndSelect
+            if not target_date:
+                try:
+                    end_date_str = self.dataEndSelect.currentText()
+                    dt = datetime.strptime(end_date_str, "%B %Y")
+                    next_month = dt + relativedelta(months=1)
+                    target_date = (next_month - relativedelta(days=1)).strftime("%Y-%m-%d")
+                except:
+                    pass
+        
+        # Create non-modal loading message and store as instance variable
+        self.dash_loading_msg = QMessageBox(self)
+        self.dash_loading_msg.setWindowTitle("Loading Data")
+        self.dash_loading_msg.setText("Loading position data from database...\nThis may take a moment.")
+        self.dash_loading_msg.setStandardButtons(QMessageBox.NoButton)
+        self.dash_loading_msg.setModal(False)  # Make it non-modal so it doesn't block
+        self.dash_loading_msg.show()
+        QApplication.processEvents()
+        
+        # Load data in background thread, then launch in separate process
+        def load_and_launch():
+            try:
+                # Load data using DatabaseManager
+                data_df = self.db.load_dash_data()
+                
+                if data_df is None or data_df.empty:
+                    # Close loading message and show warning
+                    gui_queue.put(self._close_dash_loading_msg)
+                    gui_queue.put(lambda: QMessageBox.warning(
+                        self,
+                        "No Data",
+                        "No position data available to display in Tree Hierarchy Viewer."
+                    ))
+                    return
+                
+                # Pickle the data for passing to subprocess
+                import pickle
+                data_pickle = pickle.dumps(data_df)
+                
+                # Close loading message
+                gui_queue.put(self._close_dash_loading_msg)
+                
+                # Launch in separate process with pre-loaded data
+                from multiprocessing import Process
+                inactivity_timeout = dashInactiveMinutes  # Minutes of inactivity before auto-shutdown
+                # Pass the shared active flag dict to the subprocess
+                p = Process(target=_run_dash_app_process, args=(data_pickle, target_node, target_date, self.dash_active_flag, inactivity_timeout))
+                p.daemon = False  # Allow it to continue after main app closes
+                p.start()
+                
+                # Store reference to prevent garbage collection
+                if not hasattr(self, 'dash_processes'):
+                    self.dash_processes = []
+                self.dash_processes.append(p)
+                
+                # Build success message
+                if from_selection and (target_node or target_date):
+                    msg = "Tree Hierarchy Viewer is starting...\n\n"
+                    if target_node:
+                        msg += f"Pre-selected node: {target_node}\n"
+                    if target_date:
+                        msg += f"Pre-selected date: {target_date}\n"
+                    msg += "\nIt will open in your browser shortly."
+                else:
+                    msg = "Tree Hierarchy Viewer is starting...\nIt will open in your browser shortly."
+                
+                gui_queue.put(lambda: QMessageBox.information(self, "Dash App Launched", msg))
+                
+            except Exception as e:
+                # Ensure loading message is closed on exception
+                gui_queue.put(self._close_dash_loading_msg)
+                gui_queue.put(lambda: QMessageBox.critical(
+                    self,
+                    "Error",
+                    f"Failed to launch Tree Hierarchy Viewer:\n{str(e)}"
+                ))
+                print(f"Error launching Dash app: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        # Run in background thread
+        import threading
+        thread = threading.Thread(target=load_and_launch, daemon=True)
+        thread.start()
+    
+    def openDashAppWithSelection(self, *_):
+        """Launch Dash app with current table selection (wrapper for backward compatibility)"""
+        self.openDashApp(from_selection=True)
+    
+    def _close_dash_loading_msg(self):
+        """Helper method to safely close the Dash loading message"""
+        if hasattr(self, 'dash_loading_msg') and self.dash_loading_msg is not None:
+            try:
+                
+                if self.dash_loading_msg.isVisible():
+                    self.dash_loading_msg.close()
+                self.dash_loading_msg.hide()
+                self.dash_loading_msg.destroy()
+                self.dash_loading_msg = None
+            except Exception as e:
+                print(f"Error closing Dash loading message: {e}")
+                # Ensure it's set to None even if close fails
+                self.dash_loading_msg = None
+    
     def cancelCalc(self, *_):
         _ = updateStatus(self,"DummyFail",99, status="Failed")
         self.cancel = True
@@ -708,7 +918,7 @@ class returnsApp(QWidget):
         if not self.testAPIconnection():
             QMessageBox.warning(self,"API Failure", "API connection has failed. Server is down or API key is bad. \n Previous calculations are left in place for viewing.")
             return
-        for table in ("calculations","positions_low","positions_high","transactions_low","transactions_high"):
+        for table in ("calculations","positions","transactions"):
             save_to_db(self.db,table,None,action="clear") #reset all tables so everything will be fresh data
         self.nodeChangeDates = {"active" : False}
         executor.submit(self.pullData)
@@ -809,6 +1019,8 @@ class returnsApp(QWidget):
                 if cancelEvent.is_set(): #exit if new table build request is made
                     return
                 data = load_from_db(self.db,"calculations",condStatement, tuple(parameters))
+                for idx in range(len(data)):
+                    data[idx]['ownershipAdjust'] = data[idx]['ownershipAdjust'] == 'True'
                 output = {"Total##()##" : {}}
                 flagOutput = {"Total##()##" : {}}
                 if self.benchmarkSelection.checkedItems() != [] or self.showBenchmarkLinksBtn.isChecked():
@@ -1191,9 +1403,7 @@ class returnsApp(QWidget):
                     
                     
                     highEntries = {}
-                    if levelName == 'assetClass' and option == 'Cash':
-                        name = 'Cash ' #adds a space to cash L1 for differentiation
-                    elif levelName == 'Node':
+                    if levelName == 'Node':
                         name = id2Node.get(int(option),"Node Name Not Found") if option not in (None, 'None') else "No Node"
                     else:
                         name = option 
@@ -1227,9 +1437,9 @@ class returnsApp(QWidget):
                             for label in dataOptions_local: #instantiates basic string values
                                 highEdT[label] = total[label]
                             if levelName not in ("Source name","Family Branch"):
-                                highEdT[levelName] = total[levelName] if total[levelName] != "Cash" or levelName != "assetClass" else "Cash "
+                                highEdT[levelName] = total[levelName]
                                 if levelName == "subAssetClass":
-                                    highEdT["assetClass"] = total["assetClass"] if total["assetClass"] != "Cash" else "Cash "
+                                    highEdT["assetClass"] = total["assetClass"]
                         else:
                             highEdT = highEntries[dt]
                         if not highEdT.get("ownershipAdjust", False) and total.get('ownershipAdjust',False):
@@ -1264,10 +1474,8 @@ class returnsApp(QWidget):
                         allEntries.extend(allEntriesExtend)
                         continue
                     totalEntriesLow = {}
-                    if levelName == 'assetClass' and option == 'Cash':
-                        name = 'Cash ' #adds a space to cash L1 for differentiation
-                    elif levelName == 'Node':
-                        name = id2Node.get(int(option),"Node Name Not Found") if option not in (None, 'None') else option
+                    if levelName == 'Node':
+                        name = id2Node.get(int(option),"Node Name Not Found") if option not in (None, 'None') else "No Node"
                     else:
                         name = option 
                     code = buildCode([*path,name])
@@ -1308,9 +1516,9 @@ class returnsApp(QWidget):
                                 totalLowDt[label] = targetTraitGet(label,"")
                             if levelName not in ("Source name","Family Branch"):
                                 lvl_val = targetTraitGet(levelName,"")
-                                totalLowDt[levelName] = lvl_val if not (lvl_val == "Cash" and levelName == "assetClass") else "Cash "
+                                totalLowDt[levelName] = lvl_val
                                 if levelName == "subAssetClass":
-                                    totalLowDt["assetClass"] = targetTraitGet("assetClass","") if targetTraitGet("assetClass","") != "Cash" else "Cash "
+                                    totalLowDt["assetClass"] = targetTraitGet("assetClass","")
                         else:
                             totalLowDt = totalEntriesLow[dt]
                         if not totalLowDt.get("ownershipAdjust", False) and entry.get('ownershipAdjust',False):
@@ -1382,10 +1590,10 @@ class returnsApp(QWidget):
                         nodeDt[label] = _e[label]
                     if levelName not in ("Source name","Family Branch"):
                         val =  _e[levelName]
-                        nodeDt[levelName] = val if val != "Cash" or levelName != "assetClass" else "Cash "
+                        nodeDt[levelName] = val
                         if levelName == "subAssetClass":
                             aCval = _e['assetClass']
-                            nodeDt["assetClass"] = aCval if aCval != "Cash" else "Cash "
+                            nodeDt["assetClass"] = aCval
                 else:
                     nodeDt = nodeSumEntryDict[dt]
                 if not nodeDt.get("ownershipAdjust", False) and _e.get('ownershipAdjust',False):
@@ -1575,6 +1783,10 @@ class returnsApp(QWidget):
             dbDates.append(monthEntry)
         save_to_db(self.db,"Months",dbDates)
     def instantiateFilters(self,*_, keepChoices: bool = False):
+        if keepChoices:
+            CBs = list(self.filterDict.values())
+            CBs.extend([self.assetClass3Visibility,self.benchmarkSelection])
+            choices = [cb.checkedItems() for cb in CBs]
         investors = self.db.fetchInvestors()
         for filKey, invKey in (['Source name', 'Name'],['Family Branch','Parentinvestor']):
             self.filterDict[filKey].clearItems()
@@ -1590,8 +1802,14 @@ class returnsApp(QWidget):
             self.filterDict[filKey].addItems(sorted(filOptDict[filKey]))
         self.filterDict['Node'].addItems([str(n) for n in list(self.db.pullId2Node().keys())])
         self.assetClass3Visibility.addItems(sorted(filOptDict['subAssetClass']))
+        self.assetClass3Visibility.setCheckedItems([key for key, val in self.db.fetchOptions('asset3Visibility').items() if val == 'hide'])
         self.benchmarkSelection.addItems(sorted(self.db.fetchBenchmarks()))
-        self.filterDict["Classification"].setCheckedItem("HFC")
+        if not keepChoices: #defaults
+            self.filterDict["Classification"].setCheckedItem("HFC")
+        else: #set back to previous values
+            for idx, cb in enumerate(CBs):
+                cb.setCheckedItems(choices[idx])
+
 
     def groupingChange(self):
         groupOpts = self.sortHierarchy.checkedItems()
@@ -1651,6 +1869,23 @@ class returnsApp(QWidget):
             #iterate through the freshly imported rows, check if they match with the previous data. 
             #inputs: table name, rows of newly imported data
             #outputs: newImportedRows, oldDatabaseRows, self.earliestChangeDate is updated if a new earliest change date is found
+            earliest = None
+            if fullRecalculations: #use all old data, and track the earliest data of entry
+                for rec in rows:
+                    rowNodes = [node for node in nodes if node in (rec.get("Target name"), rec.get("Source name"))] #nodes that the entry connects to
+                    if not rowNodes and rec.get('Target name') in targets and rec.get('Source name') in sources:
+                        rowNodes = ['noNodeData',]
+                    elif not rowNodes:
+                        print(f"Warning: no nodes or direct investment found attached to a datapoint: {rec}")
+                    dt = datetime.strptime(rec['Date'], "%Y-%m-%dT%H:%M:%S")
+                    if earliest is None or dt < earliest: #sets overall values to earliest
+                        earliest = dt.replace(day=1)
+                    with earlyChangeDateLock:
+                        for node in rowNodes:
+                            if dt < self.nodeChangeDates.get(node,datetime.now()): 
+                                self.nodeChangeDates[node] =  dt.replace(day=1) # sets each pool value to earliest and instantiates if not existing
+                self.earliestChangeDate = min([dt for key, dt in self.nodeChangeDates.items() if key != 'active'])
+                return {'old' : [], 'new' : rows}
             def buildKey(record): #TODO: check for transactions of the same value in the same source to target. Could ignore new ones
                 value = record[nameHier["Value"]["dynHigh"] if table == "positions" else nameHier["CashFlow"]["dynLow"]]
                 value = 0 if value is None or value == "None" else value
@@ -1735,7 +1970,7 @@ class returnsApp(QWidget):
                 "tranCols": "Investment in, Investing Entity, Transaction Type, Effective date, Remaining commitment change, Transaction timing, Cash flow change (USD), ValueInSystemCurrency",
                 "tranName": "InvestmentTransaction",
                 "tranSort": "Effective date:desc",
-                "accountCols": "As of Date, Balance Type, Investing entity, Investment in, Value in system currency, Fund class",
+                "accountCols": "As of Date, Balance Type, Investing entity, Investment in, Value in system currency, Fund class, Sub-account",
                 "accountName": "InvestmentPosition",
                 "accountSort": "As of Date:desc",
                 "fundCols" : "Parent fund, Fund Name, Fund Pipeline Status, Asset class category, HF Classification, HF sub-classification",
@@ -1780,6 +2015,31 @@ class returnsApp(QWidget):
                                                     {
                                                         "_op": "is_null",
                                                         "_prop": "Holding"
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                "_name": "InvestmentPosition",
+                                                "e": [
+                                                    {
+                                                        "_name": "Security",
+                                                        "rule": [
+                                                            {
+                                                                "_op": "is_null",
+                                                                "_prop": "HoldingsInsightID"
+                                                            },
+                                                            {
+                                                                "_op": "is",
+                                                                "_prop": "Security status",
+                                                                "values": [
+                                                                    {
+                                                                        "id": "71d185fd-d891-4021-be50-179ad11ec21f",
+                                                                        "es": "L_SecurityStatus",
+                                                                        "name": "Portfolio"
+                                                                    }
+                                                                ]
+                                                            }
+                                                        ]
                                                     }
                                                 ]
                                             }
@@ -1917,7 +2177,20 @@ class returnsApp(QWidget):
                             "advf": {
                                 "e": [
                                     {
-                                        "_name": "Fund"
+                                        "_name": "Fund",
+                                        "rule": [
+                                            {
+                                                "_op": "is",
+                                                "_prop": "Fund Pipeline Status",
+                                                "values": [
+                                                    {
+                                                        "id": "a6d25ed8-4027-4642-8fb7-710b01a213f7",
+                                                        "es": "L_FundPipelineStatus",
+                                                        "name": "P - Portfolio"
+                                                    }
+                                                ]
+                                            }
+                                        ]
                                     }
                                 ]
                             },
@@ -1928,6 +2201,23 @@ class returnsApp(QWidget):
                                 "e": [
                                     {
                                         "_name": "Security",
+                                        "rule": [
+                                            {
+                                                "_op": "is_null",
+                                                "_prop": "HoldingsInsightID"
+                                            },
+                                            {
+                                                "_op": "is",
+                                                "_prop": "Security status",
+                                                "values": [
+                                                    {
+                                                        "id": "71d185fd-d891-4021-be50-179ad11ec21f",
+                                                        "es": "L_SecurityStatus",
+                                                        "name": "Portfolio"
+                                                    }
+                                                ]
+                                            }
+                                        ]
                                     }
                                 ]
                             },
@@ -1992,6 +2282,7 @@ class returnsApp(QWidget):
                 gui_queue.put(lambda val = frac: self.apiLoadingBar.setValue(int(val * 100)))
             submitAPIcall(self,bgFundSecPull)
             submitAPIcall(self,bgFundSecPull,True)
+            totalCalls -= 1
             benchmarkPayload = {
                                     "advf": {
                                         "e": [
@@ -2041,7 +2332,7 @@ class returnsApp(QWidget):
             for future in accountTranTableFutures:
                 #must be careful. There are a maximum of 5 threads but there are 6 calls, and 2 are waited for after
                 table, tableData = future.result()
-                if not skipCalculations:
+                if not skipCalculations or fullRecalculations:
                     importedTables[table] = tableData["new"] #all calculations are from scratch anyways, so use the new data
                 else:
                     mergedTable = []
@@ -2161,8 +2452,9 @@ class returnsApp(QWidget):
                                         cache.setdefault(clumpIdxs[potNode], {}).setdefault(potNode, {}).setdefault(tableName, {}).setdefault(m["dateTime"], []).append(row)
                 self.cachedDynTables = {table : [] for table in mainTableNames}
                 self.cachedLinkedCalculations = []
-                self.nodeChangeDates['active'] = False #no more using cached data. Full calculations every time
-                self.earliestChangeDate = self.dataTimeStart
+                if fullRecalculations:
+                    self.nodeChangeDates['active'] = False #no more using cached data. Full calculations every time
+                    self.earliestChangeDate = self.dataTimeStart
                 if self.nodeChangeDates.get("active",False): #iterate through nodes that have custom calculation dates
                     runClumps = {idx : [] for idx in range(nodeClumps)}
                     for idx, cNodes in enumerate(nodeClumps):
@@ -2355,12 +2647,12 @@ class returnsApp(QWidget):
             print("Database updated.")
             try:
                 save_to_db(self.db,None,None,query="UPDATE history SET [lastImport] = ?", inputs=(self.apiCallTime,), action="replace")
-                self.lastImportLabel.setText(f"Last Data Import: {self.apiCallTime}")
+                gui_queue.put(lambda: self.lastImportLabel.setText(f"Last Data Import: {self.apiCallTime}"))
                 self.lastImportDB[0]['lastImport'] = self.apiCallTime
             except Exception as e:
-                QMessageBox.warning(self,"Warning",f"Failed to update internal data for last import time. Data will likely reimport soon: {e} {e.args}")
+                gui_queue.put( lambda: QMessageBox.warning(self,"Warning",f"Failed to update internal data for last import time. Data will likely reimport soon: {e} {e.args}"))
                 print(f"failed to update last import time {e} {e.args}")
-            gui_queue.put(self.instantiateFilters)
+            gui_queue.put(lambda: self.instantiateFilters(keepChoices=True))
             gui_queue.put( lambda: self.populate(self.calculationTable,nodeCalculations,keys = keys))
             gui_queue.put( lambda: self.buildReturnTable())
             gui_queue.put(lambda: self.calculationLoadingBox.setVisible(False))
@@ -2453,8 +2745,9 @@ class returnsApp(QWidget):
             cleaned = {fund: d.copy() for fund, _, d, _ in row_entries}
             for d in cleaned.values():
                 d.pop("dataType", None)
-
-            if not self.headerSort.active or mode == "Monthly Table":
+            headerSort : SortButtonWidget = self.headerSort
+            currentHeaders = set(key for cRow in cleaned.values() for key in cRow.keys())
+            if not headerSort.active or mode == "Monthly Table" or any(opt not in headerSort.options() for opt in currentHeaders):
                 col_keys = set()
                 for d in cleaned.values():
                     col_keys |= set(d.keys())
@@ -2465,13 +2758,13 @@ class returnsApp(QWidget):
                 if mode == "Complex Table":
                     allKeys = col_keys.copy()
                     allKeys.extend(exceptions) #all key options for the header selections
-                    self.headerSort.set_items(allKeys,[item for item in allKeys if item not in exceptions])
-                    self.headerSort.setEnabled(True)
+                    headerSort.set_items(allKeys,[item for item in allKeys if item not in exceptions])
+                    headerSort.setEnabled(True)
                 else:
-                    self.headerSort.setEnabled(False)
+                    headerSort.setEnabled(False)
             else:
-                col_keys = self.headerSort.popup.get_checked_sorted_items()
-                self.headerSort.setEnabled(True)
+                col_keys = headerSort.popup.get_checked_sorted_items()
+                headerSort.setEnabled(True)
             self.filteredHeaders = col_keys
             # 3) Resize & set horizontal headers (we no longer call setVerticalHeaderLabels)
             self.returnsTable.setRowCount(len(row_entries))
@@ -2494,6 +2787,8 @@ class returnsApp(QWidget):
                         i += 1
                     colorDepths[trackIdx:i] = [maxDepth] * (i-trackIdx) #set the depth for low section all the way down
                 trackDepth = d
+            if not any(row_dict['dataType'] == 'Total Target name' for _, _, row_dict,_ in row_entries):
+                maxDepth += 1 #if funds are off, don't allow upper sorts to be white
             colorDepths = [c/maxDepth for c in colorDepths] if maxDepth != 0 else colorDepths
             for r, (fund_label, code, row_dict, rowKey) in enumerate(row_entries):
                 # pull & remove dataType for coloring
@@ -2562,8 +2857,8 @@ class returnsApp(QWidget):
                     item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                     self.returnsTable.setItem(r, c, item)
             self.buildTableLoadingBox.setVisible(False)
-        except:
-            QMessageBox.warning(self,'Build Table Failed','Error occured attempting to format the table. Please try again.')
+        except Exception as e:
+            QMessageBox.warning(self,'Build Table Failed',f'Error occured attempting to format the table. Please try again. \n {e.args} {traceback.format_exc()}')
     def populate(self, table, rows, keys = None):
         if not rows:
             return

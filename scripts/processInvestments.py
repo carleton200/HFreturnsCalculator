@@ -95,11 +95,19 @@ def processOneLevelInvestments(month, node, invSourceName, newMonths, cache, pos
         targetTransactions = targetTransactionsDict.get(investment,[]) 
         invCashFlowSum = 0
         invWeightedCashFlow = 0
+        if noStartValue: #if the fund was not activate at BOM, find the active days
+            activeDays = 0
+            for transaction in (tran for tran in targetTransactions if tran[nameHier["CashFlow"]["dynLow"]] not in (None, "None",0.0)):
+                backDate = calculateBackdate(transaction, noStartValue)
+                activeDays = max(activeDays,totalDays - int(datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S").day) + backDate)
+            dayCalcDenominator = activeDays
+        else:
+            dayCalcDenominator = totalDays
         for transaction in targetTransactions: #get fund data, cash flows, and commitment alterations
             if transaction["TransactionType"] not in commitmentChangeTransactionTypes and transaction[nameHier["CashFlow"]["dynLow"]] not in (None, "None"):
                 invCashFlowSum -= float(transaction[nameHier["CashFlow"]["dynLow"]])
                 backDate = calculateBackdate(transaction, noStartValue) #Uses dynamo transaction time logic to decide to subtract one day or not
-                invWeightedCashFlow -= float(transaction[nameHier["CashFlow"]["dynLow"]])  *  (totalDays -int(datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S").day) + backDate)/totalDays
+                invWeightedCashFlow -= float(transaction[nameHier["CashFlow"]["dynLow"]])  *  (totalDays -int(datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S").day) + backDate)/dayCalcDenominator if dayCalcDenominator != 0 else 0.0
                 if transaction.get(nameHier["Unfunded"]["dynLow"]) not in (None,"None"):
                     unfunded += float(transaction[nameHier["Unfunded"]["value"]])
                 if investment not in IRRtrack:
@@ -124,7 +132,7 @@ def processOneLevelInvestments(month, node, invSourceName, newMonths, cache, pos
             invGain = (float(endEntry[nameHier["Value"]["dynLow"]]) - float(startEntry[nameHier["Value"]["dynLow"]]) - invCashFlowSum)
             invMDdenominator = float(startEntry[nameHier["Value"]["dynLow"]]) + invWeightedCashFlow
             invNAV = float(endEntry[nameHier["Value"]["dynLow"]])
-            invReturn = invGain/invMDdenominator * 100 * findSign(invGain) if invMDdenominator != 0 else 0
+            invReturn = abs(invGain/invMDdenominator) * 100 * findSign(invGain) if invMDdenominator != 0 else 0
             if investment in IRRtrack:
                 IRRitd = calculate_xirr([*IRRtrack[investment]["cashFlows"], invNAV], [*IRRtrack[investment]["dates"], datetime.strptime(month["endDay"], "%Y-%m-%dT%H:%M:%S")])
             else:
@@ -169,7 +177,7 @@ def processOneLevelInvestments(month, node, invSourceName, newMonths, cache, pos
             print(f"Skipped fund {investment} for {invSourceName} in {month["Month"]} because: {traceback.format_exc()}")
             #Testing flag. skips fund if the values are zero and cause an error
     skipUpper = nodeNAV == 0 and nodeCashFlow == 0#skips the pool if there is no cash flow or value in the pool
-    poolReturn = nodeGain/nodeMDdenominator * 100 * findSign(nodeGain) if nodeMDdenominator != 0 else 0
+    poolReturn = abs(nodeGain/nodeMDdenominator) * 100 * findSign(nodeGain) if nodeMDdenominator != 0 else 0
     monthNodeCalc = {"dateTime" : month["dateTime"], "Source name" : invSourceName, "Target name" : None, "Node" : node,
                     "NAV" : nodeNAV, "Monthly Gain" : nodeGain, "Return" : poolReturn , "MDdenominator" : nodeMDdenominator,
                         "Ownership" : None} 

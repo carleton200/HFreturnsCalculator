@@ -2,6 +2,7 @@ from classes import nodeLibrary
 from scripts.importList import *
 from scripts.commonValues import *
 from scripts.instantiate_basics import *
+from collections import deque, defaultdict
 
 def infer_sqlite_type(val):
     # Try to infer column types in SQLite: INTEGER, REAL, TEXT, or BLOB
@@ -15,6 +16,8 @@ def infer_sqlite_type(val):
             return "REAL"
         if type(val) is bytes:
             return "BLOB"
+        if type(val) is bool:
+            return "BOOL"
         # Try conversion for number-like strings
         sval = str(val)
         try:
@@ -31,10 +34,6 @@ def infer_sqlite_type(val):
     except Exception:
         return "TEXT"
 
-def findSign(num: float):
-    if num == 0:
-        return 0
-    return num / abs(num)
 
 def nodalToLinkedCalculations(calcs, nodePath : list[int] = None):
     for idx, _ in enumerate(calcs): #build to final calculation format from the node style
@@ -46,19 +45,24 @@ def handleFundClasses(entryList):
     split = {}
     foundDuplicate = False
     for entry in entryList: #split the entries by fundclass to check for duplicates
+        fundSubKey = ""
         fundClass = entry.get(nameHier["FundClass"]["dynLow"])
-        if fundClass not in split:
-            split[fundClass] = [entry,]
+        subAccount = entry.get('InvestsThrough')
+        for key in (fundClass, subAccount):
+            if key is not None:
+                fundSubKey += key
+        if fundSubKey not in split:
+            split[fundSubKey] = [entry,]
         else:
-            split[fundClass].append(entry)
+            split[fundSubKey].append(entry)
             foundDuplicate = True
     singleEntries = []
     if foundDuplicate: #if duplicates, loop through to find the best balance type
-        for fundClass in split: #loop by fund
-            if len(split.get(fundClass)) > 1: #check if duplicates
+        for fundSubKey in split: #loop by fund
+            if len(split.get(fundSubKey)) > 1: #check if duplicates
                 foundType = False
                 for balanceType in balanceTypePriority: #loop through balance types by priority
-                    for entry in split.get(fundClass): #loop through the duplicate entries
+                    for entry in split.get(fundSubKey): #loop through the duplicate entries
                         if entry.get("Balancetype") == balanceType and entry.get(nameHier["Value"]["dynLow"]) not in (None,"None"): #if the balance type is preferred, add the entry and break
                             singleEntries.append(entry)
                             foundType = True
@@ -66,15 +70,15 @@ def handleFundClasses(entryList):
                     if foundType: #stop balance type checking if found
                         break
                 if not foundType: #reaches if nothing was found
-                    for entry in split.get(fundClass): #loop through to find the first with a value
+                    for entry in split.get(fundSubKey): #loop through to find the first with a value
                         if entry.get(nameHier["Value"]["dynLow"]) not in (None,"None"): #if the balance type is preferred, add the entry and break
                             singleEntries.append(entry)
                             foundType = True
                             break
                     if not foundType: #final attempt take first entry
-                        singleEntries.append(split.get(fundClass)[0])
+                        singleEntries.append(split.get(fundSubKey)[0])
             else: #no duplicates for this fund
-                singleEntries.append(split.get(fundClass)[0])
+                singleEntries.append(split.get(fundSubKey)[0])
     else:
         singleEntries.extend(entryList)
     tempNAV = 0
@@ -90,7 +94,7 @@ def get_connected_node_groups(nodePaths):
     or transitively via 'above' and 'below' relationships in nodePaths.
     """
     # Build undirected graph from above/below relationships
-    from collections import deque, defaultdict
+    
 
     # Make an adjacency list (undirected)
     adjacency = defaultdict(set)
@@ -151,8 +155,9 @@ def recursLinkCalcs(baseCalcs, monthDT, nodeLvl : int, node :str, currPath: list
                 tempCalc['Source name'] = aboveCalc['Source name']
                 nodeOwnershipFrac = aboveCalc['Ownership'] / 100
                 targetOwnershipFrac = nodeOwnershipFrac * belowCalc['Ownership'] / 100
-                for field in ('NAV','Monthly Gain', 'MDdenominator'): #split by ownership of the node's investment
+                for field in ('NAV','Monthly Gain', 'MDdenominator', 'Commitment', 'Unfunded'): #split by ownership of the node's investment
                     tempCalc[field] = tempCalc[field] * nodeOwnershipFrac
+                tempCalc['ownershipAdjust'] = aboveCalc['ownershipAdjust'] or tempCalc['ownershipAdjust'] #any adjustment triggers true
                 tempCalc['Ownership'] = targetOwnershipFrac * 100
                 tempCalc['IRR ITD'] = None
                 tempCalc['Return'] = tempCalc['Monthly Gain'] / tempCalc['MDdenominator'] * 100 if tempCalc['MDdenominator'] != 0.0 else 0.0
@@ -163,12 +168,6 @@ def recursLinkCalcs(baseCalcs, monthDT, nodeLvl : int, node :str, currPath: list
         linkedCalcs.extend(recursLinkCalcs(aboveCalcs,monthDT,nodeLvl - 1, aboveNode, [*currPath,aboveID], nodeLib, clumpCalculationsDict))
     return linkedCalcs
                 
-
-
-
-
-
-
 
 
 def calculate_xirr(cash_flows, dates, guess : float = None):
@@ -207,7 +206,7 @@ def findSign(num: float):
 def accountBalanceKey(accEntry : dict):
     try:
         key = accEntry["Date"] + "_" + accEntry["Source name"] + "_" + accEntry["Target name"]
-        for accountField in ("Balancetype"):
+        for accountField in ("Balancetype", 'InvestsThrough','Fundclass'):
             key += accEntry.get(accountField, "") if accEntry.get(accountField, "") is not None else ""
     except:
         print(f"Failed for entry: {accEntry}")
@@ -277,3 +276,25 @@ def poll_queue():
                     print(f"Error occured while attempting to run background gui update: {e}. \n traceback: \n {trace}")
     except queue.Empty:
         pass
+
+def handleDuplicateFields(rows, fields):
+    #adds spaces to any fields with duplicate values so the values will not point back to the same field
+    try:
+        fieldDict = defaultdict(set)
+        spaceDict = {f : " " * (i + 1) for i, f in enumerate(fields)}
+        for row in rows:
+            for field in fields:
+                fieldDict[field].add(row[field])
+        duplicates = set()
+        for f, vals in fieldDict.items():
+            for f2 in (f2 for f2 in fieldDict if f2 != f):
+                duplicates.update(vals.intersection(fieldDict[f2]))
+        if duplicates:
+            for i, r in enumerate(rows):
+                for field in fields:
+                    if r[field] in duplicates:
+                        rows[i][field] = r[field] + spaceDict[field]
+            print(f"Duplicate values processed: {duplicates}")
+    except Exception as e:
+        print(f"ERROR: failed to handle duplicate fields: {e.args}")
+    return rows

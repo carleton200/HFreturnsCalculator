@@ -1,8 +1,10 @@
 from scripts.importList import *
 from scripts.instantiate_basics import *
 from scripts.commonValues import *
-from scripts.basicFunctions import infer_sqlite_type
+from scripts.basicFunctions import infer_sqlite_type, handleDuplicateFields
 from classes.nodeLibrary import nodeLibrary
+
+import pandas as pd
 
 class DatabaseManager:
     """Thread-safe SQLite database manager.
@@ -24,6 +26,8 @@ class DatabaseManager:
         self.fetch_batch_size = 2000
         self.instantiateConnections()
         self.instantiateTables()
+
+        self.options = {}
 
     def instantiateConnections(self):
         if  not remoteDBmode:
@@ -121,11 +125,10 @@ class DatabaseManager:
             # calculations
             self.create_table_if_not_exists(
                 cur,
-                "nodeCalculations",
+                "calculations",
                 [
                     ("dateTime", "TEXT"),
                     ("[Source name]", "TEXT"),
-                    ("Node", "TEXT"),
                     ("[Target name]", "TEXT"),
                     ("NAV", "REAL"),
                     ("[Monthly Gain]", "REAL"),
@@ -136,8 +139,9 @@ class DatabaseManager:
                     ("Unfunded", "REAL"),
                     ("[IRR ITD]", "REAL"),
                     ("ownershipAdjust", "BOOL"),
+                    ('nodePath', 'TEXT')
                 ],
-                primary_keys=["dateTime", "[Target name]", "Node", "[Source name]"]
+                primary_keys=["dateTime", "[Target name]", "nodePath", "[Source name]"]
             )
             # options
             self.create_table_if_not_exists(
@@ -199,9 +203,7 @@ class DatabaseManager:
             self._conn.commit()
             cur.close()
             
-    def fetchOptions(self, grouping : str, update: bool = False):
-        if not hasattr(self, "options"):
-            self.options = {}
+    def fetchOptions(self, grouping : str, update: bool = False):            
         if not hasattr(self.options, grouping) or update:
             with self._lock:
                 cursor = self.get_cursor()
@@ -212,6 +214,7 @@ class DatabaseManager:
                 cursor.close()
         return self.options[grouping]
     def saveAsset3Visibility(self, visibility : list):
+
         with self._lock:
             cursor = self.get_cursor()
             cursor.execute(f"DELETE FROM options WHERE grouping = {sqlPlaceholder}", ("asset3Visibility",))
@@ -258,16 +261,22 @@ class DatabaseManager:
         return inv2fam
     def fetchFunds(self, update: bool = False):
         if not hasattr(self, "funds") or update:
-            with self._lock:
-                rows = []
-                for tableName in ('funds', 'securities'):
-                    cursor = self._conn.cursor()
-                    cursor.execute(f"SELECT * FROM {tableName}")
-                    headers = [d[0] for d in cursor.description]
-                    rows.extend([dict(zip(headers,row)) for row in cursor.fetchall()])
+            try:
+                with self._lock:
+                    rows = []
+                    for tableName in ('funds', 'securities'):
+                        cursor = self._conn.cursor()
+                        cursor.execute(f"SELECT * FROM {tableName}")
+                        headers = [d[0] for d in cursor.description]
+                        rows.extend([dict(zip(headers,row)) for row in cursor.fetchall()])
+                    cursor.close()
+                rows = handleDuplicateFields(rows, ['assetClass','subAssetClass','sleeve'])
                 self.funds = rows
-                cursor.close()
-            self.fund2trait = self.connectFund2Trait()
+                self.fund2trait = self.connectFund2Trait()
+            except Exception as e:
+                print(f"WARNING: Error occured while fetching fund data: {e.args}")
+                self.fund2trait = {}
+                return []
         return self.funds
     def fetchDyn2Key(self):
         filtOpts = masterFilterOptions
@@ -333,6 +342,59 @@ class DatabaseManager:
     def buildNodeLib(self, update:bool = False):
         if not hasattr(self,'nodeLib'):
             self.nodeLib = nodeLibrary([*load_from_db(self,'transactions'),*load_from_db(self,'positions')])
+    
+    def load_dash_data(self):
+        """
+        Load position data for Dash Tree Hierarchy Viewer app.
+        Returns DataFrame with columns matching Dynamo API format.
+        
+        Returns:
+            pd.DataFrame with columns: Source name, Target name, position_value, 
+            As of date, Fundclass, Holding, HoldingsInsightID, percentage
+        """
+        try:
+            print("Loading position data from DatabaseManager for Dash app...")
+            
+            # Query positions table using DatabaseManager
+            query = """
+            SELECT 
+                [Source name] as 'Source name',
+                [Target name] as 'Target name',
+                ValueInSystemCurrency as position_value,
+                Date as 'As of date',
+                Fundclass
+            FROM positions
+            WHERE Date IS NOT NULL
+            ORDER BY Date, [Source name], [Target name]
+            """
+            
+            # Use DatabaseManager's connection with thread lock
+            with self._lock:
+                cursor = self.get_cursor()
+                cursor.execute(query)
+                columns = [desc[0] for desc in cursor.description]
+                rows = cursor.fetchall()
+                        
+            df = pd.DataFrame(rows, columns=columns)
+            
+            print(f"Loaded {len(df)} rows from positions table")
+            
+            # Ensure As of date is datetime
+            if 'As of date' in df.columns:
+                df['As of date'] = pd.to_datetime(df['As of date'], errors='coerce')
+            
+            # Fill NaN values in position_value
+            if 'position_value' in df.columns:
+                df['position_value'] = df['position_value'].fillna(0.0)
+            
+            # Add percentage column (will be recalculated in create_all_paths)
+            df['percentage'] = 1.0
+            
+            return df
+            
+        except Exception as e:
+            print(f"Error loading data from DatabaseManager: {e}")
+            return None
     def close(self) -> None:
         try:
             with self._lock:
@@ -443,6 +505,7 @@ def save_to_db(db : DatabaseManager, table, rows, action = "", query = "",inputs
                     _batched_executemany(cur, sql, vals, batch_size, progress_label=table if total_rows > batch_size else None)
                     conn.commit()
                 except Exception as e:
+                    print('inital db save failed. using backups')
                     if colFail:
                         logging.warning(f"Bad columns were attempted to be inserted into table {table}. {e.args}")
                         print(f"Bad columns were attempted to be inserted into table {table}. {e.args}")

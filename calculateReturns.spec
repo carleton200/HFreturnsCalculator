@@ -4,7 +4,7 @@ from pathlib import Path
 import os
 
 assets = [
-    ('assets/Acc_Tran.db', 'assets'),
+    ('assets/CRSPRdata.db', 'assets'),
     ('assets/helpInfo.txt', 'assets'),
     ('calculateReturns.py','sourceCode'),
     ('calculateReturns.spec','sourceCode'),

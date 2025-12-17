@@ -551,8 +551,6 @@ class underlyingDataWindow(QWidget):
         dataType = dataType.removeprefix("Total ")
         code = self.parent.selectedCell["rowKey"]
         header, code= self.parent.separateRowCode(code)
-        if header == "Cash ":
-            header = "Cash"
         hier = code.removeprefix("##(").removesuffix(")##").split("::")
         hierSelections = self.parent.sortHierarchy.checkedItems()
         if dataType == "Target name":
@@ -561,6 +559,7 @@ class underlyingDataWindow(QWidget):
         self.parent.db.buildNodeLib()
         nodeLib = self.parent.db.nodeLib
         nodes = nodeLib.nodes
+        lowNodes = nodeLib.lowNodes
         if 'Node' in hierSelections: 
             #Check if needs extra node places. occurs from recursive node hierarchy
             nodeIdx = hierSelections.index('Node')
@@ -587,6 +586,7 @@ class underlyingDataWindow(QWidget):
             condStatement = "WHERE"
             fundOptionSets = []
             filterDict = {}
+            inputs = []
             for hierIdx, tier in enumerate(hier): #iterate through each tier down to selection
                 tierType = hierSelections[hierIdx]
                 if tier == "hiddenLayer":
@@ -594,9 +594,12 @@ class underlyingDataWindow(QWidget):
                 elif tierType == 'Node':
                     #find all funds under node
                     nodeName = tier
-                    if tier == '': #occurs from base nodes
+                    if nodeName == '': #occurs from base nodes
                         nodeName = header
                     fundOptionSets.append(set(nodeLib.node2Funds[nodeName]))
+                    if nodeName not in (None,'None') and nodeName in lowNodes:
+                        condStatement = f'WHERE [Source name] = ?'
+                        inputs.append(nodeName)
                 elif tierType == 'Target name':
                     fundOptionSets.append(set(self.parent.cFundToFundLinks.get(tier,[tier,])))
                 elif tierType not in nonFundCols:
@@ -610,15 +613,19 @@ class underlyingDataWindow(QWidget):
             if fundOptionSets:
                 fundOpts = set.intersection(*(set(funds) for funds in fundOptionSets))
                 placeholders = ','.join('?' for _ in fundOpts)
-                condStatement = f"WHERE [Target name] in ({placeholders}) AND [Date] BETWEEN ? AND ?"
-                inputs = list(fundOpts)
-            else:
+                if condStatement == 'WHERE':
+                    condStatement = f"WHERE [Target name] in ({placeholders}) AND [Date] BETWEEN ? AND ?"
+                else:
+                    condStatement += f' AND [Target name] in ({placeholders}) AND [Date] BETWEEN ? AND ?'
+                inputs.extend(list(fundOpts))
+            elif inputs == []:
                 print("WARNING: No relevant funds found for the cell selected.")
                 condStatement = f"WHERE [Date] BETWEEN ? AND ?"
-                inputs = []
             sourceNames = set()
             for table, start in tables.items():
                 try:
+                    if not demoMode:
+                        print(f"    Underlying data conditional (1): {condStatement} for: {(*inputs,start,allEnd)}")
                     baseRows = load_from_db(self.parent.db,table,condStatement, tuple((*inputs,start,allEnd)))
                 except Exception as e:
                     print(f"Error in call : {e} ; {e.args}")
@@ -627,7 +634,7 @@ class underlyingDataWindow(QWidget):
                 all_rows.extend(baseRows)
             loopIdx = 0
             nodeCrosses = set()
-            lowNodes = nodeLib.lowNodes
+            
             while any(src in lowNodes for src in sourceNames) and loopIdx < 10: #handle intermediate (nodal) entries/connections
                 loopIdx += 1
                 if loopIdx == 10:
@@ -640,6 +647,8 @@ class underlyingDataWindow(QWidget):
                 interRows = []
                 for table, start in tables.items():
                     try:
+                        if not demoMode:
+                            print(f"    Underlying data conditional (2): {condStatement} for: {(*currentSearch,start,allEnd)}")
                         rows = load_from_db(self.parent.db,table,condStatement, tuple((*currentSearch,start,allEnd)))
                     except Exception as e:
                         print(f"Error in call : {e} ; {e.args}")
@@ -670,6 +679,8 @@ class underlyingDataWindow(QWidget):
                 inputs.extend(nodeCrosses)
                 for table, start in tables.items():
                     try:
+                        if not demoMode:
+                            print(f"    Underlying data conditional (3): {condStatement} for: {(*inputs,start,allEnd)}")
                         upperRows = load_from_db(self.parent.db,table,condStatement.removesuffix("AND") + " AND [Date] BETWEEN ? AND ?", tuple((*inputs,start,allEnd)))
                     except Exception as e:
                         print(f"Error in call : {e} ; {e.args}")

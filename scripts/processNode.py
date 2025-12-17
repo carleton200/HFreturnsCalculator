@@ -94,7 +94,7 @@ def processNode(nodeData : dict,selfData : dict, statusQueue, _, failed, transac
                 if startEntry_cache: #use starting entry
                     if len(startEntry_cache) > 1:
                         # Choose the balance where Balancetype is the highest of the list, otherwise just the first
-                        type_precedence = ["Calculated_R", "Actual", "Adjusted"] # Define type precedence
+                        type_precedence = balanceTypePriority # Define type precedence
                         # Sort entries by type precedence and then fall back to first
                         def type_rank(entry):
                             btype = entry.get("Balancetype", "")
@@ -154,7 +154,7 @@ def processNode(nodeData : dict,selfData : dict, statusQueue, _, failed, transac
                 if sourceMDdenominator == 0:
                     sourceReturn = 0 #0 if investor has no value in pool. avoids error
                 else:
-                    sourceReturn = sourceGain / sourceMDdenominator * findSign(sourceGain)
+                    sourceReturn = abs(sourceGain / sourceMDdenominator) * findSign(sourceGain)
                 if round(tempAboveDicts[source]["startVal"] + tempAboveDicts[source]["cashFlow"]) == 0 or len(EOMcheck) == 0 or round(float(EOMcheck[0].get(nameHier["Value"]["dynHigh"],0))) == 0: 
                     #zero values if exited source
                     #exit check: start value and cashflow sums to zero OR no end value OR end value is zero
@@ -174,7 +174,7 @@ def processNode(nodeData : dict,selfData : dict, statusQueue, _, failed, transac
                 monthNodeSourceEntry["Ownership"] = ownershipPerc
                 nodeOwnershipSum += ownershipPerc
                 monthNodeSourceEntryList.append([monthNodeSourceEntry, EOMcheck])
-            adjustedOwnershipBool = abs(nodeOwnershipSum - 100) > ownershipFlagTolerance #boolean for if ownership is adjusted. Tolerance for thousandth of a percent off
+            adjustedOwnershipBool = abs(nodeOwnershipSum - 100) > ownershipFlagTolerance and ownershipCorrect#boolean for if ownership is adjusted. Tolerance for thousandth of a percent off
             fundEntryList = aboveData['fundEntryList']
             for sourceEntry, EOMcheck in monthNodeSourceEntryList:
                 source = sourceEntry["Source name"]
@@ -191,12 +191,13 @@ def processNode(nodeData : dict,selfData : dict, statusQueue, _, failed, transac
                                         lst[nameHier["Value"]["dynHigh"]] = sourceEOM #this does not represent adjusted values
                                         lst["Balancetype"] = "Calculated_R"
                 #final (3rd) investor level iteration to use the pool level results for the investor to calculate the fund level information
+                srcOwnDec = sourceOwnership / 100
                 for targetEntry in fundEntryList:
                     target = targetEntry["Target name"]
-                    targetSourceNAV = sourceOwnership / 100 * targetEntry["NAV"]
-                    targetSourceGain = targetEntry["Monthly Gain"] / monthNodeCalc["Monthly Gain"] * sourceEntry["Monthly Gain"] if monthNodeCalc["Monthly Gain"] != 0 else 0
-                    targetSourceMDdenominator = sourceEntry["MDdenominator"] / monthNodeCalc["MDdenominator"] * targetEntry["MDdenominator"] if monthNodeCalc["MDdenominator"] != 0 else 0
-                    targetSourceReturn = targetSourceGain / targetSourceMDdenominator * findSign(targetSourceGain) if targetSourceMDdenominator != 0 else 0
+                    targetSourceNAV = srcOwnDec * targetEntry["NAV"]
+                    targetSourceGain = srcOwnDec * targetEntry["Monthly Gain"]
+                    targetSourceMDdenominator = srcOwnDec * targetEntry["MDdenominator"]
+                    targetSourceReturn = abs(targetSourceGain / targetSourceMDdenominator) * findSign(targetSourceGain) if targetSourceMDdenominator != 0 else 0
                     targetSourceOwnership = targetSourceNAV /  targetEntry["NAV"] if targetEntry["NAV"] != 0 else 0
                     #account for commitment calculations on closed funds
                     tempFundOwnership = targetSourceOwnership if targetSourceOwnership != 0 else sourceOwnership / 100

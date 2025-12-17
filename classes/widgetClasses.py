@@ -273,7 +273,8 @@ class SortButtonWidget(QWidget):
 
         self.popup = SortPopup(self.items, self.checked_items, self)
         self.popup.popup_closed.connect(self.on_popup_closed)
-
+    def options(self):
+        return self.items
     def add_item(self, item, checked=True):
         self.items.append(item)
         if checked:

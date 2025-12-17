@@ -1,12 +1,14 @@
 from scripts.importList import *
 
 currentVersion = "1.2.0"
-demoMode = True
+demoMode = False
 remoteDBmode = False
 ownershipCorrect = True
+fullRecalculations = True
 importInterval = relativedelta(hours=3)
 calculationPingTime = 2
-ownershipFlagTolerance = 0.001
+ownershipFlagTolerance = 0.01
+dashInactiveMinutes = 1
 
 databaseName = 'CRSPRdata.db'
 dynamoAPIenvName = "Dynamo_API"
@@ -59,7 +61,7 @@ assetLevelLinks = {1: {"Display" : "Asset Level 1", "Link" : "assetClass"},
 displayLinks = {"assetClass" : "Asset Level 1", "subAssetClass" : "Asset Level 2" ,
                  "subAssetSleeve" : "Asset Level 3", 'Source name' : 'Investor', 'Target name' : 'Investment',
                 'subClassification' : 'HF Sub-Classification', 'Classification' : 'HF Classification'}
-balanceTypePriority = ["Actual", "Adjusted", "Manager Estimate"]
+balanceTypePriority = ["Actual", 'Internal Valuation',"Manager Estimate","Adjusted"]
 yearOptions = (1,2,3,5,7,10,12,15,20)
 
 timeOptions = ["MTD","QTD","YTD", "ITD", "IRR ITD"] + [f"{y}YR" for y in yearOptions]
