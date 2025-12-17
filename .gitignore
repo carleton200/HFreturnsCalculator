@@ -16,9 +16,11 @@ __pycache__
 Example_Documents/
 dist/
 Data_Testing_Excels/
+Status_Notes.docx #doesn't handle merge well
 
 # Ignore environment variables file
 .env
+.tmp #temp files
 
 # Ignore build artifacts
 /build
