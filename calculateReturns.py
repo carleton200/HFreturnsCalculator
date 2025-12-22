@@ -1,18 +1,15 @@
-from scripts.importList import *
-from scripts.commonValues import *
-from scripts.instantiate_basics import *
+import sys
+import os
+from scripts.instantiate_basics import instantiate_basics
 instantiate_basics(BASE_DIR= os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))) #prepares values needed for other class functionality and imports
-
-from classes.DatabaseManager import DatabaseManager
-from classes.transactionApp import transactionApp
+from scripts.commonValues import dynamoAPIenvName
+from scripts.basicFunctions import poll_queue
 from classes.returnsApp import returnsApp
-from classes.windowClasses import *
-from classes.tableWidgets import *
-from classes.widgetClasses import *
+from multiprocessing import freeze_support
+from PyQt5.QtWidgets import QApplication
+from PyQt5.QtCore import QTimer
 
-from scripts.basicFunctions import *
-from scripts.exportTableToExcel import exportTableToExcel
-from scripts.loggingFuncs import *
+
 
 
 if __name__ == '__main__':

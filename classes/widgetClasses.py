@@ -1,6 +1,10 @@
-from scripts.importList import *
+from PyQt5.QtCore import Qt, QPoint, pyqtSignal
+from PyQt5.QtWidgets import (
+    QWidget, QLineEdit, QVBoxLayout, QPushButton, QScrollArea,
+    QCheckBox, QListWidget, QListWidgetItem, QDialog, QLabel,
+    QHBoxLayout, QComboBox, QDateEdit, QApplication
+)
 from scripts.loggingFuncs import attach_logging_to_class
-from scripts.commonValues import *
 
 class ClickableLineEdit(QLineEdit):
     clicked = pyqtSignal()
@@ -133,8 +137,7 @@ class MultiSelectBox(QWidget):
     def setCheckedItems(self, items):
         for text, cb in self._checkboxes.items():
             text = self.disp2id(text,text) #check as display version
-            if text in items:
-                cb.setChecked(True)
+            cb.setChecked(text in items)
         self._updateLine()
     def setCheckedItem(self, item):
         for text, cb in self._checkboxes.items():

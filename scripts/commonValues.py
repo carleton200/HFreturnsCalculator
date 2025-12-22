@@ -1,7 +1,7 @@
-from scripts.importList import *
+from dateutil.relativedelta import relativedelta
 
 currentVersion = "1.2.0"
-demoMode = False
+demoMode = True
 remoteDBmode = False
 ownershipCorrect = True
 fullRecalculations = True

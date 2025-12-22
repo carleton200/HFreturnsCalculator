@@ -1,48 +1,54 @@
-from scripts.importList import *
 from scripts.loggingFuncs import attach_logging_to_class
-from classes.DatabaseManager import DatabaseManager
-from scripts.instantiate_basics import *
-from classes.widgetClasses import *
-from scripts.commonValues import *
-from classes.DatabaseManager import *
+from classes.DatabaseManager import DatabaseManager, load_from_db, save_to_db
+from scripts.instantiate_basics import ASSETS_DIR, DATABASE_PATH, gui_queue, executor, APIexecutor, HELP_PATH
+from classes.widgetClasses import simpleMonthSelector, MultiSelectBox, SortButtonWidget
+from scripts.commonValues import (currentVersion, nameHier, headerOptions, ownershipCorrect, masterFilterOptions, importInterval, 
+                    currentVersion, demoMode, fullRecalculations, calculationPingTime, dashInactiveMinutes, nonFundCols, mainTableNames,
+                    nodePathSplitter,assetClass1Order, assetClass2Order,headerOptions, dataOptions, assetLevelLinks,
+                    yearOptions, percent_headers, mainURL, dynamoAPIenvName)
 from scripts.processClump import processClump
 from scripts.processInvestments import processInvestments
-from scripts.basicFunctions import *
+from scripts.basicFunctions import (updateStatus, annualizeITD, submitAPIcall, get_connected_node_groups, 
+                                 descendingNavSort, accountBalanceKey)
 from classes.transactionApp import transactionApp
-from classes.windowClasses import *
-from classes.tableWidgets import *
+from classes.windowClasses import reportExportWindow, underlyingDataWindow, linkBenchmarksWindow, tableWindow, exportWindow, displayWindow
+from classes.tableWidgets import DictListModel, SmartStretchTable
 from classes.nodeLibrary import nodeLibrary
-from TreeScripts.dash_launcher import launch_dash_app
-from collections import defaultdict
+from TreeScripts.dash_launcher import _run_dash_app_process
+from openpyxl.utils import get_column_letter
 
-# Module-level function for multiprocessing (can't use instance methods with Process)
-def _run_dash_app_process(data_pickle, node=None, date=None, active_flag_dict=None, inactivity_timeout=30):
-    """Target function for multiprocessing - runs in separate process with pre-loaded data"""
-    import sys
-    import os
-    
-    # Add TreeScripts to path
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    tree_scripts_path = os.path.join(current_dir, '..', 'TreeScripts')
-    tree_scripts_path = os.path.abspath(tree_scripts_path)
-    
-    if tree_scripts_path not in sys.path:
-        sys.path.insert(0, tree_scripts_path)
-    
-    try:        
-        # Launch with pre-loaded pickled data
-        launch_dash_app(
-            data_pickle=data_pickle,
-            initial_node=node,
-            initial_date=date,
-            port=8052,
-            inactivity_timeout=inactivity_timeout,
-            active_flag_dict=active_flag_dict
-        )
-    except Exception as e:
-        print(f"Error in Dash app process: {e}")
-        import traceback
-        traceback.print_exc()
+
+import os
+import re
+import json
+import time
+import copy
+import requests
+import calendar
+import traceback
+import threading
+import subprocess
+from datetime import datetime
+from openpyxl import Workbook
+from openpyxl import load_workbook
+from concurrent.futures import wait
+from collections import defaultdict
+from multiprocessing import Pool, Manager
+from openpyxl.utils import get_column_letter
+from dateutil.relativedelta import relativedelta
+from openpyxl.styles import PatternFill, Alignment, Font
+
+
+from PyQt5.QtWidgets import (
+                                QApplication, QWidget, QStackedWidget, QVBoxLayout,
+                                QLabel, QLineEdit, QPushButton,
+                                QRadioButton, QButtonGroup, QComboBox, QHBoxLayout,
+                                QTableWidget, QTableWidgetItem, QProgressBar, QTableView, QCheckBox, QMessageBox,
+                                QFileDialog, QGridLayout,
+                                QFrame
+                            )
+from PyQt5.QtGui import QBrush, QColor, QDesktopServices
+from PyQt5.QtCore import Qt, QTimer, QUrl
 
 @attach_logging_to_class
 class returnsApp(QWidget):
@@ -279,7 +285,8 @@ class returnsApp(QWidget):
             original_setEnabled(visible)
             self.clearButton.setEnabled(visible)
         self.importButton.setEnabled = setEnabled_wrapper
-        controlsLayout.addWidget(self.clearButton, stretch=0)
+        if not demoMode:
+            controlsLayout.addWidget(self.clearButton, stretch=0)
         controlsLayout.addWidget(self.importButton, stretch=0)
         btn_to_results = QPushButton('See Calculation Database')
         btn_to_results.clicked.connect(self.show_results)
@@ -290,10 +297,15 @@ class returnsApp(QWidget):
         dashAppBtn = QPushButton('Tree Hierarchy Viewer')
         dashAppBtn.clicked.connect(self.openDashApp)
         controlsLayout.addWidget(dashAppBtn, stretch=0)
-        self.exportBtn = QPushButton("Export Current Table to Excel")
-        self.exportBtn.clicked.connect(self.exportCurrentTable)
-        self.exportBtn.setObjectName("exportBtn")
-        controlsLayout.addWidget(self.exportBtn, stretch=0)
+        exportReportBtn = QPushButton("Export Report")
+        exportReportBtn.clicked.connect(self.exportReport)
+        exportReportBtn.setObjectName('exportBtn')
+        controlsLayout.addWidget(exportReportBtn)
+        exportReportBtn.setEnabled(False)
+        exportBtn = QPushButton("Export Current Table to Excel")
+        exportBtn.clicked.connect(self.exportCurrentTable)
+        exportBtn.setObjectName("exportBtn")
+        controlsLayout.addWidget(exportBtn, stretch=0)
         controlsLayout.addStretch(1)
         controlsBox.setLayout(controlsLayout)
         layout.addWidget(controlsBox)
@@ -696,6 +708,12 @@ class returnsApp(QWidget):
                 window.show()
         except Exception as e:
             print(f"Error in data viewing window: {e} {traceback.format_exc()}")
+    def exportReport(self,*_):
+        print("export report")
+        window = reportExportWindow(self.db, parentSource = self)
+        window.show()
+        self.reportExportWindow = window
+        
     def exportCurrentTable(self,*_):
         #excel export for the returns app excel export
         # helper to darken a 6-digit hex color by a given factor
@@ -861,12 +879,22 @@ class returnsApp(QWidget):
                 gui_queue.put(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(path)))
         executor.submit(processExport)
     def processFunds(self):
+        print('Funds are processing')
         self.cFundsCalculated = True
         self.sleeveFundLinks = {}
         self.cFundToFundLinks = {}
         sleeves = set()
         funds = load_from_db(self.db,"funds")
         if funds != []:
+            self.consolidatedFunds = {}
+            self.cFundToFundLinks = defaultdict(set)
+            for f in funds:
+                name = f['Name']
+                parent = f.get('Parentfund')
+                if parent not in (None,'None',''):
+                    self.consolidatedFunds[name] = parent
+                    self.cFundToFundLinks[parent].add(name)
+            return
             consolidatorFunds = {}
             for row in funds: #find sleeve values and consolidated funds
                 assetClass = row["assetClass"]
@@ -948,228 +976,7 @@ class returnsApp(QWidget):
         self.buildTableLoadingBar.setValue(2)
         if not self.cFundsCalculated:
             self.processFunds()
-        def buildTable(cancelEvent):
-            try:
-                print("Building return table...")
-                self.currentTableData = None #resets so a failed build won't be used
-                complexMode = self.tableBtnGroup.checkedButton().text() == "Complex Table"
-                gui_queue.put(lambda: self.dataTypeBox.setVisible(not complexMode))
-                condStatement = ""
-                parameters = []
-                invSelections = self.filterDict["Source name"].checkedItems()
-                famSelections = self.filterDict["Family Branch"].checkedItems()
-                if invSelections != [] or famSelections != []: #handle investor level
-                    invsF = set()
-                    for fam in famSelections:
-                        invsF.update(self.db.pullInvestorsFromFamilies(fam))
-                    invsI = set(invSelections)
-                    if invSelections != [] and famSelections != []: #Union if both are selected
-                        invs = invsF and invsI
-                    else: #combine if only one is valid
-                        invs = invsF or invsI
-                    placeholders = ','.join('?' for _ in invs)
-                    if condStatement in ("", " WHERE"):
-                        condStatement = f' WHERE [Source name] in ({placeholders})'
-                    else:
-                        condStatement += f' AND [Source name] in ({placeholders})'
-                    parameters.extend(invs)
-                if self.filterDict['Node'].checkedItems() != []:
-                    selectedNodes = self.filterDict['Node'].checkedItems()
-                    sNodeIds = [" "+ str(node['id'])+" " for node in self.db.fetchNodes() if str(node['id']) in selectedNodes]
-                    # Build LIKE conditions to check if any node ID appears within the nodePath column
-                    if sNodeIds:
-                        likeConditions = ' OR '.join('[nodePath] LIKE ?' for _ in sNodeIds)
-                        if condStatement in (""," WHERE"):
-                            condStatement = f"WHERE ({likeConditions})"
-                        else:
-                            condStatement += f" AND ({likeConditions})"
-                        # Add each node ID with wildcards to search for it within the column
-                        for sNodeId in sNodeIds:
-                            parameters.append(f'%{sNodeId}%')
-                    else:
-                        print(f"Warning: Failed to find corresponding node Id's for {selectedNodes}")
-                filterParamDict = {}
-                for filter in self.filterOptions:
-                    if filter["key"] not in nonFundCols:
-                        if self.filterDict[filter["key"]].checkedItems() != []:
-                            filterParamDict[filter['key']] = self.filterDict[filter["key"]].checkedItems()
-                if filterParamDict:
-                    if condStatement == "":
-                        condStatement = " WHERE"
-                    filteredFunds = self.db.pullFundsFromFilters(filterParamDict)
-                    for param in filteredFunds:
-                        parameters.append(param)
-                    placeholders = ','.join('?' for _ in filteredFunds)
-                    if condStatement in ("", " WHERE"):
-                        condStatement = f"WHERE [Target name] IN ({placeholders})"
-                    else:
-                        condStatement += f" AND [Target name] IN ({placeholders})"
-                # Add time filter to condStatement for database-level filtering
-                startDate = datetime.strptime(self.dataStartSelect.currentText(), "%B %Y")
-                startDateStr = startDate.strftime("%Y-%m-%d %H:%M:%S")
-                endDate = datetime.strptime(self.dataEndSelect.currentText(), "%B %Y")
-                endDateStr = endDate.strftime("%Y-%m-%d %H:%M:%S")
-                if condStatement == "":
-                    condStatement = f" WHERE [dateTime] >= ? AND [dateTime] <= ?"
-                else:
-                    condStatement += f" AND [dateTime] >= ? AND [dateTime] <= ?"
-                parameters.append(startDateStr)
-                parameters.append(endDateStr)
-                gui_queue.put(lambda: self.buildTableLoadingBar.setValue(3))
-                if cancelEvent.is_set(): #exit if new table build request is made
-                    return
-                data = load_from_db(self.db,"calculations",condStatement, tuple(parameters))
-                for idx in range(len(data)):
-                    data[idx]['ownershipAdjust'] = data[idx]['ownershipAdjust'] == 'True'
-                output = {"Total##()##" : {}}
-                flagOutput = {"Total##()##" : {}}
-                if self.benchmarkSelection.checkedItems() != [] or self.showBenchmarkLinksBtn.isChecked():
-                    output = self.applyBenchmarks(output)
-                output , data = self.calculateUpperLevels(output,data)
-                for benchmark in self.pendingBenchmarks: #remove the benchmarks used only in benchmark links
-                    if benchmark not in self.benchmarkChoices and benchmark + self.buildCode([]) in output.keys():
-                        output.pop(benchmark + self.buildCode([]))
-                gui_queue.put(lambda: self.buildTableLoadingBar.setValue(4))
-                if cancelEvent.is_set(): #exit if new table build request is made
-                    return
-                complexOutput = copy.deepcopy(output)
-                multiData = {}
-                # Cache frequently used values and avoid repeated lookups/parsing in the loop
-                headerOptions_local = headerOptions
-                complexMode_local = complexMode
-                end_month_str = self.dataEndSelect.currentText()
-                cFunds_checked = self.consolidateFundsBtn.isChecked()
-                consolidatedFunds_local = self.consolidatedFunds
-                investor_checked = self.filterDict["Source name"].checkedItems() != []
-                fam_checked = self.filterDict["Family Branch"].checkedItems() != []
-                # Map "%" to NAV only for non-complex mode
-                dataOutputType = self.returnOutputType.currentText() if not complexMode_local else "Return"
-                if not complexMode_local and dataOutputType == "%":
-                    dataOutputType = "NAV"
-                # Cache month string conversions by timestamp
-                month_cache = {}
-                get_month = month_cache.get
-                set_month = month_cache.__setitem__
-                # Local refs for speed
-                out_ref = output
-                c_out_ref = complexOutput
-                flag_ref = flagOutput
-                for entry in data:
-                    e_get = entry.get
-                    # month string from dateTime (with small cache)
-                    dt_str = e_get("dateTime","")
-                    if dt_str is None:
-                        print(f"Warning: data with no date in table build: {entry}")
-                        continue #can't use data with no date. Shouldn't have gotten this fay anyways
-                    month_str = get_month(dt_str)
-                    if month_str is None:
-                        month_str = datetime.strftime(datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S"), "%B %Y")
-                        set_month(dt_str, month_str)
-                    Dtype = entry["Calculation Type"]
-                    level = entry["rowKey"]
-                    if dataOutputType == "IRR ITD" and ((cFunds_checked and e_get("Target name") in consolidatedFunds_local) or e_get("Calculation Type") != "Total Target name"):
-                        # skip for consolidated funds or non-total
-                        continue
-                    # ensure output[level]
-                    lvl_out = out_ref.get(level)
-                    if lvl_out is None:
-                        lvl_out = {}
-                        out_ref[level] = lvl_out
-                    val = e_get(dataOutputType)
-                    if val not in (None, "None", ""):
-                        # flags
-                        level_flags = flag_ref.setdefault(level, {})
-                        level_flags.setdefault(month_str, False)
-                        level_flags[month_str] = (e_get("ownershipAdjust", False)) or level_flags[month_str]
-                        # aggregate
-                        if month_str not in lvl_out:
-                            lvl_out[month_str] = float(val)
-                        elif dataOutputType not in ("Return", "Ownership"):
-                            lvl_out[month_str] += float(val)
-                        else:
-                            # same row needs special handling later
-                            multiData.setdefault(level, {})
-                    if "dataType" not in lvl_out:
-                        lvl_out["dataType"] = Dtype
-                    # complex table accumulation only at end month
-                    if complexMode_local and month_str == end_month_str:
-                        lvl_c_out = c_out_ref.get(level)
-                        if lvl_c_out is None:
-                            lvl_c_out = {}
-                            c_out_ref[level] = lvl_c_out
-                        if "dataType" not in lvl_c_out:
-                            lvl_c_out["dataType"] = Dtype
-                        level_flags = flag_ref.setdefault(level, {})
-                        nav_flag = level_flags.setdefault("NAV", False)
-                        level_flags["NAV"] = (e_get("ownershipAdjust", False)) or nav_flag
-                        if headerOptions_local and headerOptions_local[0] not in lvl_c_out:
-                            for option in (option for option in headerOptions_local if option != "Ownership"):
-                                if option == "IRR ITD" and ((cFunds_checked and e_get("Target name") in consolidatedFunds_local) or e_get("Calculation Type") != "Total Target name"):
-                                    continue
-                                ov = e_get(option)
-                                lvl_c_out[option] = float(ov if ov not in (None, "None", "") else 0)
-                        else:
-                            for option in headerOptions_local:
-                                if option not in ("Ownership", "IRR ITD"):
-                                    ov = e_get(option)
-                                    lvl_c_out[option] += float(ov if ov not in (None, "None", "") else 0)
-                        if e_get("Ownership") not in (None, "None") and (investor_checked or fam_checked):
-                            own = float(entry["Ownership"]) if entry.get("Ownership") not in (None, "None") else 0.0
-                            if "Ownership" not in lvl_c_out:
-                                lvl_c_out["Ownership"] = own
-                            else:
-                                lvl_c_out["Ownership"] += own
-                            # else:
-                            #     complexOutput[level]["Ownership"] += float(entry["Ownership"])
-                for tableStruc in (output,complexOutput): 
-                    #remove bad table entries with no dataType (means data was somehow irrelevant. (ex: fund starts after the selected range))
-                    keys = tableStruc.keys()
-                    pops = [key for key in keys if "dataType" not in tableStruc[key]]
-                    for pop in pops:
-                        tableStruc.pop(pop)
-                if multiData and dataOutputType == "Return": #must iterate through data again to correct for returns of multi pool funds
-                    for entry in (entry for entry in data if entry.get("rowKey") in multiData):
-                        #only occurs for the multifunds
-                        #sums all gains and MDden for a row for a month
-                        dateTime = entry.get("dateTime")
-                        if dateTime not in multiData[entry.get("rowKey")]:
-                            multiData[entry.get("rowKey")][entry.get("dateTime")] = {"MDdenominator" : float(entry.get("MDdenominator")), "Monthly Gain" : float(entry.get("Monthly Gain"))}
-                        else:
-                            multiData[entry.get("rowKey")][entry.get("dateTime")]["MDdenominator"] += float(entry.get("MDdenominator"))
-                            multiData[entry.get("rowKey")][entry.get("dateTime")]["Monthly Gain"] += float(entry.get("Monthly Gain"))
-                    for rowKey in multiData: #set proper return values
-                        for date in multiData.get(rowKey):
-                            strDate = datetime.strftime(datetime.strptime(date, "%Y-%m-%d %H:%M:%S"), "%B %Y")
-                            MDden = multiData.get(rowKey).get(date).get("MDdenominator")
-                            returnVal = multiData.get(rowKey).get(date).get("Monthly Gain") / MDden * 100 if MDden != 0 else 0
-                            output[rowKey][strDate] = returnVal
-                            if complexMode and strDate == self.dataEndSelect.currentText():
-                                complexOutput[rowKey]["Return"] = returnVal
-                if complexMode:
-                    for rowKey in complexOutput:
-                        if complexOutput[rowKey].get("NAV",0.0) != 0:
-                            complexOutput[rowKey]["%"] = complexOutput[rowKey].get("NAV",0.0) / complexOutput["Total##()##"].get("NAV",0.0) * 100 if complexOutput["Total##()##"]["NAV"] != 0 else 0
-                elif self.returnOutputType.currentText() == "%":
-                    for rowKey in reversed(output): #iterate through backwards so total is affected last
-                        for date in [header for header in output[rowKey].keys() if header != "dataType"]:
-                            output[rowKey][date] = float(output[rowKey][date]) / float(output["Total##()##"][date]) * 100 if  float(output["Total##()##"][date]) != 0 else 0                
-                gui_queue.put(lambda: self.buildTableLoadingBar.setValue(5))
-                if cancelEvent.is_set(): #exit if new table build request is made
-                    return
-                if  complexMode:
-                    output = self.calculateComplexTable(output,complexOutput)
-                gui_queue.put(lambda: self.buildTableLoadingBar.setValue(6))
-                if cancelEvent.is_set(): #exit if new table build request is made
-                    return
-                for key in (key for key in output.keys() if len(output[key].keys()) == 0):
-                    output.pop(key) #remove empty entries
-                gui_queue.put(lambda: self.populateReturnsTable(output,flagStruc=flagOutput))
-                self.currentTableData = output
-                self.currentTableFlags = flagOutput
-            except Exception as e:
-                tracebackMsg = traceback.format_exc()
-                gui_queue.put(lambda error = e: QMessageBox.warning(self, "Error building returns table", f"Error: {error}. {error.args}. Data entry: \n  \n Traceback:  \n {tracebackMsg}"))
-                gui_queue.put(lambda: self.buildTableLoadingBox.setVisible(False))
+        
         if self.buildTableCancel:
             self.buildTableCancel.set()
         if self.buildTableFuture and not self.buildTableFuture.done():
@@ -1178,8 +985,230 @@ class returnsApp(QWidget):
         cancelEvent = threading.Event()
         self.buildTableCancel = cancelEvent
         self.stack.setCurrentIndex(1)
-        future = executor.submit(buildTable, cancelEvent)
+        future = executor.submit(self.buildTable, cancelEvent)
         self.buildTableFuture = future
+    def buildTable(self, cancelEvent):
+        try:
+            print("Building return table...")
+            self.currentTableData = None #resets so a failed build won't be used
+            complexMode = self.tableBtnGroup.checkedButton().text() == "Complex Table"
+            gui_queue.put(lambda: self.dataTypeBox.setVisible(not complexMode))
+            condStatement = ""
+            parameters = []
+            invSelections = self.filterDict["Source name"].checkedItems()
+            famSelections = self.filterDict["Family Branch"].checkedItems()
+            if invSelections != [] or famSelections != []: #handle investor level
+                invsF = set()
+                for fam in famSelections:
+                    invsF.update(self.db.pullInvestorsFromFamilies(fam))
+                invsI = set(invSelections)
+                if invSelections != [] and famSelections != []: #Union if both are selected
+                    invs = invsF and invsI
+                else: #combine if only one is valid
+                    invs = invsF or invsI
+                placeholders = ','.join('?' for _ in invs)
+                if condStatement in ("", " WHERE"):
+                    condStatement = f' WHERE [Source name] in ({placeholders})'
+                else:
+                    condStatement += f' AND [Source name] in ({placeholders})'
+                parameters.extend(invs)
+            if self.filterDict['Node'].checkedItems() != []:
+                selectedNodes = self.filterDict['Node'].checkedItems()
+                sNodeIds = [" "+ str(node['id'])+" " for node in self.db.fetchNodes() if str(node['id']) in selectedNodes]
+                # Build LIKE conditions to check if any node ID appears within the nodePath column
+                if sNodeIds:
+                    likeConditions = ' OR '.join('[nodePath] LIKE ?' for _ in sNodeIds)
+                    if condStatement in (""," WHERE"):
+                        condStatement = f"WHERE ({likeConditions})"
+                    else:
+                        condStatement += f" AND ({likeConditions})"
+                    # Add each node ID with wildcards to search for it within the column
+                    for sNodeId in sNodeIds:
+                        parameters.append(f'%{sNodeId}%')
+                else:
+                    print(f"Warning: Failed to find corresponding node Id's for {selectedNodes}")
+            filterParamDict = {}
+            for filter in self.filterOptions:
+                if filter["key"] not in nonFundCols:
+                    if self.filterDict[filter["key"]].checkedItems() != []:
+                        filterParamDict[filter['key']] = self.filterDict[filter["key"]].checkedItems()
+            if filterParamDict:
+                if condStatement == "":
+                    condStatement = " WHERE"
+                filteredFunds = self.db.pullFundsFromFilters(filterParamDict)
+                for param in filteredFunds:
+                    parameters.append(param)
+                placeholders = ','.join('?' for _ in filteredFunds)
+                if condStatement in ("", " WHERE"):
+                    condStatement = f"WHERE [Target name] IN ({placeholders})"
+                else:
+                    condStatement += f" AND [Target name] IN ({placeholders})"
+            # Add time filter to condStatement for database-level filtering
+            startDate = datetime.strptime(self.dataStartSelect.currentText(), "%B %Y") #TODO: is this even necessary???
+            startDateStr = startDate.strftime("%Y-%m-%d %H:%M:%S")
+            endDate = datetime.strptime(self.dataEndSelect.currentText(), "%B %Y")
+            endDateStr = endDate.strftime("%Y-%m-%d %H:%M:%S")
+            if condStatement == "":
+                condStatement = f" WHERE [dateTime] >= ? AND [dateTime] <= ?"
+            else:
+                condStatement += f" AND [dateTime] >= ? AND [dateTime] <= ?"
+            parameters.append(startDateStr)
+            parameters.append(endDateStr)
+            gui_queue.put(lambda: self.buildTableLoadingBar.setValue(3))
+            if cancelEvent.is_set(): #exit if new table build request is made
+                return
+            data = load_from_db(self.db,"calculations",condStatement, tuple(parameters))
+            for idx in range(len(data)):
+                data[idx]['ownershipAdjust'] = data[idx]['ownershipAdjust'] == 'True'
+            output = {"Total##()##" : {}}
+            flagOutput = {"Total##()##" : {}}
+            if self.benchmarkSelection.checkedItems() != [] or self.showBenchmarkLinksBtn.isChecked():
+                output = self.applyBenchmarks(output)
+            output , data = self.calculateUpperLevels(output,data)
+            for benchmark in self.pendingBenchmarks: #remove the benchmarks used only in benchmark links
+                if benchmark not in self.benchmarkChoices and benchmark + self.buildCode([]) in output.keys():
+                    output.pop(benchmark + self.buildCode([]))
+            gui_queue.put(lambda: self.buildTableLoadingBar.setValue(4))
+            if cancelEvent.is_set(): #exit if new table build request is made
+                return
+            complexOutput = copy.deepcopy(output)
+            multiData = {}
+            # Cache frequently used values and avoid repeated lookups/parsing in the loop
+            headerOptions_local = headerOptions
+            complexMode_local = complexMode
+            end_month_str = self.dataEndSelect.currentText()
+            cFunds_checked = self.consolidateFundsBtn.isChecked()
+            consolidatedFunds_local = self.consolidatedFunds
+            investor_checked = self.filterDict["Source name"].checkedItems() != []
+            fam_checked = self.filterDict["Family Branch"].checkedItems() != []
+            # Map "%" to NAV only for non-complex mode
+            dataOutputType = self.returnOutputType.currentText() if not complexMode_local else "Return"
+            if not complexMode_local and dataOutputType == "%":
+                dataOutputType = "NAV"
+            # Cache month string conversions by timestamp
+            month_cache = {}
+            get_month = month_cache.get
+            set_month = month_cache.__setitem__
+            # Local refs for speed
+            out_ref = output
+            c_out_ref = complexOutput
+            flag_ref = flagOutput
+            for entry in data:
+                e_get = entry.get
+                # month string from dateTime (with small cache)
+                dt_str = e_get("dateTime","")
+                if dt_str is None:
+                    print(f"Warning: data with no date in table build: {entry}")
+                    continue #can't use data with no date. Shouldn't have gotten this fay anyways
+                month_str = get_month(dt_str)
+                if month_str is None:
+                    month_str = datetime.strftime(datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S"), "%B %Y")
+                    set_month(dt_str, month_str)
+                Dtype = entry["Calculation Type"]
+                level = entry["rowKey"]
+                if dataOutputType == "IRR ITD" and ((cFunds_checked and e_get("Target name") in consolidatedFunds_local) or e_get("Calculation Type") != "Total Target name"):
+                    # skip for consolidated funds or non-total
+                    continue
+                # ensure output[level]
+                lvl_out = out_ref.get(level)
+                if lvl_out is None:
+                    lvl_out = {}
+                    out_ref[level] = lvl_out
+                val = e_get(dataOutputType)
+                if val not in (None, "None", ""):
+                    # flags
+                    level_flags = flag_ref.setdefault(level, {})
+                    level_flags.setdefault(month_str, False)
+                    level_flags[month_str] = (e_get("ownershipAdjust", False)) or level_flags[month_str]
+                    # aggregate
+                    if month_str not in lvl_out:
+                        lvl_out[month_str] = float(val)
+                    elif dataOutputType not in ("Return", "Ownership"):
+                        lvl_out[month_str] += float(val)
+                    else:
+                        # same row needs special handling later
+                        multiData.setdefault(level, {})
+                if "dataType" not in lvl_out:
+                    lvl_out["dataType"] = Dtype
+                # complex table accumulation only at end month
+                if complexMode_local and month_str == end_month_str:
+                    lvl_c_out = c_out_ref.get(level)
+                    if lvl_c_out is None:
+                        lvl_c_out = {}
+                        c_out_ref[level] = lvl_c_out
+                    if "dataType" not in lvl_c_out:
+                        lvl_c_out["dataType"] = Dtype
+                    level_flags = flag_ref.setdefault(level, {})
+                    nav_flag = level_flags.setdefault("NAV", False)
+                    level_flags["NAV"] = (e_get("ownershipAdjust", False)) or nav_flag
+                    if headerOptions_local and headerOptions_local[0] not in lvl_c_out:
+                        for option in (option for option in headerOptions_local if option != "Ownership"):
+                            if option == "IRR ITD" and ((cFunds_checked and e_get("Target name") in consolidatedFunds_local) or e_get("Calculation Type") != "Total Target name"):
+                                continue
+                            ov = e_get(option)
+                            lvl_c_out[option] = float(ov if ov not in (None, "None", "") else 0)
+                    else:
+                        for option in headerOptions_local:
+                            if option not in ("Ownership", "IRR ITD"):
+                                ov = e_get(option)
+                                lvl_c_out[option] += float(ov if ov not in (None, "None", "") else 0)
+                    if e_get("Ownership") not in (None, "None") and (investor_checked or fam_checked):
+                        own = float(entry["Ownership"]) if entry.get("Ownership") not in (None, "None") else 0.0
+                        if "Ownership" not in lvl_c_out:
+                            lvl_c_out["Ownership"] = own
+                        else:
+                            lvl_c_out["Ownership"] += own
+                        # else:
+                        #     complexOutput[level]["Ownership"] += float(entry["Ownership"])
+            for tableStruc in (output,complexOutput): 
+                #remove bad table entries with no dataType (means data was somehow irrelevant. (ex: fund starts after the selected range))
+                keys = tableStruc.keys()
+                pops = [key for key in keys if "dataType" not in tableStruc[key]]
+                for pop in pops:
+                    tableStruc.pop(pop)
+            if multiData and dataOutputType == "Return": #must iterate through data again to correct for returns of multi pool funds
+                for entry in (entry for entry in data if entry.get("rowKey") in multiData):
+                    #only occurs for the multifunds
+                    #sums all gains and MDden for a row for a month
+                    dateTime = entry.get("dateTime")
+                    if dateTime not in multiData[entry.get("rowKey")]:
+                        multiData[entry.get("rowKey")][entry.get("dateTime")] = {"MDdenominator" : float(entry.get("MDdenominator")), "Monthly Gain" : float(entry.get("Monthly Gain"))}
+                    else:
+                        multiData[entry.get("rowKey")][entry.get("dateTime")]["MDdenominator"] += float(entry.get("MDdenominator"))
+                        multiData[entry.get("rowKey")][entry.get("dateTime")]["Monthly Gain"] += float(entry.get("Monthly Gain"))
+                for rowKey in multiData: #set proper return values
+                    for date in multiData.get(rowKey):
+                        strDate = datetime.strftime(datetime.strptime(date, "%Y-%m-%d %H:%M:%S"), "%B %Y")
+                        MDden = multiData.get(rowKey).get(date).get("MDdenominator")
+                        returnVal = multiData.get(rowKey).get(date).get("Monthly Gain") / MDden * 100 if MDden != 0 else 0
+                        output[rowKey][strDate] = returnVal
+                        if complexMode and strDate == self.dataEndSelect.currentText():
+                            complexOutput[rowKey]["Return"] = returnVal
+            if complexMode:
+                for rowKey in complexOutput:
+                    if complexOutput[rowKey].get("NAV",0.0) != 0:
+                        complexOutput[rowKey]["%"] = complexOutput[rowKey].get("NAV",0.0) / complexOutput["Total##()##"].get("NAV",0.0) * 100 if complexOutput["Total##()##"]["NAV"] != 0 else 0
+            elif self.returnOutputType.currentText() == "%":
+                for rowKey in reversed(output): #iterate through backwards so total is affected last
+                    for date in [header for header in output[rowKey].keys() if header != "dataType"]:
+                        output[rowKey][date] = float(output[rowKey][date]) / float(output["Total##()##"][date]) * 100 if  float(output["Total##()##"][date]) != 0 else 0                
+            gui_queue.put(lambda: self.buildTableLoadingBar.setValue(5))
+            if cancelEvent.is_set(): #exit if new table build request is made
+                return
+            if  complexMode:
+                output = self.calculateComplexTable(output,complexOutput)
+            gui_queue.put(lambda: self.buildTableLoadingBar.setValue(6))
+            if cancelEvent.is_set(): #exit if new table build request is made
+                return
+            for key in (key for key in output.keys() if len(output[key].keys()) == 0):
+                output.pop(key) #remove empty entries
+            gui_queue.put(lambda: self.populateReturnsTable(output,flagStruc=flagOutput))
+            self.currentTableData = output
+            self.currentTableFlags = flagOutput
+        except Exception as e:
+            tracebackMsg = traceback.format_exc()
+            gui_queue.put(lambda error = e: QMessageBox.warning(self, "Error building returns table", f"Error: {error}. {error.args}. Data entry: \n  \n Traceback:  \n {tracebackMsg}"))
+            gui_queue.put(lambda: self.buildTableLoadingBox.setVisible(False))
     def calculateComplexTable(self,monthOutput,complexOutput):
         # Precompute end-of-period and month sequences
         endTime = datetime.strptime(self.dataEndSelect.currentText(), "%B %Y")
@@ -1495,7 +1524,7 @@ class returnsApp(QWidget):
                         if not consolidateFunds or target_raw not in consolidatedFunds_map or target_raw in filteredTargets:
                             targetName = target_raw
                         else:
-                            targetName = consolidatedFunds_map.get(target_raw).get("cFund")
+                            targetName = consolidatedFunds_map.get(target_raw)
                         targetTraitGet = fund2traitGet(target_raw,{}).get
                         name_key = targetName + code
                         nameList[name_key] = nameList.get(name_key, 0.0)
@@ -2243,7 +2272,6 @@ class returnsApp(QWidget):
                             rows = []
                         keys_to_remove = {'_id', '_es'}
                         rows = [{k: v for k, v in row.items() if k not in keys_to_remove} for row in rows]
-                        consolidatorFunds = {}
                         for idx, row in enumerate(rows): #find sleeve values and consolidated funds
                             assetCat = row["ExposureAssetClassCategory"]
                             if assetCat is not None and assetCat.count(" > ") == 3:
@@ -2262,8 +2290,6 @@ class returnsApp(QWidget):
                                 assetClass = None
                                 subAssetClass = None
                                 sleeve = None
-                            if not sec and row.get("Fundpipelinestatus") is not None and "Z - Placeholder" in row.get("Fundpipelinestatus"):
-                                consolidatorFunds[row["Name"]] = {"cFund" : row["Name"], "assetClass" : assetClass, "subAssetClass" : subAssetClass, "sleeve" : sleeve}
                             rows[idx][nameHier["sleeve"]["sleeve"]] =  sleeve
                             rows[idx]["assetClass"] = assetClass
                             rows[idx]["subAssetClass"] = subAssetClass
@@ -2869,3 +2895,4 @@ class returnsApp(QWidget):
 
         self.calcTableModel = DictListModel(rows,headers, self)
         table.setModel(self.calcTableModel)
+

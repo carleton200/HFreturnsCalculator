@@ -77,3 +77,30 @@ def launch_dash_app(data_pickle: bytes, initial_node: Optional[str] = None,
         import traceback
         traceback.print_exc()
 
+def _run_dash_app_process(data_pickle, node=None, date=None, active_flag_dict=None, inactivity_timeout=30):
+    """Target function for multiprocessing - runs in separate process with pre-loaded data"""
+    import sys
+    import os
+    
+    # Add TreeScripts to path
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    tree_scripts_path = os.path.join(current_dir, '..', 'TreeScripts')
+    tree_scripts_path = os.path.abspath(tree_scripts_path)
+    
+    if tree_scripts_path not in sys.path:
+        sys.path.insert(0, tree_scripts_path)
+    
+    try:        
+        # Launch with pre-loaded pickled data
+        launch_dash_app(
+            data_pickle=data_pickle,
+            initial_node=node,
+            initial_date=date,
+            port=8052,
+            inactivity_timeout=inactivity_timeout,
+            active_flag_dict=active_flag_dict
+        )
+    except Exception as e:
+        print(f"Error in Dash app process: {e}")
+        import traceback
+        traceback.print_exc()

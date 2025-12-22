@@ -16,11 +16,11 @@ __pycache__
 Example_Documents/
 dist/
 Data_Testing_Excels/
-Status_Notes.docx 
 
-# Ignore environment variables file
-.env
-.tmp
+# Ignore certain file types
+*.env
+*.tmp
+*.docx
 
 # Ignore build artifacts
 /build

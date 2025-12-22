@@ -1,9 +1,32 @@
-from classes.DatabaseManager import load_from_db, save_to_db
-from scripts.importList import *
+from classes import DatabaseManager
+from classes.DatabaseManager import load_from_db
 from scripts.loggingFuncs import attach_logging_to_class
-from classes.widgetClasses import *
-from scripts.basicFunctions import *
+from classes.widgetClasses import SortButtonWidget, MultiSelectBox, simpleMonthSelector
 from scripts.exportTableToExcel import exportTableToExcel
+from scripts.reportWorkbooks import portfolioSnapshot
+from openpyxl.utils import get_column_letter
+from dateutil.relativedelta import relativedelta
+from openpyxl import Workbook
+from scripts.instantiate_basics import gui_queue, executor
+from scripts.commonValues import timeOptions, percent_headers, demoMode, nonFundCols
+import sqlite3
+import logging
+import traceback
+import os
+import pandas as pd
+from datetime import datetime
+from openpyxl import load_workbook
+from PyQt5.QtWidgets import (
+    QWidget, QVBoxLayout,
+    QLabel,  QPushButton, QFormLayout,
+    QRadioButton, QButtonGroup, QComboBox, QHBoxLayout,
+    QTableWidget, QTableWidgetItem,  QMessageBox,
+    QScrollArea, QFileDialog, 
+     QHeaderView, QDateEdit, QSplitter
+)
+from PyQt5.QtGui import QDesktopServices
+from PyQt5.QtCore import Qt,  QUrl, QDate
+from scripts.instantiate_basics import DATABASE_PATH
 
 class linkBenchmarksWindow(QWidget):
     def __init__(self, parent=None, flags=Qt.WindowFlags(), parentSource=None):
@@ -95,6 +118,9 @@ class linkBenchmarksWindow(QWidget):
             self.tableConfirmBtn.clicked.connect(self.addTableElementBenchmarkLink) # Connect to your logic
             bottomLayout.addWidget(self.tableConfirmBtn)
             bottomLayout.addStretch()
+            self.autoAddFamBtn = QPushButton('Auto Connect Family Branches')
+            bottomLayout.addWidget(self.autoAddFamBtn)
+            self.autoAddFamBtn.clicked.connect(self.autoConnectFams)
 
             rightVSplitter.addWidget(topWidget)
             rightVSplitter.addWidget(bottomWidget)
@@ -145,8 +171,99 @@ class linkBenchmarksWindow(QWidget):
     def updateTableElementCombo(self):
         self.tableElementCombo.clear()
         opts = ["","Total"]
-        opts.extend([famBranch for famBranch in self.parent.fullLevelOptions.get("Family Branch",[]) if famBranch])
+        opts.extend(set(inv['Parentinvestor'] for inv in self.parent.db.fetchInvestors()))
         self.tableElementCombo.addItems(opts)
+    def autoConnectFams(self):
+        reply = QMessageBox.question(
+            self,
+            "Auto-connect Family Branch Benchmarks",
+            "Would you like to automatically connect all family branches to their related policy and implementation benchmarks? (Only works if the names are formatted exactly the same)",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        db = self.parent.db
+        family_branches = set(inv['Parentinvestor'] for inv in db.fetchInvestors())
+        benchmarks = self._benchmarks
+
+        pending_updates = []  # Collect (famBranch, benchmark) pairs to add
+        for famBranch in family_branches:
+            famBranchBase = famBranch.split(' Family Branch')[0]
+            for suffix in ("Implementation Benchmark", "Policy Benchmark"):
+                expected_bench = f"{famBranchBase} {suffix}"
+                # Find if this benchmark exists (string match; b can be dict or string)
+                match = None
+                for b in benchmarks:
+                    b_name = b.get("benchmark") if isinstance(b, dict) else str(b)
+                    if b_name == expected_bench:
+                        match = b_name
+                        break
+                if match:
+                    pending_updates.append((famBranch, match))
+
+        if not pending_updates:
+            QMessageBox.information(self, "No matches", "No matching benchmarks were found for any family branch.")
+            return
+
+        # Create the update list display for user's confirmation
+        updates_text = "\n".join(f"{asset}  →  {benchmark}" for asset, benchmark in pending_updates)
+        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QLabel, QScrollArea, QPushButton, QHBoxLayout, QWidget
+
+        # Prepare a scrollable dialog to show all updates
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Confirm Benchmark Connections")
+        dialog.setStyleSheet(self.parent.appStyle)
+        vbox = QVBoxLayout(dialog)
+
+        msg_label = QLabel("The following connections will be made:\n")
+        vbox.addWidget(msg_label)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        # Set the background of content (the QLabel background) to black
+        content.setStyleSheet("background-color: black;")
+        label = QLabel(updates_text)
+        label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        content_layout.addWidget(label)
+        scroll.setWidget(content)
+        vbox.addWidget(scroll, stretch=1)
+
+        # OK/Cancel buttons
+        btn_hbox = QHBoxLayout()
+        ok_btn = QPushButton("Proceed")
+        cancel_btn = QPushButton("Cancel")
+        btn_hbox.addWidget(ok_btn)
+        btn_hbox.addWidget(cancel_btn)
+        vbox.addLayout(btn_hbox)
+
+        confirmed = {"val": False}
+
+        def accept():
+            confirmed["val"] = True
+            dialog.accept()
+        def reject():
+            dialog.reject()
+
+        ok_btn.clicked.connect(accept)
+        cancel_btn.clicked.connect(reject)
+
+        dialog.resize(500, 400)
+        dialog.exec_()
+
+        if not confirmed["val"]:
+            return
+
+        # Add all benchmark links
+        for asset, benchmark in pending_updates:
+            self.addTableElementBenchmarkLink(asset=asset, benchmark=benchmark)
+
+        # Mimic the reload method of updateLink
+        self.parent.db.fetchBenchmarkLinks(update=True)
+        self.refreshLinks()
+        self.parent.buildReturnTable()
     def updateAssetCombo(self):
         self.assetCombo.clear()
         self.assetCombo.addItem("")
@@ -157,9 +274,8 @@ class linkBenchmarksWindow(QWidget):
         elif asset_level_num == 2:
             asset_key = "subAssetClass"
         elif asset_level_num == 3:
-            asset_key = "subAssetSleeve"
-        all_opts = getattr(self.parent, "fullLevelOptions", {})
-        options = all_opts.get(asset_key, [])
+            asset_key = "sleeve"
+        options = self.parent.db.fetchFundOptions(asset_key)
         # Remove duplicates and blank/None values
         assets = sorted({opt for opt in options if opt not in (None,"", "None")})
         self.assetCombo.addItems(assets)
@@ -183,14 +299,19 @@ class linkBenchmarksWindow(QWidget):
         self.parent.db.fetchBenchmarkLinks(update=True)
         self.refreshLinks()
         self.parent.buildReturnTable()
-    def addTableElementBenchmarkLink(self):
-        asset = self.tableElementCombo.currentText()
-        levelIdx = 0 if asset == "Total" else -1
-        benchmark = self.tableBenchmarkCombo.currentText().strip()
+    def addTableElementBenchmarkLink(self, asset = None, benchmark = None):
+        if not asset and not benchmark:
+            asset = self.tableElementCombo.currentText()
+            levelIdx = 0 if asset == "Total" else -1
+            benchmark = self.tableBenchmarkCombo.currentText().strip()
+            reload = True
+        else:
+            levelIdx = -1
+            reload = False
         if asset == "" or benchmark == "":
             QMessageBox.warning(self, "Incomplete", "Please select asset and benchmark.")
             return
-        self.updateLink(levelIdx,asset,benchmark)
+        self.updateLink(levelIdx,asset,benchmark, reload = reload)
     def addBenchmarkLink(self):
         # Get selections
         level_idx = self.assetLevelCombo.currentIndex()
@@ -202,7 +323,7 @@ class linkBenchmarksWindow(QWidget):
         asset_level = self.assetLevelCombo.currentData()
         self.updateLink(asset_level,asset,benchmark)
         
-    def updateLink(self, level,asset,benchmark):
+    def updateLink(self, level,asset,benchmark, reload = True):
         try:
             with self.parent.lock:
                 cursor = self.parent.db._conn.cursor()
@@ -211,12 +332,15 @@ class linkBenchmarksWindow(QWidget):
                     (benchmark, asset, level)
                 )
                 self.parent.db._conn.commit()
-            QMessageBox.information(self, "Success", f"Linked {benchmark} to {asset} at level {level}.")
+            if reload:
+                QMessageBox.information(self, "Success", f"Linked {benchmark} to {asset} at level {level}.")
         except Exception as e:
-            QMessageBox.warning(self, "Error", f"Failed to save link: {e}")
-        self.parent.db.fetchBenchmarkLinks(update=True)
-        self.refreshLinks()
-        self.parent.buildReturnTable()
+            if reload:
+                QMessageBox.warning(self, "Error", f"Failed to save link: {e}")
+        if reload:
+            self.parent.db.fetchBenchmarkLinks(update=True)
+            self.refreshLinks()
+            self.parent.buildReturnTable()
 
 
 class exportWindow(QWidget):
@@ -236,13 +360,15 @@ class exportWindow(QWidget):
 
         # --- Filter ComboBoxes for each filterOption ---
         self.filterOptions = getattr(self.parent, "filterOptions", [
-            {"key": "Investor", "name": "Investor"},
-            {"key": "Pool", "name": "Pool"},
-            {"key": "Fund", "name": "Fund"},
-            {"key": "assetClass", "name": "Asset Class"},
-            {"key": "subAssetClass", "name": "Sub Asset Class"},
-            {"key": "Classification", "name": "Classification"},
+            {"key": "Source name", "name": "Source name"},
+            {"key": "nodePath", "name": "nodePath"},
+            {"key": "Target name", "name": "Target name"},
         ])
+        self.filterOptions = [
+            {"key": "Source name", "name": "Source name"},
+            {"key": "nodePath", "name": "nodePath"},
+            {"key": "Target name", "name": "Target name"},
+        ]
         # Use parent's lock if available
         self.lock = getattr(self.parent, "lock", None)
 
@@ -812,3 +938,122 @@ class tableWindow(QWidget):
                 self.table.setItem(r, c, item)
     def export(self,*_):
         exportTableToExcel(self,self.rows,self.headers)
+
+class reportExportWindow(QWidget):
+    def __init__(self, db: DatabaseManager, parent = None, flags = Qt.WindowFlags(), parentSource = None):
+        super().__init__(parent, flags)
+        self.parent = parentSource
+        self.setWindowTitle('Report Export Options')
+
+        self.fam2inv = db.pullInvestorsFromFamilies
+
+        self.setStyleSheet(self.parent.appStyle)
+        self.setObjectName('mainPage')
+        layout = QVBoxLayout()
+        self.setLayout(layout)
+
+        dateBox = QWidget()
+        dateBox.setObjectName("borderFrame")
+        dateLayout = QVBoxLayout()
+        self.dateSelect = simpleMonthSelector()
+        self.populateMonths()
+        dateLayout.addWidget(QLabel('As of Date:'))
+        dateLayout.addWidget(self.dateSelect)
+        dateBox.setLayout(dateLayout)
+        layout.addWidget(dateBox)
+
+
+        self.rGroup = QButtonGroup()
+        self.rGroup.buttonClicked.connect(self.swapChoice)
+        allBtn = QRadioButton('Full Portfolio')
+        famBtn = QRadioButton("Select by Family Branch")
+        invBtn = QRadioButton("Select by Investor")
+        for rb in (allBtn,famBtn,invBtn):
+            self.rGroup.addButton(rb)
+        layout.addWidget(allBtn)
+        splitter = QSplitter(Qt.Horizontal)
+        layout.addWidget(splitter)
+        famSideL = QWidget()
+        invSideR = QWidget()
+        splitter.addWidget(famSideL)
+        splitter.addWidget(invSideR)
+        famSideLlay = QVBoxLayout()
+        invSideRlay = QVBoxLayout()
+        famSideL.setLayout(famSideLlay)
+        invSideR.setLayout(invSideRlay)
+
+        famSideLlay.addWidget(famBtn)
+        invSideRlay.addWidget(invBtn)
+        famSelect = MultiSelectBox()
+        invSelect = MultiSelectBox()
+        famSideLlay.addWidget(famSelect)
+        invSideRlay.addWidget(invSelect)
+        self.confirmBtn = QPushButton('Generate Report')
+        layout.addWidget(self.confirmBtn)
+        self.confirmBtn.clicked.connect(self.beginExport)
+
+        investors = db.fetchInvestors()
+        for cb, invKey in ([invSelect, 'Name'],[famSelect,'Parentinvestor']):
+            cb.addItems(sorted(set((inv[invKey] for inv in investors))))
+        
+        self.invSelect = invSelect
+        self.famSelect = famSelect
+        allBtn.click()
+    def populateMonths(self):
+        start = self.parent.dataTimeStart
+        end = datetime.now() - relativedelta(months=1) + relativedelta(hours=8)
+        #ends on the previous month. Adds a few hours so index will still be before it and count as a month on the 1st
+        index = start
+        monthList = []
+        while index < end:
+            monthList.append(datetime.strftime(index,"%B %Y"))
+            index += relativedelta(months=1)
+        self.dateSelect.addItems(monthList)
+        self.dateSelect.setCurrentText(monthList[-1])
+    def swapChoice(self,button):
+        try:
+            btnText = button.text()
+            if btnText == 'Full Portfolio':
+                self.invSelect.setEnabled(False)
+                self.famSelect.setEnabled(False)
+            elif btnText == 'Select by Family Branch':
+                self.invSelect.setEnabled(False)
+                self.famSelect.setEnabled(True)
+            elif btnText == 'Select by Investor':
+                self.famSelect.setEnabled(False)
+                self.invSelect.setEnabled(True)
+            else:
+                raise ValueError('Error: Button Selection could not be connected to options')
+        except Exception as e:
+            QMessageBox.warning(self,'Error', f"{e}")
+    def beginExport(self,*_):
+        try:
+            self.confirmBtn.setEnabled(False)
+            source = self.rGroup.checkedButton().text()
+            print(f"Exporting for : {source}")
+            if source == 'Full Portfolio':
+                self.invSelect.selectAll()
+                investors = self.invSelect.checkedItems()
+            elif source == 'Select by Family Branch':
+                fams = self.famSelect.checkedItems()
+                investors = self.fam2inv(fams)
+            elif source == 'Select by Investor':
+                investors = self.invSelect.checkedItems()
+            else:
+                raise ValueError('Error: Button Selection could not be connected to options')
+            if not investors:
+                raise ValueError('No investors found')
+            placeholders = ','.join('?' for _ in investors)
+            date = self.dateSelect.currentText()
+            date = datetime.strptime(date,'%B %Y')
+            date = datetime.strftime(date,'%Y-%m-%d 00:00:00')
+            inputs = (*investors,date)
+            condStatement = f' WHERE [Source name] in ({placeholders}) and [dateTime] = ?'
+            calcs = self.parent.db.loadCalcs(condStatement,inputs)
+            snapshotWorkbook = portfolioSnapshot(calcs, self.parent, investors = investors)
+            self.confirmBtn.setEnabled(True)
+        except Exception as e:
+            print("Error occured in report export initialization")
+            QMessageBox.warning(self,'Error in report export', f"An error occured initializing the report export \n {e.args}")
+            print(traceback.format_exc())
+            self.confirmBtn.setEnabled(True)

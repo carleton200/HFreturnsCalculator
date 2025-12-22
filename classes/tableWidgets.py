@@ -1,4 +1,6 @@
-from scripts.importList import *
+from PyQt5.QtCore import Qt, QModelIndex, QTimer, QAbstractTableModel
+from PyQt5.QtGui import QBrush, QColor
+from PyQt5.QtWidgets import  QTableWidget, QTableWidgetItem, QHeaderView
 from scripts.loggingFuncs import attach_logging_to_class
 @attach_logging_to_class
 class DictListModel(QAbstractTableModel):

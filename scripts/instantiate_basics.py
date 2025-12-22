@@ -1,5 +1,20 @@
-from scripts.importList import *
+import sys
+import os
+import logging
+import warnings
+import queue
+from concurrent.futures import ThreadPoolExecutor
 from scripts.commonValues import databaseName
+
+# Initialize module-level globals (will be set by instantiate_basics function)
+ASSETS_DIR = None
+DATABASE_PATH = None
+TRAN_DATABASE_PATH = None
+HELP_PATH = None
+executor = None
+APIexecutor = None
+gui_queue = None
+
 def instantiate_basics(BASE_DIR):
     # Determine assets path, works in PyInstaller bundle or script
     global ASSETS_DIR

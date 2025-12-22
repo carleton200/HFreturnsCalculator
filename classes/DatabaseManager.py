@@ -1,10 +1,13 @@
-from scripts.importList import *
-from scripts.instantiate_basics import *
-from scripts.commonValues import *
+import os
+import threading
+import sqlite3
+import pyodbc
+import logging
+import pandas as pd
+from scripts.instantiate_basics import ASSETS_DIR, DATABASE_PATH
+from scripts.commonValues import remoteDBmode, sqlPlaceholder, currentVersion, masterFilterOptions, nonFundCols, displayLinks, batch_size
 from scripts.basicFunctions import infer_sqlite_type, handleDuplicateFields
 from classes.nodeLibrary import nodeLibrary
-
-import pandas as pd
 
 class DatabaseManager:
     """Thread-safe SQLite database manager.
@@ -297,6 +300,10 @@ class DatabaseManager:
         if not hasattr(self,'fund2trait'):
             self.fetchFunds()
         return self.fund2trait
+    def fetchFundOptions(self,key: str):
+        funds = self.fetchFunds()
+        opts = set(f.get(key) for f in funds)
+        return opts
     def fetchNodes(self, update: bool = False):
         if not hasattr(self, "nodes") or update:
             with self._lock:
@@ -395,6 +402,16 @@ class DatabaseManager:
         except Exception as e:
             print(f"Error loading data from DatabaseManager: {e}")
             return None
+    
+    def loadCalcs(self,condStatement,inputs):
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute('SELECT * FROM calculations' + condStatement,tuple(inputs))
+            headers = [d[0] for d in cursor.description]
+            rows = [dict(zip(headers,row)) for row in cursor.fetchall()]
+            cursor.close()
+        return rows
+    
     def close(self) -> None:
         try:
             with self._lock:

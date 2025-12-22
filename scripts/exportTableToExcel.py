@@ -1,6 +1,11 @@
-from scripts.importList import *
-from scripts.instantiate_basics import *
-from scripts.commonValues import *
+import traceback
+from openpyxl import Workbook
+from openpyxl.utils import get_column_letter
+from PyQt5.QtWidgets import QFileDialog, QMessageBox
+from PyQt5.QtGui import QDesktopServices
+from PyQt5.QtCore import QUrl
+from scripts.instantiate_basics import gui_queue, executor
+from scripts.commonValues import percent_headers
 def exportTableToExcel(self, rows, headers = None):
     #Excel export for the generic table window
     # 1) prompt user
