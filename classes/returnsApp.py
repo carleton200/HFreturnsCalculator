@@ -9,7 +9,7 @@ from scripts.commonValues import (currentVersion, nameHier, headerOptions, owner
 from scripts.processClump import processClump
 from scripts.processInvestments import processInvestments
 from scripts.basicFunctions import (updateStatus, annualizeITD, submitAPIcall, get_connected_node_groups, 
-                                 descendingNavSort, accountBalanceKey)
+                                 descendingNavSort, accountBalanceKey, filt2Query)
 from classes.transactionApp import transactionApp
 from classes.windowClasses import reportExportWindow, underlyingDataWindow, linkBenchmarksWindow, tableWindow, exportWindow, displayWindow
 from classes.tableWidgets import DictListModel, SmartStretchTable
@@ -125,6 +125,10 @@ class returnsApp(QWidget):
                         }
                         QPushButton#helpBtn {
                             background-color: #FFDE59;
+                            color: black;
+                        }
+                        QPushButton#cntrlBtn {
+                            background-color: #03fc98;
                             color: black;
                         }
                         QLabel, QRadioButton, QCheckBox, QProgressBar {
@@ -275,6 +279,10 @@ class returnsApp(QWidget):
         controlsBox = QWidget()
         controlsLayout = QHBoxLayout()
         controlsLayout.addStretch(1)
+        minControlsBtn = QPushButton('Toggle Table Controls')
+        minControlsBtn.clicked.connect(self.toggleMinControls)
+        minControlsBtn.setObjectName('cntrlBtn')
+        controlsLayout.addWidget(minControlsBtn)
         self.importButton = QPushButton('Reimport Data')
         self.importButton.clicked.connect(self.beginImport)
         self.clearButton = QPushButton('Full Recalculation')
@@ -302,13 +310,17 @@ class returnsApp(QWidget):
         exportReportBtn.setObjectName('exportBtn')
         controlsLayout.addWidget(exportReportBtn)
         exportReportBtn.setEnabled(False)
-        exportBtn = QPushButton("Export Current Table to Excel")
-        exportBtn.clicked.connect(self.exportCurrentTable)
+        exportBtn = QPushButton("Export to Excel")
+        exportBtn.clicked.connect(self.exportPage)
         exportBtn.setObjectName("exportBtn")
         controlsLayout.addWidget(exportBtn, stretch=0)
         controlsLayout.addStretch(1)
         controlsBox.setLayout(controlsLayout)
         layout.addWidget(controlsBox)
+
+        self.tableControlsBox = QWidget()
+        tableControlsLayout = QVBoxLayout()
+        self.tableControlsBox.setLayout(tableControlsLayout)
 
         optionsBox = QWidget()
         optionsBox.setObjectName("borderFrame")
@@ -385,7 +397,7 @@ class returnsApp(QWidget):
         self.linkBenchmarksBtn.clicked.connect(self.linkBenchmarks)
         optionsGrid.addWidget(self.linkBenchmarksBtn,4,2)
         optionsBox.setLayout(optionsGrid)
-        layout.addWidget(optionsBox)
+        tableControlsLayout.addWidget(optionsBox)
 
         mainFilterBox = QWidget()
         mainFilterBox.setObjectName("borderFrame")
@@ -426,7 +438,8 @@ class returnsApp(QWidget):
         self.sortHierarchy.setCheckedItems(["assetClass","subAssetClass"])
         self.filterBtnGroup.buttonToggled.connect(self.filterBtnUpdate)
         mainFilterBox.setLayout(mainFilterLayout)
-        layout.addWidget(mainFilterBox)
+        tableControlsLayout.addWidget(mainFilterBox)
+        layout.addWidget(self.tableControlsBox)
         t1 = QVBoxLayout() #build table loading bar
         self.buildTableLoadingBox = QWidget()
         self.tableLoadingLabel = QLabel("Building returns table...")
@@ -516,6 +529,8 @@ class returnsApp(QWidget):
             self.helpPage = helpMessage
         except:
             QMessageBox.warning(self,"Error","Error opening help page.")
+    def toggleMinControls(self,*_):
+        self.tableControlsBox.setVisible(not self.tableControlsBox.isVisible())
     def exportCalculations(self,*_):
         window = exportWindow(parentSource=self)
         window.show()
@@ -713,8 +728,50 @@ class returnsApp(QWidget):
         window = reportExportWindow(self.db, parentSource = self)
         window.show()
         self.reportExportWindow = window
+    def exportPage(self,*_):
+        # Use a built-in PyQt combobox messagebox for export type selection
+        msgBox = QMessageBox(self)
+        msgBox.setWindowTitle("Choose Export Type")
+        msgBox.setText("Select export type for Excel export:")
+        combo = QComboBox(msgBox)
+        combo.addItems(['Current Table', 'Asset Class Grouping'])
+        msgBox.layout().addWidget(combo, 1, 1)
+        msgBox.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
         
-    def exportCurrentTable(self,*_):
+        result = msgBox.exec_()
+        if result == QMessageBox.Ok:
+            export_type = combo.currentText()
+        else:
+            return  # User cancelled
+        self.exportCurrentTable(ACcols = export_type == "Asset Class Grouping")
+        return
+        if export_type == "Current Table":
+            self.exportCurrentTable()
+        elif export_type == "Asset Class Grouping":
+            # Placeholder: you would implement grouped export here
+            #TODO: rebuild the table for AC grouping
+            try:
+                QMessageBox.informativeText
+                blockMSG = QMessageBox(self)
+                blockMSG.setWindowTitle('Notice')
+                blockMSG.setText('Building export...')
+                blockMSG.setStandardButtons(QMessageBox.NoButton)
+                blockMSG.setModal(False)  # Make it non-modal so it doesn't block
+                blockMSG.show()
+                QApplication.processEvents()
+                self.setEnabled(False)
+                self.sortHierarchy.clearSelection()
+                self.sortHierarchy.setCheckedItems(['assetClass','subAssetClass','subAssetSleeve'])
+                cancelEvent = threading.Event()
+                self.buildTableCancel = cancelEvent
+                self.buildTable(cancelEvent)
+                self.exportCurrentTable(ACcols = True)
+                self.setEnabled(True)
+                blockMSG.destroy()
+            except:
+                QMessageBox.information(self,'Error exporting table','An error occured exporting the table')
+                self.setEnabled(True)
+    def exportCurrentTable(self,*_, ACcols = False):
         #excel export for the returns app excel export
         # helper to darken a 6-digit hex color by a given factor
         def darken_color(hex_color, factor=0.01):
@@ -993,67 +1050,9 @@ class returnsApp(QWidget):
             self.currentTableData = None #resets so a failed build won't be used
             complexMode = self.tableBtnGroup.checkedButton().text() == "Complex Table"
             gui_queue.put(lambda: self.dataTypeBox.setVisible(not complexMode))
-            condStatement = ""
-            parameters = []
-            invSelections = self.filterDict["Source name"].checkedItems()
-            famSelections = self.filterDict["Family Branch"].checkedItems()
-            if invSelections != [] or famSelections != []: #handle investor level
-                invsF = set()
-                for fam in famSelections:
-                    invsF.update(self.db.pullInvestorsFromFamilies(fam))
-                invsI = set(invSelections)
-                if invSelections != [] and famSelections != []: #Union if both are selected
-                    invs = invsF and invsI
-                else: #combine if only one is valid
-                    invs = invsF or invsI
-                placeholders = ','.join('?' for _ in invs)
-                if condStatement in ("", " WHERE"):
-                    condStatement = f' WHERE [Source name] in ({placeholders})'
-                else:
-                    condStatement += f' AND [Source name] in ({placeholders})'
-                parameters.extend(invs)
-            if self.filterDict['Node'].checkedItems() != []:
-                selectedNodes = self.filterDict['Node'].checkedItems()
-                sNodeIds = [" "+ str(node['id'])+" " for node in self.db.fetchNodes() if str(node['id']) in selectedNodes]
-                # Build LIKE conditions to check if any node ID appears within the nodePath column
-                if sNodeIds:
-                    likeConditions = ' OR '.join('[nodePath] LIKE ?' for _ in sNodeIds)
-                    if condStatement in (""," WHERE"):
-                        condStatement = f"WHERE ({likeConditions})"
-                    else:
-                        condStatement += f" AND ({likeConditions})"
-                    # Add each node ID with wildcards to search for it within the column
-                    for sNodeId in sNodeIds:
-                        parameters.append(f'%{sNodeId}%')
-                else:
-                    print(f"Warning: Failed to find corresponding node Id's for {selectedNodes}")
-            filterParamDict = {}
-            for filter in self.filterOptions:
-                if filter["key"] not in nonFundCols:
-                    if self.filterDict[filter["key"]].checkedItems() != []:
-                        filterParamDict[filter['key']] = self.filterDict[filter["key"]].checkedItems()
-            if filterParamDict:
-                if condStatement == "":
-                    condStatement = " WHERE"
-                filteredFunds = self.db.pullFundsFromFilters(filterParamDict)
-                for param in filteredFunds:
-                    parameters.append(param)
-                placeholders = ','.join('?' for _ in filteredFunds)
-                if condStatement in ("", " WHERE"):
-                    condStatement = f"WHERE [Target name] IN ({placeholders})"
-                else:
-                    condStatement += f" AND [Target name] IN ({placeholders})"
-            # Add time filter to condStatement for database-level filtering
-            startDate = datetime.strptime(self.dataStartSelect.currentText(), "%B %Y") #TODO: is this even necessary???
-            startDateStr = startDate.strftime("%Y-%m-%d %H:%M:%S")
+            startDate = datetime.strptime(self.dataStartSelect.currentText(), "%B %Y")
             endDate = datetime.strptime(self.dataEndSelect.currentText(), "%B %Y")
-            endDateStr = endDate.strftime("%Y-%m-%d %H:%M:%S")
-            if condStatement == "":
-                condStatement = f" WHERE [dateTime] >= ? AND [dateTime] <= ?"
-            else:
-                condStatement += f" AND [dateTime] >= ? AND [dateTime] <= ?"
-            parameters.append(startDateStr)
-            parameters.append(endDateStr)
+            condStatement, parameters = filt2Query(self.db, self.filterDict,startDate,endDate)
             gui_queue.put(lambda: self.buildTableLoadingBar.setValue(3))
             if cancelEvent.is_set(): #exit if new table build request is made
                 return
@@ -1241,7 +1240,20 @@ class returnsApp(QWidget):
             lvl_co = co.get(level)
             if not lvl_co or lvl_co.get('dataType') == "benchmark":
                 # Skip filtered rows and benchmarks (imported separately)
+                if lvl_co and lvl_co.get('dataType') == "benchmark":
+                    print('benchmark present')
                 continue
+            #TVPI and DPI
+            capCalled = lvl_co.get('Commitment',0.0) - lvl_co.get('Unfunded',0.0)
+            if capCalled != 0: 
+                distributions = lvl_co.get('Distributions TD',0.0)
+                TVPI = (lvl_co.get('NAV',0.0) + distributions) / capCalled
+                DPI = distributions / capCalled
+                if TVPI:
+                    lvl_co['TVPI'] = TVPI
+                if DPI:
+                    lvl_co['DPI'] = DPI
+
 
             # Aggregate MTD/QTD/YTD compounded performance
             for timeFrame, monthOpts in timeSections.items():
@@ -1845,13 +1857,6 @@ class returnsApp(QWidget):
         if groupOpts == []:
             self.sortHierarchy.setCheckedItems(["assetClass","subAssetClass"])
         self.filterCallLock = True
-        for filt in ("Source name", "Family Branch"):
-            if filt in groupOpts and self.filterDict[filt].checkedItems() == []:
-                self.filterDict[filt].selectAll()
-                self.previousGrouping.add(filt)
-            elif filt in self.previousGrouping: #removes the selections if they stop grouping by investor/family
-                self.filterDict[filt].clearSelection()
-                self.previousGrouping.remove(filt)
             
             
         self.filterCallLock = False
@@ -2150,6 +2155,10 @@ class returnsApp(QWidget):
                                                     {
                                                         "_op": "is_null",
                                                         "_prop": "HoldingsInsightID"
+                                                    },
+                                                    {
+                                                        "_op": "not_null",
+                                                        "_prop": "Amount in system currency"
                                                     }
                                                 ]
                                             }
@@ -2801,6 +2810,7 @@ class returnsApp(QWidget):
             # 4) Populate each row
             colorDepths = [code.count("::") + 1 * (row_dict['dataType'] == 'Total Target name') for _, code, row_dict,_ in row_entries]
             maxDepth = max(colorDepths)
+            fundsPresent = any(row_dict['dataType'] == 'Total Target name' for _, _, row_dict,_ in row_entries)
             trackIdx = 0
             trackDepth = 0
             for i in range(len(colorDepths)):
@@ -2808,12 +2818,12 @@ class returnsApp(QWidget):
                 if trackDepth < d: #further depth
                     trackIdx = i
                     trackDepth = d
-                if (trackDepth > d or i == len(colorDepths) - 1) and d != maxDepth: #back up  from depth or the end, but did not go full depth
+                if fundsPresent and (trackDepth > d or i == len(colorDepths) - 1) and d != maxDepth: #back up  from depth or the end, but did not go full depth
                     if i == len(colorDepths) - 1:
                         i += 1
                     colorDepths[trackIdx:i] = [maxDepth] * (i-trackIdx) #set the depth for low section all the way down
                 trackDepth = d
-            if not any(row_dict['dataType'] == 'Total Target name' for _, _, row_dict,_ in row_entries):
+            if not fundsPresent:
                 maxDepth += 1 #if funds are off, don't allow upper sorts to be white
             colorDepths = [c/maxDepth for c in colorDepths] if maxDepth != 0 else colorDepths
             for r, (fund_label, code, row_dict, rowKey) in enumerate(row_entries):

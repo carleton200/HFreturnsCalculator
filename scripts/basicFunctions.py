@@ -5,7 +5,8 @@ import queue
 from datetime import datetime
 import pyxirr
 from collections import deque, defaultdict
-from scripts.commonValues import nameHier, nodePathSplitter, balanceTypePriority
+from oldScripts.temp import MultiSelectBox
+from scripts.commonValues import nameHier, nodePathSplitter, balanceTypePriority, nonFundCols, masterFilterOptions
 from scripts.instantiate_basics import gui_queue, APIexecutor
 
 def infer_sqlite_type(val):
@@ -302,3 +303,64 @@ def handleDuplicateFields(rows, fields):
     except Exception as e:
         print(f"ERROR: failed to handle duplicate fields: {e.args}")
     return rows
+def filt2Query(db, filterDict : dict[MultiSelectBox], startDate : datetime, endDate : datetime) -> (str,list[str]):
+    condStatement = ""
+    parameters = []
+    invSelections = filterDict["Source name"].checkedItems()
+    famSelections = filterDict["Family Branch"].checkedItems()
+    if invSelections != [] or famSelections != []: #handle investor level
+        invsF = set()
+        for fam in famSelections:
+            invsF.update(db.pullInvestorsFromFamilies(fam))
+        invsI = set(invSelections)
+        if invSelections != [] and famSelections != []: #Intersect if both are selected
+            invs = invsF.intersection(invsI)
+        else: #Union if only one is valid
+            invs = invsF.union(invsI)
+        placeholders = ','.join('?' for _ in invs)
+        if condStatement in ("", " WHERE"):
+            condStatement = f' WHERE [Source name] in ({placeholders})'
+        else:
+            condStatement += f' AND [Source name] in ({placeholders})'
+        parameters.extend(invs)
+    if filterDict['Node'].checkedItems() != []:
+        selectedNodes = filterDict['Node'].checkedItems()
+        sNodeIds = [" "+ str(node['id'])+" " for node in db.fetchNodes() if str(node['id']) in selectedNodes]
+        # Build LIKE conditions to check if any node ID appears within the nodePath column
+        if sNodeIds:
+            likeConditions = ' OR '.join('[nodePath] LIKE ?' for _ in sNodeIds)
+            if condStatement in (""," WHERE"):
+                condStatement = f"WHERE ({likeConditions})"
+            else:
+                condStatement += f" AND ({likeConditions})"
+            # Add each node ID with wildcards to search for it within the column
+            for sNodeId in sNodeIds:
+                parameters.append(f'%{sNodeId}%')
+        else:
+            print(f"Warning: Failed to find corresponding node Id's for {selectedNodes}")
+    filterParamDict = {}
+    for filter in masterFilterOptions:
+        if filter["key"] not in nonFundCols:
+            if filterDict[filter["key"]].checkedItems() != []:
+                filterParamDict[filter['key']] = filterDict[filter["key"]].checkedItems()
+    if filterParamDict:
+        if condStatement == "":
+            condStatement = " WHERE"
+        filteredFunds = db.pullFundsFromFilters(filterParamDict)
+        for param in filteredFunds:
+            parameters.append(param)
+        placeholders = ','.join('?' for _ in filteredFunds)
+        if condStatement in ("", " WHERE"):
+            condStatement = f"WHERE [Target name] IN ({placeholders})"
+        else:
+            condStatement += f" AND [Target name] IN ({placeholders})"
+    # Add time filter to condStatement for database-level filtering
+    startDateStr = startDate.strftime("%Y-%m-%d %H:%M:%S") #TODO: is this even necessary?
+    endDateStr = endDate.strftime("%Y-%m-%d %H:%M:%S")
+    if condStatement == "":
+        condStatement = f" WHERE [dateTime] >= ? AND [dateTime] <= ?"
+    else:
+        condStatement += f" AND [dateTime] >= ? AND [dateTime] <= ?"
+    parameters.append(startDateStr)
+    parameters.append(endDateStr)
+    return condStatement,parameters

@@ -1280,11 +1280,9 @@ def create_dash_app(full_data=None, initial_node=None, initial_date=None, port=8
         """Background thread to check for inactivity timeout or parent app shutdown"""
         while True:
             time.sleep(10)  # Check every 10 seconds for faster response
-            print(f"Checking for shutdown conditions...")
             # Check inactivity timeout
             if inactivity_timeout > 0:
                 inactive_minutes = (datetime.now() - last_activity[0]).total_seconds() / 60
-                print(f"    {inactive_minutes} of {inactivity_timeout}")
                 if inactive_minutes >= inactivity_timeout:
                     print(f"\nShutting down Dash app due to {inactivity_timeout} minutes of inactivity...")
                     shutdown_flag[0] = True
@@ -1296,7 +1294,6 @@ def create_dash_app(full_data=None, initial_node=None, initial_date=None, port=8
             # Check if parent app is still active via shared dict
             if active_flag_dict is not None:
                 try:
-                    print(f"    Parent active flag is: {active_flag_dict.get('active', False)}")
                     # Check if the flag is False or if the dict is no longer accessible (manager closed)
                     if not active_flag_dict.get('active', False):
                         print(f"\nShutting down Dash app: parent app has closed (active flag is False)...")

@@ -10,6 +10,7 @@ dbEditor.spec
 returnEnv/
 oldScripts/
 testExcelOutputs/
+IRR_Work/
 build/
 assets/
 __pycache__

@@ -1,11 +1,11 @@
 from dateutil.relativedelta import relativedelta
 
-currentVersion = "1.2.0"
+currentVersion = "1.2.1"
 demoMode = True
 remoteDBmode = False
 ownershipCorrect = True
 fullRecalculations = True
-importInterval = relativedelta(hours=3)
+importInterval = relativedelta(hours=2)
 calculationPingTime = 2
 ownershipFlagTolerance = 0.01
 dashInactiveMinutes = 1
@@ -46,7 +46,7 @@ assetClass1Order = ["Illiquid", "Liquid","Cash"]
 assetClass2Order = ["Direct Private Equity", "Private Equity", "Direct Real Assets", "Real Assets", "Public Equity", "Long/Short", "Absolute Return", "Fixed Income", "Cash"] 
 commitmentChangeTransactionTypes = ["Commitment", "Transfer of commitment", "Transfer of commitment (out)", "Secondary - Original commitment (by secondary seller)"]
 ignoreInvTranTypes = [""]
-headerOptions = ["Return","NAV", "Monthly Gain", "Ownership" , "MDdenominator", "Commitment", "Unfunded", "%"]
+headerOptions = ["Return","NAV", "Monthly Gain", "Ownership" , "MDdenominator", "Commitment", "Unfunded", "%",'Distributions TD']
 if not demoMode:
     headerOptions.append("IRR ITD")
 dataOptions = ["Investor","Family Branch","Classification", "dateTime"]

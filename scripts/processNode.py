@@ -1,3 +1,4 @@
+from collections import defaultdict
 from datetime import datetime
 import logging
 import traceback
@@ -40,6 +41,7 @@ def processNode(nodeData : dict,selfData : dict, statusQueue, _, failed, transac
             newMonths = months #check all months if there are no previous calculations
         IRRtrack = {} #dict of each fund's cash flows and dates for IRR calculation
         IRRsourceTrack = {} #dict of each investor's cash flows and dates for IRR calculation
+        distSourceTrack = defaultdict(dict) #dict of each investor's distributions to date (defaults to 0.0)
         if transactionCalc: #run transaction app calculations
             return processAboveBelow(newMonths,cache,node,failed,statusQueue)
         for month in newMonths: #loops through every month relevant to the pool
@@ -87,7 +89,7 @@ def processNode(nodeData : dict,selfData : dict, statusQueue, _, failed, transac
             aboveMDdenominatorSum = 0
             tempAboveDicts = {}
             nodeOwnershipSum = 0
-            for source in set(aboveStartEntries.keys()) | set(aboveEndEntries.keys()) | set(aboveTransactionDict.keys()): 
+            for source in set(aboveStartEntries.keys()) | set(aboveEndEntries.keys()) | set(aboveTransactionDict.keys() | set(distSourceTrack.keys())): 
                 #iterate through each investor in the pool for the month
                 #pool level loop for investors
                 sourceWeightedCashFlow = 0
@@ -112,12 +114,15 @@ def processNode(nodeData : dict,selfData : dict, statusQueue, _, failed, transac
                     noStartValue = False
                 else: #if no starting entry, take necessary variables and zero out the value
                     end_cache = aboveEndEntries.get(source)
-                    if end_cache:
+                    if end_cache: #continue if there is a future entry
                         startEntry = copy.deepcopy(end_cache[0])
                         startEntry[nameHier["Value"]["dynHigh"]] = 0
                         noStartValue = True
+                    elif source in distSourceTrack: #skip calcs
+                        tempAboveDicts[source] = {'justDist' : True}
+                        continue
                     else:
-                        continue #ignore the source completely if there is no starting or ending value
+                        continue #ignore the source completely if there is no starting or ending value or distributions to track
                 if startEntry.get(nameHier["Value"]["dynHigh"]) in (None,"None"):
                     startEntry[nameHier["Value"]["dynHigh"]] = 0 #prevent float conversion errors
                 investorTransactions = aboveTransactionDict.get(source,[]) #all investor transactions in the pool for the month
@@ -144,6 +149,10 @@ def processNode(nodeData : dict,selfData : dict, statusQueue, _, failed, transac
                 tempAboveDicts[source] = tempAboveDict #store source calculations for secondary iteration for target level data
             monthNodeSourceEntryList = [] #stores investor data for third iteration (not needed to be split, but remnant from old logic.)
             for source in tempAboveDicts.keys():
+                if tempAboveDicts[source].get('justDist',False): #skip calcs. Keep dist info
+                    justDistDict = {'justDist' : True, 'name' : source}
+                    monthNodeSourceEntryList.append([justDistDict, []])
+                    continue
                 # second investor iteration to find the gain, return,ownership, and NAV values at pool level (i think it is not needed to be split, but remnant from old logic.)
                 EOMcheck = aboveEndEntries.get(source,[])
                 if len(EOMcheck) > 0:
@@ -180,6 +189,16 @@ def processNode(nodeData : dict,selfData : dict, statusQueue, _, failed, transac
             adjustedOwnershipBool = abs(nodeOwnershipSum - 100) > ownershipFlagTolerance and ownershipCorrect#boolean for if ownership is adjusted. Tolerance for thousandth of a percent off
             fundEntryList = aboveData['fundEntryList']
             for sourceEntry, EOMcheck in monthNodeSourceEntryList:
+                if sourceEntry.get('justDist',False): #put in distribution data and continue
+                    source = sourceEntry['name']
+                    for targetEntry in fundEntryList:
+                        target = targetEntry["Target name"]
+                        monthTargetSourceEntry = {"dateTime" : month["dateTime"], "Source name" : source, "Node" : node, "Target name" : target ,
+                            "ownershipAdjust" : adjustedOwnershipBool, 'Distributions TD' : distSourceTrack[source].get(target,0.0)}
+                        for header in ('Ownership', 'MDdenominator','NAV', 'Monthly Gain', 'Return'):
+                            monthTargetSourceEntry[header] = 0
+                        calculationDict.setdefault(month['dateTime'],[]).append(monthTargetSourceEntry)
+                    continue
                 source = sourceEntry["Source name"]
                 sourceEOM = sourceEntry["NAV"]
                 sourceOwnership = sourceEntry["Ownership"] * 100 /  nodeOwnershipSum if nodeOwnershipSum != 0 and ownershipCorrect else sourceEntry["Ownership"]
@@ -195,6 +214,7 @@ def processNode(nodeData : dict,selfData : dict, statusQueue, _, failed, transac
                                         lst["Balancetype"] = "Calculated_R"
                 #final (3rd) investor level iteration to use the pool level results for the investor to calculate the fund level information
                 srcOwnDec = sourceOwnership / 100
+                srcMDdenDec = sourceEntry["MDdenominator"] / aboveMDdenominatorSum if aboveMDdenominatorSum != 0 else 0
                 for targetEntry in fundEntryList:
                     target = targetEntry["Target name"]
                     targetSourceNAV = srcOwnDec * targetEntry["NAV"]
@@ -206,8 +226,8 @@ def processNode(nodeData : dict,selfData : dict, statusQueue, _, failed, transac
                     tempFundOwnership = targetSourceOwnership if targetSourceOwnership != 0 else sourceOwnership / 100
                     targetSourceCommitment = targetEntry[nameHier["Commitment"]["local"]] * tempFundOwnership 
                     targetSourceUnfunded = targetEntry[nameHier["Unfunded"]["local"]] * tempFundOwnership
-
-                    if sourceEntry["MDdenominator"] != 0 and aboveMDdenominatorSum != 0: 
+                    tsDistM = targetEntry.get('Distributions TD',0) * srcMDdenDec #allocate distributions by MDden for the month
+                    if srcMDdenDec != 0: 
                         #only run IRR data if there is investor value
                         if source not in IRRsourceTrack:
                             IRRsourceTrack[source] = {}
@@ -216,11 +236,12 @@ def processNode(nodeData : dict,selfData : dict, statusQueue, _, failed, transac
                         cashflows = monthFundIRRtrack.get(target, {}).get("cashFlows", [])
                         dates = monthFundIRRtrack.get(target, {}).get("dates", [])
                         for cashflow, date in zip(cashflows, dates):
-                            adjustedCashflow = cashflow * sourceEntry["MDdenominator"] / aboveMDdenominatorSum #ratio the cashflow to their MDdenominator
+                            adjustedCashflow = cashflow * srcMDdenDec #ratio the cashflow to their MDdenominator
                             IRRsourceTrack[source][target]["cashFlows"].append(adjustedCashflow)
                             IRRsourceTrack[source][target]["dates"].append(date)
-                    if sourceEntry["Source name"] in IRRsourceTrack and target in IRRsourceTrack[sourceEntry["Source name"]]:
-                        targetSourceIRR = calculate_xirr([*IRRsourceTrack[sourceEntry["Source name"]][target]["cashFlows"], targetSourceNAV], [*IRRsourceTrack[sourceEntry["Source name"]][target]["dates"], datetime.strptime(month["endDay"], "%Y-%m-%dT%H:%M:%S")])
+                    if source in IRRsourceTrack and target in IRRsourceTrack[sourceEntry["Source name"]]:
+                        eom =  datetime.strptime(month["endDay"], "%Y-%m-%dT%H:%M:%S")
+                        targetSourceIRR = calculate_xirr([*IRRsourceTrack[source][target]["cashFlows"], targetSourceNAV], [*IRRsourceTrack[source][target]["dates"],eom])
                     else:
                         targetSourceIRR = None
                     monthTargetSourceEntry = {"dateTime" : month["dateTime"], "Source name" : sourceEntry["Source name"], "Node" : node, "Target name" : target ,
@@ -229,6 +250,13 @@ def processNode(nodeData : dict,selfData : dict, statusQueue, _, failed, transac
                                     nameHier["Commitment"]["local"] : targetSourceCommitment, nameHier["Unfunded"]["local"] : targetSourceUnfunded, 
                                     "IRR ITD" : targetSourceIRR,
                                     "ownershipAdjust" : adjustedOwnershipBool}
+                    if tsDistM != 0:
+                        if target not in distSourceTrack[source]:
+                            distSourceTrack[source][target] = 0.0
+                        distSourceTrack[source][target] += tsDistM
+                    distTD = distSourceTrack[source].get(target,0.0)
+                    if distTD != 0:
+                        monthTargetSourceEntry['Distributions TD'] = distTD
                     calculationDict.setdefault(month['dateTime'],[]).append(monthTargetSourceEntry) #add fund level data to calculations for use in aggregation and report generation
             #end of months loop
         #commands to add database updates to the queues

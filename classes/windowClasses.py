@@ -1,5 +1,6 @@
 from classes import DatabaseManager
 from classes.DatabaseManager import load_from_db
+from scripts.basicFunctions import filt2Query
 from scripts.loggingFuncs import attach_logging_to_class
 from classes.widgetClasses import SortButtonWidget, MultiSelectBox, simpleMonthSelector
 from scripts.exportTableToExcel import exportTableToExcel
@@ -364,15 +365,21 @@ class exportWindow(QWidget):
             {"key": "nodePath", "name": "nodePath"},
             {"key": "Target name", "name": "Target name"},
         ])
-        self.filterOptions = [
-            {"key": "Source name", "name": "Source name"},
-            {"key": "nodePath", "name": "nodePath"},
-            {"key": "Target name", "name": "Target name"},
-        ]
         # Use parent's lock if available
         self.lock = getattr(self.parent, "lock", None)
-
         # Query unique options for each filter from the calculations table
+
+
+        calcKeys = ['Source name','Target name']
+        investors = self.parent.db.fetchInvestors()
+        famBranches = set(inv['Parentinvestor'] for inv in investors)
+        filOptDict = {filKey : set() for filKey in (fil['key'] for fil in self.filterOptions if fil['key'] not in nonFundCols)}
+        funds = self.parent.db.fetchFunds()
+        dyn2key = self.parent.db.fetchDyn2Key()
+        for fund in funds:
+            for field, val in ([f,v] for f,v in fund.items() if dyn2key.get(f,"") in filOptDict):
+                filOptDict[dyn2key[field]].add(val)
+        nodes = [str(n) for n in list(self.parent.db.pullId2Node().keys())]
         with self.parent.lock:
             dbPath = getattr(self.parent, "dbPath", DATABASE_PATH)
             conn = sqlite3.connect(dbPath)
@@ -380,13 +387,21 @@ class exportWindow(QWidget):
             for f in self.filterOptions:
                 key = f["key"]
                 name = f["name"]
-                combo = QComboBox()
+                combo = MultiSelectBox(dispLib=self.parent.db.userDisplayLib())
                 combo.addItem("")  # blank for optional
                 try:
-                    cur.execute(f"SELECT DISTINCT [{key}] FROM calculations")
-                    options = [row[0] for row in cur.fetchall() if row[0] not in (None, "", "None")]
-                    options = sorted(set(options))
-                    combo.addItems(options)
+                    if key in calcKeys:
+                        cur.execute(f"SELECT DISTINCT [{key}] FROM calculations")
+                        options = [row[0] for row in cur.fetchall() if row[0] not in (None, "", "None")]
+                        options = sorted(set(options))
+                        combo.addItems(options)
+                    elif key not in nonFundCols:
+                        opts = filOptDict[key]
+                        combo.addItems(opts)
+                    elif key == 'Node':
+                        combo.addItems(nodes)
+                    elif key == 'Family Branch':
+                        combo.addItems(famBranches)
                 except Exception as e:
                     print(f"Error loading filter options for {key}: {e}")
                 self.filter_boxes[key] = combo
@@ -431,28 +446,9 @@ class exportWindow(QWidget):
     def export_to_excel(self):
         #Export to excel function for the calculations view page
         # Build WHERE clause from filters
-        filters = []
-        values = []
-        for key, combo in self.filter_boxes.items():
-            val = combo.currentText()
-            if val:
-                filters.append(f"[{key}] = ?")
-                values.append(val)
-        # Date filters
         start_date = self.start_date_edit.date()
         end_date = self.end_date_edit.date()
-        if start_date.isValid():
-            filters.append("[dateTime] >= ?")
-            # Convert QDate to Python datetime, then format as string
-            values.append(start_date.toPyDate().strftime("%Y-%m-%d %H:%M:%S"))
-        if end_date.isValid():
-            filters.append("[dateTime] <= ?")
-            values.append(end_date.toPyDate().strftime("%Y-%m-%d %H:%M:%S"))
-
-        where_clause = ""
-        if filters:
-            where_clause = "WHERE " + " AND ".join(filters)
-
+        where_clause, values = filt2Query(self.parent.db, self.filter_boxes, start_date.toPyDate(), end_date.toPyDate())
         # Query the database
         with self.parent.lock:
             dbPath = getattr(self.parent, "dbPath", DATABASE_PATH)
@@ -510,6 +506,7 @@ class exportWindow(QWidget):
                 df.to_excel(path, index=False)
 
             QMessageBox.information(self, "Success", f"Data exported to {path}")
+            QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(path)))
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Failed to export to Excel: {e}")
         finally:
@@ -599,12 +596,9 @@ class underlyingDataWindow(QWidget):
                 else:
                     wb = Workbook()
                     ws = wb.active
-
                 rowStart = 1
                 for idx, colname in enumerate(all_cols, start=1):
                     ws.cell(row=rowStart, column=idx, value=colname)
-
-
                 # 7) populate rows
                 for r, row_dict in enumerate(data, start=rowStart + 1):        
                     # data cells with proper formatting
@@ -623,7 +617,6 @@ class underlyingDataWindow(QWidget):
                                 # interpret val as percentage (e.g. 10.5 → 10.5%)
                                 cell.value = val / 100.0
                                 cell.number_format = "0.00%"
-
                 # 8) autofit column widths
                 for idx, col_cells in enumerate(ws.columns, start=1):
                     max_len = 0
@@ -652,10 +645,10 @@ class underlyingDataWindow(QWidget):
             endTime = datetime.strptime(self.parent.dataEndSelect.currentText(),"%B %Y")
             allEnd = (endTime.replace(day = 1) + relativedelta(months=1)) - relativedelta(days=1)
             selection = self.parent.selectedCell["month"]
-            if selection not in timeOptions or selection == "MTD": #MTD timeframe
+            if selection not in (*timeOptions, 'Distributions TD', 'TVPI','DPI') or selection == "MTD": #MTD timeframe
                 tranStart = endTime.replace(day = 1)
                 accountStart = tranStart - relativedelta(days= 1)
-            elif selection in ("ITD","IRR ITD"):
+            elif selection in ("ITD","IRR ITD",'Distributions TD', 'TVPI','DPI'):
                 tranStart = self.parent.dataTimeStart
                 accountStart = self.parent.dataTimeStart
             else:
@@ -667,7 +660,6 @@ class underlyingDataWindow(QWidget):
                     subtract = int(selection.removesuffix("YR")) * 12 - 1
                 tranStart = (endTime - relativedelta(months=subtract)).replace(day=1)
                 accountStart = tranStart - relativedelta(days= 1)
-
         tranStart = datetime.strftime(tranStart,"%Y-%m-%dT00:00:00")
         accountStart = datetime.strftime(accountStart,"%Y-%m-%dT00:00:00")
         allEnd = datetime.strftime(allEnd,"%Y-%m-%dT00:00:00")
@@ -760,7 +752,6 @@ class underlyingDataWindow(QWidget):
                 all_rows.extend(baseRows)
             loopIdx = 0
             nodeCrosses = set()
-            
             while any(src in lowNodes for src in sourceNames) and loopIdx < 10: #handle intermediate (nodal) entries/connections
                 loopIdx += 1
                 if loopIdx == 10:
@@ -820,6 +811,8 @@ class underlyingDataWindow(QWidget):
             except Exception as e:
                 print(f"Error in call : {e} ; {e.args}")
                 all_rows = []
+        if selection == 'Distributions TD':
+            all_rows = [r for r in all_rows if 'Distribution' in r.get('TransactionType','')]
         self.allData = all_rows
 
         if self.db:

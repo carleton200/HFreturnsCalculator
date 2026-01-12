@@ -136,12 +136,12 @@ class MultiSelectBox(QWidget):
 
     def setCheckedItems(self, items):
         for text, cb in self._checkboxes.items():
-            text = self.disp2id(text,text) #check as display version
+            text = self.disp2id(text,text) #check as id version
             cb.setChecked(text in items)
         self._updateLine()
     def setCheckedItem(self, item):
         for text, cb in self._checkboxes.items():
-            text = self.disp2id(text,text) #check as display version
+            text = self.disp2id(text,text) #check as id version
             if text == item:
                 cb.setChecked(True)
         self._updateLine()
