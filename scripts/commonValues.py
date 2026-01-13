@@ -1,7 +1,7 @@
 from dateutil.relativedelta import relativedelta
 
 currentVersion = "1.2.1"
-demoMode = True
+demoMode = False  #TRUE: exportable mode. FALSE: developer mode
 remoteDBmode = False
 ownershipCorrect = True
 fullRecalculations = True
@@ -39,6 +39,7 @@ masterFilterOptions = [
                             
                         ]
 nonFundCols = ('Source name', 'Node', nameHier["Family Branch"]["local"])
+nonDefaultHeaders = ["Return", "Ownership", "MDdenominator", "Monthly Gain"]
 mainTableNames = ["positions", "transactions"]
 nodePathSplitter = " > "
 #TODO: make this database stored variable later
@@ -66,6 +67,9 @@ yearOptions = (1,2,3,5,7,10,12,15,20)
 
 timeOptions = ["MTD","QTD","YTD", "ITD", "IRR ITD"] + [f"{y}YR" for y in yearOptions]
 percent_headers = {option for option in timeOptions}
+percent_headers.add('%')
+fraction_headers = ['DPI','TVPI']
+smallHeaders = [*percent_headers,*fraction_headers]
 for header in ("Return","Ownership"):
     percent_headers.add(header)
 

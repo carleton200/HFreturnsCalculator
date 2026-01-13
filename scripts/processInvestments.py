@@ -77,7 +77,6 @@ def processOneLevelInvestments(month, node, invSourceName, newMonths, cache, pos
         createFinalValue = False
         noStartValue = False
         distributionsM = 0
-        
         if len(startEntry) < 1: #no start value, so NAV = 0
             startEntry = [{nameHier["Value"]["dynLow"] : 0.0}]  #nameHier is a dictionary for common references to specific names. 
             noStartValue = True
@@ -91,7 +90,6 @@ def processOneLevelInvestments(month, node, invSourceName, newMonths, cache, pos
         if len(startEntry) > 1: #combines the values for fund sub classes for calculations
             startEntry = handleFundClasses(startEntry)
         if len(endEntry) < 1: #no end account balance yet, so create it.  
-            # TODO question. Should I remove this and just not use the fund if an end balance is not there?
             createFinalValue = True
             endEntry = [{nameHier["Value"]["dynLow"] : 0}]
         if len(endEntry) > 1: #combine sub funds for calculations

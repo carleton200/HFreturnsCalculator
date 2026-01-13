@@ -145,7 +145,6 @@ class MultiSelectBox(QWidget):
             if text == item:
                 cb.setChecked(True)
         self._updateLine()
-
     def checkedItems(self):
         if self.hierarchy:
             return [self.disp2id(item,item) for item in self.currentItems]

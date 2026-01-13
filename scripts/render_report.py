@@ -1,23 +1,19 @@
-import sys
+from PyQt5.QtWidgets import QFileDialog
+from scripts.instantiate_basics import ASSETS_DIR
+from reportlab.lib.units import inch
 from datetime import datetime
 from pathlib import Path
-
-import markdown
 import matplotlib
+import markdown
+import sys
+import os
+
+from scripts.basicFunctions import separateRowCode
+from scripts.pdf_generator import PDFReportGenerator, CONTENT_WIDTH
+from reportlab.platypus import PageBreak, Spacer, Table, TableStyle, KeepTogether
 matplotlib.use('Agg')  # Use non-interactive backend
 import matplotlib.pyplot as plt
 import pandas as pd
-from jinja2 import Environment, FileSystemLoader, select_autoescape
-
-try:
-    from weasyprint import HTML
-    WEASYPRINT_AVAILABLE = True
-except OSError:
-    print("Warning: WeasyPrint (GTK) not available. PDF generation will be skipped.")
-    WEASYPRINT_AVAILABLE = False
-except ImportError:
-    print("Warning: WeasyPrint not installed. PDF generation will be skipped.")
-    WEASYPRINT_AVAILABLE = False
 
 
 def get_base_dir():
@@ -36,15 +32,15 @@ def format_number(value):
     return f"{value:,.2f}"  
 
 
-def get_holdings_row_class(row_type):
+def get_holdings_row_class(row_type): #TODO: update with proper dataTypes
     """Map type to CSS class for holdings table rows."""
     type_lower = str(row_type).lower().strip()
     
     if type_lower == 'total':
         return 'holdings-total'
-    elif type_lower == 'category' or type_lower == 'subclass':
+    elif type_lower == 'total assetclass' or type_lower == 'total subassetclass':
         return 'holdings-subclass'
-    elif type_lower == 'pool':
+    elif type_lower == 'total node':
         return 'holdings-pool'
     elif type_lower == 'benchmark':
         return 'holdings-benchmark'
@@ -52,7 +48,7 @@ def get_holdings_row_class(row_type):
         return 'holdings-investment'  # fallback
 
 
-def create_page_groups(portfolio_holdings_rows, rows_per_page=32, first_page_rows=32):
+def create_page_groups(dataTypes, portfolio_holdings_rows, colorDepths, rows_per_page=30):
     """
     Split rows into page groups with a fixed number of rows per page.
     first_page_rows: Number of rows for the very first page.
@@ -60,25 +56,32 @@ def create_page_groups(portfolio_holdings_rows, rows_per_page=32, first_page_row
     """
     pages = []
     current_page = []
-    
-    # Use the first page limit initially
-    current_limit = first_page_rows
-    
+
+    colorPages = []
+    currentColorPage = []
+
+    headerSkipOpts = ('Total assetClass','Total Node', 'Total subAssetClass','Total sleeve')
+        
     for i, row in enumerate(portfolio_holdings_rows):
         # Check if adding this row would exceed the current limit
-        if len(current_page) >= current_limit:
+        dType = dataTypes[i]
+        if len(current_page) >= rows_per_page or (rows_per_page - len(current_page) <= 5 and dType in headerSkipOpts):
+            #skip if end of page or a header is at the base of the page
             pages.append(current_page)
             current_page = [row]
+            colorPages.append(currentColorPage)
+            currentColorPage = [colorDepths[i],]
             # After the first page is filled, switch to the standard limit for all subsequent pages
-            current_limit = rows_per_page
         else:
             current_page.append(row)
+            currentColorPage.append(colorDepths[i])
     
     # Add the last page if it has any rows
     if current_page:
         pages.append(current_page)
+        colorPages.append(currentColorPage)
     
-    return pages
+    return pages, colorPages
 
 
 def create_benchmark_chart(benchmarks_df, column, title, output_path, y_lim=None, colors=None):
@@ -115,7 +118,7 @@ def create_benchmark_chart(benchmarks_df, column, title, output_path, y_lim=None
     fig, ax = plt.subplots(figsize=(6, 5))
     
     # Convert values to percentages (multiply by 100)
-    data_percent = data[column] * 100
+    data_percent = data[column]
     
     # Create vertical bar chart
     x_pos = range(len(data))
@@ -175,215 +178,145 @@ def create_benchmark_chart(benchmarks_df, column, title, output_path, y_lim=None
     return output_path
 
 
-def render_report(workbook = None):
+def render_report(out_path, holdingDict, colorDepths, snapshotWb = None, benchmarks_df = None,JPMdf = None, narrative_text = None, report_date = None, 
+                  holdings_exclude_keys = None, holdings_header_order = None, onlyHoldings = False):
     print(f"Report generation started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    base_dir = get_base_dir()
-    print("Base dir:", base_dir)
+    holdings_header_order = ['',*holdings_header_order]
+   
+    if snapshotWb and not onlyHoldings:
+        try:
+            dfs = snapshotWb
+            # Assets and Flows-------
+            af = dfs["assets_and_flows"].copy()
+            af = af.iloc[:, :4]
+            af.columns = ["label", "month", "year_1", "inception"]
+            assets_and_flows_rows = af.to_dict(orient="records")
 
-    # 1) Load sheets
-    if not workbook:
-        from openpyxl import load_workbook
-        excel_path = base_dir / "HighLevelPortfolioSnapshot.xlsx"
-        dfs = load_workbook(excel_path)
+            # Read that sheet. Usually header row is the first row with
+            # ['', 'Month', 'QTD', 'YTD', '1 Year', '3 Year', 'Inception']
+            pr = dfs['portfolio returns']
+            portfolio_returns_rows = pr.to_dict(orient="records")
+
+            # 3b) Overall Family Breakdown (right panel)
+            ofb = dfs["overall_family_breakdown"].copy()
+
+            # Assume first 5 cols: Asset, LM $MM, Δ, CM $MM, %
+            ofb = ofb.iloc[:, :5]
+            ofb.columns = ["asset", "lm_mm", "delta_mm", "cm_mm", "pct"]
+            overall_family_breakdown_rows = ofb.to_dict(orient="records")
+
+            # 3c) HF Foundations
+            # Find key that matches 'foundations' case-insensitively
+            foundations_key = next((k for k in dfs.keys() if k.lower() == "foundations"), None)
+            if foundations_key:
+                hff = dfs[foundations_key].copy()
+                # Expected columns: Asset Class, $MM, % Allocation
+                # Take first 3 columns
+                hff = hff.iloc[:, :3]
+                hff.columns = ["asset_class", "mm", "pct"]
+                hf_foundations_rows = hff.to_dict(orient="records")
+            else:
+                print("Warning: 'foundations' sheet not found in loaded keys:", list(dfs.keys()))
+                hf_foundations_rows = []
+
+            # 3d) Sports (under Overall Family Breakdown)
+            # Look for "overall_family_breakdown2"
+            sports_key = next((k for k in dfs.keys() if "breakdown2" in k.lower()), None)
+            if sports_key:
+                sprT = dfs[sports_key].copy()
+                # Expected columns: Sports, Share %, Team Value, Debt, Equity, Family Share
+                # Take first 6 columns
+                sprT = sprT.iloc[:, :6]
+                sprT.columns = ["sports", "share_pct", "team_value", "debt", "equity", "family_share"]
+                sports_rows = sprT.to_dict(orient="records")
+            else:
+                print("Warning: 'overall_family_breakdown2' sheet not found in loaded keys:", list(dfs.keys()))
+                sports_rows = []
+
+            # 3e) Returns vs Benchmark
+            rvb_key = next((k for k in dfs.keys() if "returns_vs_benchmark" in k.lower()), None)
+            if rvb_key:
+                rvb = dfs[rvb_key].copy()
+                # Expecting ~20 columns
+                # 0: Asset Class, 1: $MM
+                # 2-4: Alloc vs Target (%, Tgt %, Delta $)
+                # 5-7: Month (RTN, BM, Delta)
+                # 8-10: YTD
+                # 11-13: 1 Year
+                # 14-16: 3 Year
+                # 17-19: Inception
+                rvb = rvb.iloc[:, :20]
+                rvb.columns = [
+                    "asset_class", "mm",
+                    "alloc_pct", "tgt_pct", "alloc_delta",
+                    "m_rtn", "m_bm", "m_delta",
+                    "ytd_rtn", "ytd_bm", "ytd_delta",
+                    "y1_rtn", "y1_bm", "y1_delta",
+                    "y3_rtn", "y3_bm", "y3_delta",
+                    "inc_rtn", "inc_bm", "inc_delta"
+                ]
+                returns_vs_benchmark_rows = rvb.to_dict(orient="records")
+            else:
+                print("Warning: 'returns_vs_benchmark' sheet not found in loaded keys:", list(dfs.keys()))
+                returns_vs_benchmark_rows = []
+        except Exception as e:
+            print(f'WARNING: Error occured processing snapshot data for report export: {e.args}')
     else:
-        dfs = workbook
-
-    # 2) Assets and Flows
-    af = dfs["assets_and_flows"].copy()
-    af = af.iloc[:, :4]
-    af.columns = ["label", "month", "year_1", "inception"]
-    assets_and_flows_rows = af.to_dict(orient="records")
-
-    # 3) Portfolio Returns — read directly from Excel with the real sheet name
-    #    First, find the sheet whose normalized name matches "portfolio_returns"
-    xl = pd.ExcelFile(excel_path)
-
-    target_norm = "portfolio_returns"
-    sheet_name_match = None
-    for sn in xl.sheet_names:
-        norm = sn.strip().lower().replace(" ", "_")
-        if norm == target_norm:
-            sheet_name_match = sn
-            break
-
-    if sheet_name_match is None:
-        raise ValueError(
-            f"Could not find a sheet matching '{target_norm}'. "
-            f"Available sheets: {xl.sheet_names}"
-        )
-
-
-    # Read that sheet. Usually header row is the first row with
-    # ['', 'Month', 'QTD', 'YTD', '1 Year', '3 Year', 'Inception']
-    pr = xl.parse(sheet_name_match, header=0)
-    # Keep first 7 columns: label + 6 metrics
-    pr = pr.iloc[:, :7]
-    pr.columns = [
-        "label",
-        "month",
-        "qtd",
-        "ytd",
-        "one_year",
-        "three_year",
-        "inception",
-    ]
-    portfolio_returns_rows = pr.to_dict(orient="records")
-
-    # 3b) Overall Family Breakdown (right panel)
-    ofb = dfs["overall_family_breakdown"].copy()
-
-    # Assume first 5 cols: Asset, LM $MM, Δ, CM $MM, %
-    ofb = ofb.iloc[:, :5]
-    ofb.columns = ["asset", "lm_mm", "delta_mm", "cm_mm", "pct"]
-    overall_family_breakdown_rows = ofb.to_dict(orient="records")
-
-    # 3c) HF Foundations
-    # Find key that matches 'foundations' case-insensitively
-    foundations_key = next((k for k in dfs.keys() if k.lower() == "foundations"), None)
-    if foundations_key:
-        hff = dfs[foundations_key].copy()
-        # Expected columns: Asset Class, $MM, % Allocation
-        # Take first 3 columns
-        hff = hff.iloc[:, :3]
-        hff.columns = ["asset_class", "mm", "pct"]
-        hf_foundations_rows = hff.to_dict(orient="records")
-    else:
-        print("Warning: 'foundations' sheet not found in loaded keys:", list(dfs.keys()))
         hf_foundations_rows = []
-
-    # 3d) Sports (under Overall Family Breakdown)
-    # Look for "overall_family_breakdown2"
-    sports_key = next((k for k in dfs.keys() if "breakdown2" in k.lower()), None)
-    if sports_key:
-        sprT = dfs[sports_key].copy()
-        # Expected columns: Sports, Share %, Team Value, Debt, Equity, Family Share
-        # Take first 6 columns
-        sprT = sprT.iloc[:, :6]
-        sprT.columns = ["sports", "share_pct", "team_value", "debt", "equity", "family_share"]
-        sports_rows = sprT.to_dict(orient="records")
-    else:
-        print("Warning: 'overall_family_breakdown2' sheet not found in loaded keys:", list(dfs.keys()))
-        sports_rows = []
-
-    # 3e) Returns vs Benchmark
-    rvb_key = next((k for k in dfs.keys() if "returns_vs_benchmark" in k.lower()), None)
-    if rvb_key:
-        rvb = dfs[rvb_key].copy()
-        # Expecting ~20 columns
-        # 0: Asset Class, 1: $MM
-        # 2-4: Alloc vs Target (%, Tgt %, Delta $)
-        # 5-7: Month (RTN, BM, Delta)
-        # 8-10: YTD
-        # 11-13: 1 Year
-        # 14-16: 3 Year
-        # 17-19: Inception
-        rvb = rvb.iloc[:, :20]
-        rvb.columns = [
-            "asset_class", "mm",
-            "alloc_pct", "tgt_pct", "alloc_delta",
-            "m_rtn", "m_bm", "m_delta",
-            "ytd_rtn", "ytd_bm", "ytd_delta",
-            "y1_rtn", "y1_bm", "y1_delta",
-            "y3_rtn", "y3_bm", "y3_delta",
-            "inc_rtn", "inc_bm", "inc_delta"
-        ]
-        returns_vs_benchmark_rows = rvb.to_dict(orient="records")
-    else:
-        print("Warning: 'returns_vs_benchmark' sheet not found in loaded keys:", list(dfs.keys()))
+        assets_and_flows_rows = []
+        portfolio_returns_rows = []
+        overall_family_breakdown_rows = []
         returns_vs_benchmark_rows = []
-
-    # 3f) Portfolio Holdings (Pages 9-18)
-    holdings_path = base_dir / "HF Capital Portfolio Holdings.xlsx"
-    format_path = base_dir / "Portfolio Holding Format.xlsx"
-    
-    # First, load the format mapping from the separate format file
-    type_mapping = {}
-    if format_path.exists():
-        try:
-            dfs_format = load_workbook(format_path)
-            # Get the first sheet (or look for a specific sheet name)
-            format_key = list(dfs_format.keys())[0]
-            format_df = dfs_format[format_key].copy()
-            # Expected columns: Entry, Type (or similar)
-            # Take first 2 columns
-            format_df = format_df.iloc[:, :2]
-            format_df.columns = ["entry", "type"]
-            # Create mapping: entry -> type
-            for _, row in format_df.iterrows():
-                entry = str(row.get("entry", "")).strip()
-                entry_type = str(row.get("type", "")).strip().title()
-                if entry and entry_type and entry.lower() != "entry":
-                    type_mapping[entry] = entry_type
-            print(f"Loaded {len(type_mapping)} entries from format mapping file")
-        except Exception as e:
-            print(f"Warning: Error loading format file '{format_path}': {e}")
-    else:
-        print(f"Warning: Format file '{format_path}' not found.")
-    
-    if holdings_path.exists():
-        try:
-            dfs_holdings = load_workbook(holdings_path)
-            
-            # Load the actual holdings data from "Sheet"
-            holdings_key = "Sheet"
-            if holdings_key not in dfs_holdings:
-                # Try to find it case-insensitively or use first sheet
-                holdings_key = next((k for k in dfs_holdings.keys() if k.lower() == "sheet"), None)
-                if holdings_key is None:
-                    holdings_key = list(dfs_holdings.keys())[0]
-                    print(f"Warning: 'Sheet' not found, using first sheet: '{holdings_key}'")
-            
-            holdings_df = dfs_holdings[holdings_key].copy()
-
-            
-            # Expected columns: Asset Class/Investment, %, NAV, MTD, YTD, 1YR, 3YR, ITD
-            holdings_df = holdings_df[['Asset_Class_Investment', 'Pct', 'NAV', 'MTD', 'YTD', '1YR', '3YR', 'ITD']]
-            holdings_df.columns = [
-                "investment", "pct_alloc", "nav", "mtd", "ytd",
-                "one_year", "three_year", "itd"
-            ]
-            
-            # Convert to dict and add type information from mapping
-            portfolio_holdings_rows = holdings_df.to_dict(orient="records")
-            
-            for row in portfolio_holdings_rows:
-                investment = str(row.get("investment", "")).strip()
-                # Look up type in mapping
-                row["type"] = type_mapping.get(investment, "Investment")  # Default to "Investment" if not found
-                row["type"] = str(row["type"]).strip().title()  # Normalize
-                # Add CSS class based on type
-                row["row_class"] = get_holdings_row_class(row["type"])
-                # Determine if border should appear below (for Total and Category rows)
-                row["show_border"] = row["type"].lower() in ['total', 'category', 'subclass']
-            
-            # Split rows into page groups
-            portfolio_holdings_pages = create_page_groups(portfolio_holdings_rows)
-            
-            print(f"Loaded {len(portfolio_holdings_rows)} portfolio holdings rows")
-            print(f"Split into {len(portfolio_holdings_pages)} pages")
-        except Exception as e:
-            print(f"Warning: Error loading portfolio holdings: {e}")
-            import traceback
-            traceback.print_exc()
-            portfolio_holdings_pages = []
-    else:
-        print(f"Warning: '{holdings_path}' not found.")
+        sports_rows = []
+    try:
+        portfolio_holdings_rows = []
+        dataTypes = []
+        # Default exclude keys (metadata that shouldn't be columns)
+        baseExclusions = ['dataType', 'type', 'row_class', 'show_border', 'rowKey']
+        if holdings_exclude_keys is None:
+            holdings_exclude_keys = baseExclusions
+        else:
+            holdings_exclude_keys.extend(baseExclusions)
+        
+        # Process holdingDict without conversions - use original keys
+        for rowKey, rowDict in holdingDict.items():
+            row = rowDict.copy()
+            rowName, _ = separateRowCode(rowKey)
+            investment = rowName
+            row[''] = investment
+            # Store type separately (it's used for styling but shouldn't be a column)
+            row["type"] = rowDict.get('dataType', '')
+            dataTypes.append(rowDict.get('dataType', ''))
+            # Add CSS class based on type
+            row["row_class"] = get_holdings_row_class(row["type"])
+            # Determine if border should appear below (for Total and Category rows)
+            row["show_border"] = row["type"].lower() in ['total', 'assetClass', 'subAssetClass']
+            portfolio_holdings_rows.append(row)
+        
+        # Split rows into page groups
+        portfolio_holdings_pages, colorDepthPages = create_page_groups(dataTypes, portfolio_holdings_rows, colorDepths)
+        
+        print(f"Loaded {len(portfolio_holdings_rows)} portfolio holdings rows")
+        print(f"Split into {len(portfolio_holdings_pages)} pages")
+    except Exception as e:
+        print(f"Warning: Error loading portfolio holdings: {e}")
+        import traceback
+        traceback.print_exc()
         portfolio_holdings_pages = []
+        colorDepthPages = []
 
     # 3g) Benchmarks (World Markets page)
-    benchmarks_path = base_dir / "benchmarks.xlsx"
     benchmarks_rows = []
     benchmark_chart_mtd_path = None
     benchmark_chart_1y_path = None
     
-    if benchmarks_path.exists():
+    if benchmarks_df and not onlyHoldings:
         try:
-            benchmarks_df = pd.read_excel(benchmarks_path, sheet_name=0)
             # Expected columns: Benchmark, Info, MTD, QTD, YTD, 1Y, 3Y, 5Y, 10Y
-            benchmarks_df = benchmarks_df[['Benchmark', 'Info', 'MTD', 'QTD', 'YTD', '1Y', '3Y', '5Y', '10Y']]
             benchmarks_rows = benchmarks_df.to_dict(orient="records")
             
             # Create output directory for charts
+            base_dir = get_base_dir()
             output_dir = base_dir / "output"
             output_dir.mkdir(exist_ok=True)
             
@@ -429,59 +362,54 @@ def render_report(workbook = None):
             traceback.print_exc()
             benchmarks_rows = []
     else:
-        print(f"Warning: '{benchmarks_path}' not found.")
         benchmarks_rows = []
-
     # 3h) JPM LOC Data
-    jpm_loc_path = base_dir / "JMP LOC.xlsx"
     jpm_usage_rows = []
     jpm_collateral_rows = []
     jpm_letters_of_credit = None
 
-    if jpm_loc_path.exists():
+    if JPMdf and not onlyHoldings:
         try:
-            print(f"Loading JPM LOC data from {jpm_loc_path}...")
-            # Load 'Current Usage' sheet
-            usage_df = pd.read_excel(jpm_loc_path, sheet_name=0) # Assuming first sheet
+            # JPMdf is already a DataFrame or dict of DataFrames
+            if isinstance(JPMdf, dict):
+                # If it's a dict, get the sheets
+                usage_df = JPMdf.get('usage', list(JPMdf.values())[0] if JPMdf else pd.DataFrame())
+                collateral_df = JPMdf.get('collateral', list(JPMdf.values())[1] if len(JPMdf) > 1 else pd.DataFrame())
+            else:
+                # Single DataFrame - assume it's usage
+                usage_df = JPMdf
+                collateral_df = pd.DataFrame()
             # It seems the sheet might have headers on row 0. Based on screenshot:
             # Type, Size, Cost, Amount Drawn
             # 'Letters of Credit' is likely a separate row below 'Total' or a separate variable.
             # Let's clean the DF.
             
-            # Look for 'Type' in columns to identify header row if needed, but assuming standard format
-            usage_df.columns = [str(c).strip() for c in usage_df.columns]
-            
-            # Filter main table rows
-            # Rows usually: Secured, Unsecured, Total
-            # And maybe 'Letters of Credit' is in there too
-            
-            # We want to extract 'Letters of Credit' specifically
-            loc_row = usage_df[usage_df.iloc[:, 0].astype(str).str.contains("Letters of Credit", case=False, na=False)]
-            if not loc_row.empty:
-                # Assuming the value is in the 'Size' column (2nd column, index 1)
-                jpm_letters_of_credit = loc_row.iloc[0, 1]
-            
-            # Usage table rows (exclude Letters of Credit if it was in the same table)
-            usage_table = usage_df[~usage_df.iloc[:, 0].astype(str).str.contains("Letters of Credit", case=False, na=False)].copy()
-            # Rename columns to standard keys
-            # Expecting: Type, Size, Cost, Amount Drawn
-            # Map by position to be safe if names vary slightly
-            if len(usage_table.columns) >= 4:
-                usage_table = usage_table.iloc[:, :4]
-                usage_table.columns = ["type", "size", "cost", "amount_drawn"]
-                jpm_usage_rows = usage_table.to_dict(orient="records")
-            else:
-                print("Warning: JPM Usage table has fewer than 4 columns")
+            # Process usage data
+            if not usage_df.empty:
+                usage_df.columns = [str(c).strip() for c in usage_df.columns]
+                
+                # Extract 'Letters of Credit' if present
+                loc_row = usage_df[usage_df.iloc[:, 0].astype(str).str.contains("Letters of Credit", case=False, na=False)]
+                if not loc_row.empty:
+                    jpm_letters_of_credit = loc_row.iloc[0, 1]
+                
+                # Usage table rows (exclude Letters of Credit if it was in the same table)
+                usage_table = usage_df[~usage_df.iloc[:, 0].astype(str).str.contains("Letters of Credit", case=False, na=False)].copy()
+                if len(usage_table.columns) >= 4:
+                    usage_table = usage_table.iloc[:, :4]
+                    usage_table.columns = ["type", "size", "cost", "amount_drawn"]
+                    jpm_usage_rows = usage_table.to_dict(orient="records")
+                else:
+                    print("Warning: JPM Usage table has fewer than 4 columns")
 
-            # Load 'Current Collateral' sheet
-            collateral_df = pd.read_excel(jpm_loc_path, sheet_name=1) # Assuming second sheet
-            # Expected columns: Collateral Account, Market Value, Lending Value, %
-            if len(collateral_df.columns) >= 4:
-                collateral_df = collateral_df.iloc[:, :4]
-                collateral_df.columns = ["account", "market_value", "lending_value", "pct"]
-                jpm_collateral_rows = collateral_df.to_dict(orient="records")
-            else:
-                print("Warning: JPM Collateral table has fewer than 4 columns")
+            # Process collateral data
+            if not collateral_df.empty:
+                if len(collateral_df.columns) >= 4:
+                    collateral_df = collateral_df.iloc[:, :4]
+                    collateral_df.columns = ["account", "market_value", "lending_value", "pct"]
+                    jpm_collateral_rows = collateral_df.to_dict(orient="records")
+                else:
+                    print("Warning: JPM Collateral table has fewer than 4 columns")
                 
             print(f"Loaded {len(jpm_usage_rows)} JPM usage rows")
             print(f"Loaded {len(jpm_collateral_rows)} JPM collateral rows")
@@ -492,83 +420,142 @@ def render_report(workbook = None):
             if "Permission denied" not in str(e):
                 import traceback
                 traceback.print_exc()
-    else:
-        print(f"Warning: '{jpm_loc_path}' not found.")
 
-    # 4) Load Narrative
-    narrative_path = base_dir / "narrative.md"
-    if narrative_path.exists():
-        narrative_text = narrative_path.read_text(encoding="utf-8")
-        narrative_html = markdown.markdown(narrative_text)
-    else:
-        print(f"Warning: '{narrative_path}' not found.")
-        narrative_html = "<p>No narrative found.</p>"
+    if not onlyHoldings:
+        # 4) Load Narrative
+        narrative_path = ASSETS_DIR + "/reportFiles/narrative.md"
+        narrative_path = Path(narrative_path)
+        if os.path.exists(narrative_path):
+            narrative_text = narrative_path.read_text(encoding="utf-8")
+            narrative_html = markdown.markdown(narrative_text)
+        else:
+            print(f"Warning: Narrative text not found.")
+            narrative_html = "<p>No narrative found.</p>"
 
-    # 4b) Load JPM Commentary
-    jpm_commentary_path = base_dir / "jpm_commentary.md"
-    if jpm_commentary_path.exists():
-        jpm_text = jpm_commentary_path.read_text(encoding="utf-8")
-        jpm_commentary_html = markdown.markdown(jpm_text)
-    else:
-        print(f"Warning: '{jpm_commentary_path}' not found.")
-        jpm_commentary_html = "<p>No JPM commentary found.</p>"
+        # 4b) Load JPM Commentary
+        jpm_commentary_path = ASSETS_DIR + "/reportFiles/jpm_commentary.md"
+        jpm_commentary_path = Path(jpm_commentary_path)
+        if os.path.exists(jpm_commentary_path):
+            jpm_text = jpm_commentary_path.read_text(encoding="utf-8")
+            jpm_commentary_html = markdown.markdown(jpm_text)
+        else:
+            print(f"Warning: '{jpm_commentary_path}' not found.")
+            jpm_commentary_html = "<p>No JPM commentary found.</p>"
 
-    # 5) Templates
-    templates_dir = base_dir / "templates"
-
-    env = Environment(
-        loader=FileSystemLoader(str(templates_dir)),
-        autoescape=select_autoescape(["html", "xml"]),
-    )
-    env.filters["format_number"] = format_number
-    env.filters["is_nan"] = lambda x: pd.isna(x) if isinstance(x, (float, int)) or x is None else False
-
-    template = env.get_template("snapshot.html")
-
-    # 6) Render (single call – include all panels)
-    # Convert chart paths to relative paths for template
-    chart_mtd_rel = "output/benchmark_chart_mtd.png" if benchmark_chart_mtd_path else None
-    chart_1y_rel = "output/benchmark_chart_1y.png" if benchmark_chart_1y_path else None
     
-    html_str = template.render(
-        as_of="September 30, 2025",
-        assets_and_flows=assets_and_flows_rows,
-        portfolio_returns=portfolio_returns_rows,
-        overall_family_breakdown=overall_family_breakdown_rows,
-        hf_foundations=hf_foundations_rows,
-        sports=sports_rows,
-        returns_vs_benchmark=returns_vs_benchmark_rows,
-        benchmarks=benchmarks_rows,
-        benchmark_chart_mtd=chart_mtd_rel,
-        benchmark_chart_1y=chart_1y_rel,
-        portfolio_holdings_pages=portfolio_holdings_pages,
-        narrative_html=narrative_html,
-        jpm_usage=jpm_usage_rows,
-        jpm_collateral=jpm_collateral_rows,
-        jpm_letters_of_credit=jpm_letters_of_credit,
-        jpm_commentary_html=jpm_commentary_html,
-    )
-
-    # 7) Output
-    output_dir = base_dir / "output"
-    output_dir.mkdir(exist_ok=True)
-    out_path = output_dir / "snapshot.html"
-    out_path.write_text(html_str, encoding="utf-8")
-    print(f"Wrote {out_path}")
-
-    # 7) PDF Output
-    if WEASYPRINT_AVAILABLE:
-        pdf_path = output_dir / "snapshot.pdf"
+    out_path = Path(out_path)
+    
+    # Format as "Month day, year" (e.g., "September 30, 2025")
+    formatted_date = report_date.strftime("%B %d, %Y")
+    
+    # 7) Generate PDF directly using ReportLab
+    try:
+        pdf_gen = PDFReportGenerator(str(out_path), ASSETS_DIR)
+        
+        if not onlyHoldings:
+            # Cover page
+            pdf_gen.add_cover_page(
+                "Overall Post HFC - report automation test",
+                "Monthly Portfolio Overview",
+                formatted_date
+            )
+            
+            # Narrative page
+            pdf_gen.add_narrative_page(
+                "High-Level Portfolio Snapshot Narrative",
+                formatted_date,
+                narrative_html
+            )
+            
+            # Main snapshot page
+            pdf_gen.add_header_row("High-Level Portfolio Snapshot", formatted_date)
+        
+            # Top row: 3-column layout
+            # Since ReportLab has issues with nested KeepTogether in Tables,
+            # we'll use a custom approach: add tables directly but adjust their widths
+            # to fit the 3-column layout when rendered
+            
+            col1_width = 2.8 * inch
+            col2_width = 3.8 * inch
+            col3_width = 3.36 * inch
+            
+            # Add left column: Assets and Flows + Foundations
+            left_content = pdf_gen.add_assets_and_flows_table(assets_and_flows_rows, col1_width)
+            for item in left_content:
+                pdf_gen.story.append(item)
+            pdf_gen.story.append(Spacer(1, 0.2*inch))
+            foundations_content = pdf_gen.add_foundations_table(hf_foundations_rows, col1_width)
+            for item in foundations_content:
+                pdf_gen.story.append(item)
+            
+            # Add middle column: Portfolio Returns
+            pdf_gen.story.append(Spacer(1, 0.2*inch))
+            middle_content = pdf_gen.add_portfolio_returns_table(portfolio_returns_rows, col2_width)
+            for item in middle_content:
+                pdf_gen.story.append(item)
+            
+            # Add right column: Overall Family Breakdown + Sports
+            pdf_gen.story.append(Spacer(1, 0.2*inch))
+            right_content = pdf_gen.add_overall_family_breakdown_table(overall_family_breakdown_rows, col3_width)
+            for item in right_content:
+                pdf_gen.story.append(item)
+            sports_content = pdf_gen.add_sports_table(sports_rows, col3_width)
+            for item in sports_content:
+                pdf_gen.story.append(item)
+            
+            # Returns vs Benchmark table
+            pdf_gen.story.append(Spacer(1, 0.2*inch))
+            rvb_content = pdf_gen.add_returns_vs_benchmark_table(returns_vs_benchmark_rows)
+            pdf_gen.story.extend(rvb_content)
+            
+            # Benchmarks page (if data available)
+            if benchmarks_rows:
+                pdf_gen.story.append(PageBreak())
+                pdf_gen.add_header_row("What Happened In The World Markets?", formatted_date)
+                pdf_gen.add_benchmark_charts(benchmark_chart_mtd_path, benchmark_chart_1y_path)
+                pdf_gen.add_benchmark_table(benchmarks_rows)
+            
+            # JPM LOC page (if data available)
+            if jpm_usage_rows or jpm_collateral_rows:
+                pdf_gen.story.append(PageBreak())
+                pdf_gen.add_jpm_tables(
+                    jpm_usage_rows,
+                    jpm_collateral_rows,
+                    jpm_letters_of_credit,
+                    jpm_commentary_html,
+                    formatted_date
+                )
+        
+        # Portfolio Holdings pages - start on new page
+        if portfolio_holdings_pages:
+            if not onlyHoldings:
+                pdf_gen.story.append(PageBreak())  # Always start on new page
+            for page_num, page_rows in enumerate(portfolio_holdings_pages):
+                if page_num > 0:
+                    pdf_gen.story.append(PageBreak())
+                pageColorDepths = colorDepthPages[page_num]
+                pdf_gen.add_header_row("HF Capital Portfolio Holdings", formatted_date)
+                pdf_gen.add_portfolio_holdings_table(page_rows, pageColorDepths, page_num, 
+                                                     exclude_keys=holdings_exclude_keys,
+                                                     header_order=holdings_header_order)
+        
+        # Build PDF
+        pdf_gen.build()
+        print(f"Wrote PDF: {out_path}")
         try:
-            HTML(string=html_str, base_url=str(base_dir)).write_pdf(pdf_path)
-            print(f"Wrote {pdf_path}")
-        except Exception as e:
-            print(f"Error generating PDF: {e}")
-    else:
-        print("Skipped PDF generation (WeasyPrint not available)")
+            if os.path.exists(out_path):
+                if sys.platform == "win32":
+                    os.startfile(out_path)
+                elif sys.platform == "darwin":
+                    os.system(f"open \"{out_path}\"")
+                else:
+                    os.system(f"xdg-open \"{out_path}\"")
+        except Exception as open_ex:
+            print(f"Warning: Could not open generated PDF automatically: {open_ex}")
+        
+    except Exception as e:
+        print(f"Error generating PDF: {e}")
+        import traceback
+        traceback.print_exc()
 
     print(f"Report generation completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-
-
-if __name__ == "__main__":
-    render_report()

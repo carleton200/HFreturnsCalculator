@@ -411,7 +411,14 @@ class DatabaseManager:
             rows = [dict(zip(headers,row)) for row in cursor.fetchall()]
             cursor.close()
         return rows
-    
+    def loadFromDB(self,table,condStatement,inputs):
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute(f'SELECT * FROM {table}' + condStatement,tuple(inputs))
+            headers = [d[0] for d in cursor.description]
+            rows = [dict(zip(headers,row)) for row in cursor.fetchall()]
+            cursor.close()
+        return rows
     def close(self) -> None:
         try:
             with self._lock:

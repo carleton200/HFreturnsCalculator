@@ -1,9 +1,11 @@
 from classes import DatabaseManager
 from classes.DatabaseManager import load_from_db
-from scripts.basicFunctions import filt2Query
+from scripts.basicFunctions import filt2Query, separateRowCode
 from scripts.loggingFuncs import attach_logging_to_class
 from classes.widgetClasses import SortButtonWidget, MultiSelectBox, simpleMonthSelector
 from scripts.exportTableToExcel import exportTableToExcel
+from scripts.pyqtFunctions import basicHoldingsReportExport, controlTable
+from scripts.render_report import render_report
 from scripts.reportWorkbooks import portfolioSnapshot
 from openpyxl.utils import get_column_letter
 from dateutil.relativedelta import relativedelta
@@ -636,7 +638,8 @@ class underlyingDataWindow(QWidget):
                 gui_queue.put(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(path)))
         executor.submit(processExport)    
     def buildTable(self):
-        if self.parent.tableBtnGroup.checkedButton().text() == "Monthly Table":
+        monthTableBool = self.parent.tableBtnGroup.checkedButton().text()  == "Monthly Table"
+        if monthTableBool:
             selectedMonth = datetime.strptime(self.parent.selectedCell["month"], "%B %Y")
             tranStart = selectedMonth.replace(day = 1)
             accountStart = tranStart - relativedelta(days= 1)
@@ -668,7 +671,7 @@ class underlyingDataWindow(QWidget):
             return
         dataType = dataType.removeprefix("Total ")
         code = self.parent.selectedCell["rowKey"]
-        header, code= self.parent.separateRowCode(code)
+        header, code= separateRowCode(code)
         hier = code.removeprefix("##(").removesuffix(")##").split("::")
         hierSelections = self.parent.sortHierarchy.checkedItems()
         if dataType == "Target name":
@@ -811,7 +814,7 @@ class underlyingDataWindow(QWidget):
             except Exception as e:
                 print(f"Error in call : {e} ; {e.args}")
                 all_rows = []
-        if selection == 'Distributions TD':
+        if not monthTableBool and selection == 'Distributions TD':
             all_rows = [r for r in all_rows if 'Distribution' in r.get('TransactionType','')]
         self.allData = all_rows
 
@@ -933,9 +936,10 @@ class tableWindow(QWidget):
         exportTableToExcel(self,self.rows,self.headers)
 
 class reportExportWindow(QWidget):
-    def __init__(self, db: DatabaseManager, parent = None, flags = Qt.WindowFlags(), parentSource = None):
+    def __init__(self, db: DatabaseManager, exportType, parent = None, flags = Qt.WindowFlags(), parentSource = None):
         super().__init__(parent, flags)
         self.parent = parentSource
+        self.exportType = exportType
         self.setWindowTitle('Report Export Options')
 
         self.fam2inv = db.pullInvestorsFromFamilies
@@ -1036,14 +1040,21 @@ class reportExportWindow(QWidget):
                 raise ValueError('Error: Button Selection could not be connected to options')
             if not investors:
                 raise ValueError('No investors found')
-            placeholders = ','.join('?' for _ in investors)
-            date = self.dateSelect.currentText()
-            date = datetime.strptime(date,'%B %Y')
-            date = datetime.strftime(date,'%Y-%m-%d 00:00:00')
-            inputs = (*investors,date)
-            condStatement = f' WHERE [Source name] in ({placeholders}) and [dateTime] = ?'
-            calcs = self.parent.db.loadCalcs(condStatement,inputs)
-            snapshotWorkbook = portfolioSnapshot(calcs, self.parent, investors = investors)
+            if 'Full Report' in self.exportType:
+                placeholders = ','.join('?' for _ in investors)
+                date = self.dateSelect.currentText()
+                dateDt = datetime.strptime(date,'%B %Y')
+                date = datetime.strftime(dateDt,'%Y-%m-%d 00:00:00')
+                inputs = (*investors,)
+                condStatement = f' WHERE [Source name] in ({placeholders})'
+                calcs = self.parent.db.loadCalcs(condStatement,inputs)
+                trans = self.parent.db.loadFromDB('transactions',condStatement,inputs)
+                snapshotWorkbook = portfolioSnapshot(calcs, trans, self.parent,investors,dateDt)
+                render_report(self.parent,snapshotWorkbook)
+            else:
+                filters = {'Source name' : investors}
+                controlTable(self.parent,reset = True, filterChoices=filters)
+                basicHoldingsReportExport(self.parent)
             self.confirmBtn.setEnabled(True)
         except Exception as e:
             print("Error occured in report export initialization")

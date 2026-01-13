@@ -1,20 +1,22 @@
+from scripts.generate_port_hldngs_report import build_holdings_pdf
 from scripts.loggingFuncs import attach_logging_to_class
 from classes.DatabaseManager import DatabaseManager, load_from_db, save_to_db
 from scripts.instantiate_basics import ASSETS_DIR, DATABASE_PATH, gui_queue, executor, APIexecutor, HELP_PATH
 from classes.widgetClasses import simpleMonthSelector, MultiSelectBox, SortButtonWidget
-from scripts.commonValues import (currentVersion, nameHier, headerOptions, ownershipCorrect, masterFilterOptions, importInterval, 
+from scripts.commonValues import (currentVersion, nameHier, headerOptions, nonDefaultHeaders, ownershipCorrect, masterFilterOptions, importInterval, 
                     currentVersion, demoMode, fullRecalculations, calculationPingTime, dashInactiveMinutes, nonFundCols, mainTableNames,
                     nodePathSplitter,assetClass1Order, assetClass2Order,headerOptions, dataOptions, assetLevelLinks,
                     yearOptions, percent_headers, mainURL, dynamoAPIenvName)
-from scripts.processClump import processClump
 from scripts.processInvestments import processInvestments
-from scripts.basicFunctions import (updateStatus, annualizeITD, submitAPIcall, get_connected_node_groups, 
-                                 descendingNavSort, accountBalanceKey, filt2Query)
-from classes.transactionApp import transactionApp
+from scripts.basicFunctions import (headerUnits, updateStatus, annualizeITD, submitAPIcall, get_connected_node_groups, 
+                                 descendingNavSort, accountBalanceKey, filt2Query, separateRowCode)
 from classes.windowClasses import reportExportWindow, underlyingDataWindow, linkBenchmarksWindow, tableWindow, exportWindow, displayWindow
 from classes.tableWidgets import DictListModel, SmartStretchTable
-from classes.nodeLibrary import nodeLibrary
 from TreeScripts.dash_launcher import _run_dash_app_process
+from classes.transactionApp import transactionApp
+from scripts.pyqtFunctions import basicHoldingsReportExport
+from scripts.processClump import processClump
+from classes.nodeLibrary import nodeLibrary
 from openpyxl.utils import get_column_letter
 
 
@@ -40,7 +42,7 @@ from openpyxl.styles import PatternFill, Alignment, Font
 
 
 from PyQt5.QtWidgets import (
-                                QApplication, QWidget, QStackedWidget, QVBoxLayout,
+                                QApplication, QDialog, QInputDialog, QWidget, QStackedWidget, QVBoxLayout,
                                 QLabel, QLineEdit, QPushButton,
                                 QRadioButton, QButtonGroup, QComboBox, QHBoxLayout,
                                 QTableWidget, QTableWidgetItem, QProgressBar, QTableView, QCheckBox, QMessageBox,
@@ -309,7 +311,6 @@ class returnsApp(QWidget):
         exportReportBtn.clicked.connect(self.exportReport)
         exportReportBtn.setObjectName('exportBtn')
         controlsLayout.addWidget(exportReportBtn)
-        exportReportBtn.setEnabled(False)
         exportBtn = QPushButton("Export to Excel")
         exportBtn.clicked.connect(self.exportPage)
         exportBtn.setObjectName("exportBtn")
@@ -724,10 +725,34 @@ class returnsApp(QWidget):
         except Exception as e:
             print(f"Error in data viewing window: {e} {traceback.format_exc()}")
     def exportReport(self,*_):
-        print("export report")
-        window = reportExportWindow(self.db, parentSource = self)
-        window.show()
-        self.reportExportWindow = window
+        msgBox = QMessageBox(self)
+        msgBox.setWindowTitle("Choose Export Type")
+        msgBox.setText("Select export type for PDF export:")
+        combo = QComboBox(msgBox)
+        opt1 = 'Current Selection - Only Holdings'
+        opt2 = 'Current Selection - Full Report'
+        opt3 = 'Select Investor or Family Branch - Only Holdings'
+        opt4 = 'Select Investor or Family Branch - Full Report'
+        if not demoMode:
+            reportOpts = [opt1,opt2,opt3,opt4]
+        else:
+            reportOpts = [opt1,opt3]
+        combo.addItems(reportOpts)
+        msgBox.layout().addWidget(combo, 1, 1)
+        msgBox.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
+        
+        result = msgBox.exec_()
+        if result == QMessageBox.Ok:
+            export_type = combo.currentText()
+        else:
+            return  # User cancelled
+        if export_type in (opt3,opt4):
+            window = reportExportWindow(self.db, export_type, parentSource = self)
+            window.show()
+            self.reportExportWindow = window
+        elif export_type == opt1:
+            basicHoldingsReportExport(self)
+        return
     def exportPage(self,*_):
         # Use a built-in PyQt combobox messagebox for export type selection
         msgBox = QMessageBox(self)
@@ -803,13 +828,28 @@ class returnsApp(QWidget):
                 else:
                     full_hierarchy = ["Total", "Total assetClass", "Total Target name"]
                 hierarchy_levels = [lvl for lvl in full_hierarchy if lvl in all_types]
-                num_hier = 1
 
-                # 3) dynamic data columns minus "dataType"
-                all_cols = list(self.filteredHeaders)
-
-                sorted_cols = self.orderColumns(all_cols)                
-
+                headerSort : SortButtonWidget = self.headerSort
+                currentHeaders = list(self.filteredHeaders)
+                mode = self.tableBtnGroup.checkedButton().text()
+                if not headerSort.active or mode == "Monthly Table" or any(opt not in headerSort.options() for opt in currentHeaders):
+                    col_keys = currentHeaders
+                    exceptions = nonDefaultHeaders
+                    col_keys = self.orderColumns(col_keys, exceptions=exceptions)
+                    if mode == "Complex Table":
+                        allKeys = col_keys.copy()
+                        allKeys.extend(exceptions) #all key options for the header selections
+                        headerSort.set_items(allKeys,[item for item in allKeys if item not in exceptions])
+                        headerSort.setEnabled(True)
+                    else:
+                        headerSort.setEnabled(False)
+                else:
+                    col_keys = headerSort.popup.get_checked_sorted_items()
+                    headerSort.setEnabled(True)      
+                sorted_cols = col_keys
+                if ACcols:
+                    sorted_cols = ['Level','Name','AC1','AC2','AC3','Investment',*sorted_cols]
+                    fund2trait = self.db.fund2trait
                 # 4) create workbook or add sheet if already exists
                 if os.path.exists(path):
                     wb = load_workbook(path)
@@ -828,15 +868,21 @@ class returnsApp(QWidget):
 
                 rowStart = 3
                 # 5) header row
-                for idx, colname in enumerate(sorted_cols, start=num_hier+1):
+                startCol = 1 if ACcols else 2
+                freezeCol = 3 if ACcols else 2
+                for idx, colname in enumerate(sorted_cols, start=startCol):
                     ws.cell(row=rowStart, column=idx, value=colname)
 
-                split_cell = f"{get_column_letter(num_hier+1)}4"
+                split_cell = f"{get_column_letter(freezeCol)}4"
                 ws.freeze_panes = split_cell
 
                 # 7) populate rows
+                sortHier = self.sortHierarchy.checkedItems()
+                maxDepth   = max(len(sortHier),1) + 1
+                nodeDicts = self.db.fetchNodes()
+                nodes = set(nD['name'] for nD in nodeDicts)
                 for r, (row_name, row_dict) in enumerate(data.items(), start=rowStart + 1):
-                    row_name, code = self.separateRowCode(row_name)
+                    row_name, code = separateRowCode(row_name)
                     dtype = row_dict.get("dataType")
                     if dtype != "benchmark": #keeps benchmark as the previous hierarchy level
                         level = hierarchy_levels.index(dtype) if dtype in hierarchy_levels else 0
@@ -844,24 +890,63 @@ class returnsApp(QWidget):
                         data_color = "FFFFFF"
                         if dtype != "Total Target name":
                             depth      = code.count("::") if dtype != "Total" else code.count("::") - 1
-                            maxDepth   = max(len(self.sortHierarchy.checkedItems()),1) + 1
                             data_color = darken_color(data_color,depth/maxDepth/3 + 2/3)
-
+                        else:
+                            depth = maxDepth
                         header_color = data_color
                         data_fill   = PatternFill("solid", data_color, data_color)
                         header_fill = PatternFill("solid", header_color, header_color)
 
-                    data_start = 2
-                    # spread header fill across hierarchy cols
-                    cell = ws.cell(row=r, column=1, value=row_name)
-                    cell.fill = header_fill
-                    cell.font = Font(bold=True)
-                    if dtype == "benchmark":
-                        cell.font = Font(color="0000FF")
-                    cell.alignment = Alignment(indent=level)
+                    if not ACcols:
+                        cell = ws.cell(row=r, column=1, value=row_name)
+                        cell.fill = header_fill
+                        cell.font = Font(bold=True)
+                        if dtype == "benchmark":
+                            cell.font = Font(color="0000FF")
+                        cell.alignment = Alignment(indent=level)
+                    else:
+                        itemDepth = depth + 2 if dtype != "Total Target name" else depth + 1#TODO: solve to find real depth w node issues
+                        if dtype != "Total Target name" and 'Node' in sortHier and sortHier.index('Node') < depth:
+                            itemHier = code.removeprefix("##(").removesuffix(")##").split("::")
+                            prevNodeCnt = 0
+                            for nodeTier in (tier for tier in itemHier if tier in nodes):
+                                prevNodeCnt += 1 #find num of nodes passed to adjust depth
+                            if prevNodeCnt > 0:
+                                itemDepth -= prevNodeCnt - 1 #reduce depth by all previous nodes more than 1
+                        if dtype != "benchmark":
+                            row_dict['Level'] = f'L{itemDepth}' #move to 1 indexed. Push past total
+                        else:
+                            row_dict['Level'] = f'B{itemDepth}'
+                        row_dict['Name'] = row_name
+                        if dtype == 'Total':
+                            row_dict['Level'] = 'L1'
+                        elif dtype == "Total Target name":
+                            row_dict['Investment'] = row_name
+                            target = list(self.cFundToFundLinks.get(row_name,[row_name,]))[0] #convert any consolidated funds to one of their sub-funds
+                            fundTraits = fund2trait.get(target,{})
+                            AC1 = fundTraits.get('assetClass','Not Found')
+                            AC2 = fundTraits.get('subAssetClass','Not Found')
+                            AC3 = fundTraits.get('subAssetSleeve','Not Found')
+                            for txt,var in (['AC1',AC1],['AC2',AC2],['AC3',AC3]):
+                                row_dict[txt] = var
+                        else:
+                            itemHier = code.removeprefix("##(").removesuffix(")##").split("::")
+                            for rowTxt, AClvl in (['AC1','assetClass'],['AC2','subAssetClass'],['AC3','sleeve']):
+                                if AClvl in sortHier and sortHier.index(AClvl) <= len(itemHier) - 1: #check viability
+                                    try:
+                                        row_dict[rowTxt] = itemHier[sortHier.index(AClvl)]
+                                    except:
+                                        print('Failed assigning AC levels')
+                                        print(itemHier)
+                                        print(sortHier.index(AClvl))
+                                        print(AClvl)
+                                        raise
+
+                                    
+
 
                     # data cells with proper formatting
-                    for c, colname in enumerate(sorted_cols, start=data_start):
+                    for c, colname in enumerate(sorted_cols, start=startCol):
                         val = row_dict.get(colname, None)
                         cell = ws.cell(row=r, column=c, value=val)
                         cell.fill = data_fill
@@ -1240,8 +1325,6 @@ class returnsApp(QWidget):
             lvl_co = co.get(level)
             if not lvl_co or lvl_co.get('dataType') == "benchmark":
                 # Skip filtered rows and benchmarks (imported separately)
-                if lvl_co and lvl_co.get('dataType') == "benchmark":
-                    print('benchmark present')
                 continue
             #TVPI and DPI
             capCalled = lvl_co.get('Commitment',0.0) - lvl_co.get('Unfunded',0.0)
@@ -2714,10 +2797,7 @@ class returnsApp(QWidget):
             QMessageBox.warning(self,"Error checking version", f"An error occured checking that your version is up to date. This session has been granted limited access. \n "+
                                 "Your session will run, but cannot access the shared data. This will be signifigantly slower and may have bugs/errors. \n \n Try restarting the app." +
                                 " If this error persists, contact an admin.")
-    def separateRowCode(self, label):
-        header = re.sub(r'##\(.*\)##', '', label, flags=re.DOTALL)
-        code = re.findall(r'##\(.*\)##', label, flags=re.DOTALL)[0]
-        return header, code
+    
     def sortStyleClicked(self, *args):
         if "NAV" in self.sortStyle.text():
             self.sortStyle.setText("Sort Style: Alphabetical")
@@ -2761,7 +2841,7 @@ class returnsApp(QWidget):
                         rows.pop(k)
             to_delete = []
             for row in rows.keys():
-                row_label, _ = self.separateRowCode(row)
+                row_label, _ = separateRowCode(row)
                 if row_label == "hiddenLayer":
                     to_delete.append(row)
             for row in to_delete:
@@ -2773,7 +2853,7 @@ class returnsApp(QWidget):
             #    each entry = (fund_label, unique_code, row_dict)
             row_entries = []
             for fund_label, row_dict in rows.items():
-                row_label, code = self.separateRowCode(fund_label)
+                row_label, code = separateRowCode(fund_label)
                 row_entries.append((row_label, code, row_dict, fund_label))
 
             # 2) Determine columns exactly as before, using cleanedRows for header order
@@ -2788,7 +2868,7 @@ class returnsApp(QWidget):
                     col_keys |= set(d.keys())
                 col_keys = list(col_keys)
 
-                exceptions = ["Return", "Ownership", "MDdenominator", "Monthly Gain"]
+                exceptions = nonDefaultHeaders
                 col_keys = self.orderColumns(col_keys, exceptions=exceptions)
                 if mode == "Complex Table":
                     allKeys = col_keys.copy()
@@ -2826,6 +2906,7 @@ class returnsApp(QWidget):
             if not fundsPresent:
                 maxDepth += 1 #if funds are off, don't allow upper sorts to be white
             colorDepths = [c/maxDepth for c in colorDepths] if maxDepth != 0 else colorDepths
+            self.tableColorDepths = colorDepths
             for r, (fund_label, code, row_dict, rowKey) in enumerate(row_entries):
                 # pull & remove dataType for coloring
                 dataType = row_dict.pop("dataType", "")
@@ -2837,9 +2918,6 @@ class returnsApp(QWidget):
                             for i in range(3)
                         )
                         bg =  QColor(*color)
-                    elif dataType == "benchmark":
-                        color = (182, 205, 245)
-                        bg = QColor(*color)
                     else:
                         cRange     = 255 - startColor[0]
                         color = tuple(

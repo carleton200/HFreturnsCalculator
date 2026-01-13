@@ -3,11 +3,13 @@ import copy
 import traceback
 import queue
 from datetime import datetime
+import pandas as pd
 import pyxirr
 from collections import deque, defaultdict
 from oldScripts.temp import MultiSelectBox
-from scripts.commonValues import nameHier, nodePathSplitter, balanceTypePriority, nonFundCols, masterFilterOptions
+from scripts.commonValues import nameHier, nodePathSplitter, balanceTypePriority, nonFundCols, masterFilterOptions, smallHeaders
 from scripts.instantiate_basics import gui_queue, APIexecutor
+import re
 
 def infer_sqlite_type(val):
     # Try to infer column types in SQLite: INTEGER, REAL, TEXT, or BLOB
@@ -207,6 +209,10 @@ def findSign(num: float):
     if num == 0:
         return 0
     return num / abs(num)
+def separateRowCode(label):
+        header = re.sub(r'##\(.*\)##', '', label, flags=re.DOTALL)
+        code = re.findall(r'##\(.*\)##', label, flags=re.DOTALL)[0]
+        return header, code
 
 def accountBalanceKey(accEntry : dict):
     try:
@@ -364,3 +370,12 @@ def filt2Query(db, filterDict : dict[MultiSelectBox], startDate : datetime, endD
     parameters.append(startDateStr)
     parameters.append(endDateStr)
     return condStatement,parameters
+def headerUnits(headers):
+    units = []
+    for h in headers:
+        if h in smallHeaders:
+            units.append(1)
+        else:
+            units.append(2.5)
+    total_units = sum(units)
+    return units, total_units
