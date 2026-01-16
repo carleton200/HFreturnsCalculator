@@ -142,7 +142,11 @@ class DatabaseManager:
                     ("Unfunded", "REAL"),
                     ("[IRR ITD]", "REAL"),
                     ("ownershipAdjust", "BOOL"),
-                    ('nodePath', 'TEXT')
+                    ('nodePath', 'TEXT'),
+                    ('[Distributions TD]','REAL'),
+                    ('[Monthly Distributions]','REAL'),
+                    ('Contributions', 'REAL'),
+                    ('Redemptions','REAL')
                 ],
                 primary_keys=["dateTime", "[Target name]", "nodePath", "[Source name]"]
             )
@@ -317,6 +321,7 @@ class DatabaseManager:
     def pullId2Node(self):
         nodes = self.fetchNodes()
         id2Node = {node['id'] : node['name'] for node in nodes}
+        id2Node[-1] = 'No Node'
         return id2Node
     def pullInvestorsFromFamilies(self, familyBranches: list[str]):
         investors = self.fetchInvestors()
@@ -511,7 +516,7 @@ def save_to_db(db : DatabaseManager, table, rows, action = "", query = "",inputs
                 # Use the first row to infer data types, fallback to TEXT if empty
                 sample_row = rows[0] if rows else {}
                 col_defs = ','.join(
-                    f'"{c}" {infer_sqlite_type(sample_row.get(c, ""))}' for c in cols
+                    f'"{c}" {infer_sqlite_type(sample_row.get(c, ""), colHeader = c)}' for c in cols
                 )
                 placeholders = ','.join(sqlPlaceholder for _ in cols)
                 sql = f'INSERT INTO "{table}" ({quoted_cols}) VALUES ({placeholders})'

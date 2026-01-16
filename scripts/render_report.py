@@ -1,4 +1,7 @@
+import math
+import statistics
 from PyQt5.QtWidgets import QFileDialog
+from scripts.commonValues import maxPDFheaderUnits, maxRowPadding, maxRowsPerPage, minRowPadding, minimumFontSize, shrinkPDFthreshold, standardFontSize
 from scripts.instantiate_basics import ASSETS_DIR
 from reportlab.lib.units import inch
 from datetime import datetime
@@ -48,7 +51,7 @@ def get_holdings_row_class(row_type): #TODO: update with proper dataTypes
         return 'holdings-investment'  # fallback
 
 
-def create_page_groups(dataTypes, portfolio_holdings_rows, colorDepths, rows_per_page=30):
+def create_page_groups(dataTypes, portfolio_holdings_rows, colorDepths, rows_per_page=maxRowsPerPage):
     """
     Split rows into page groups with a fixed number of rows per page.
     first_page_rows: Number of rows for the very first page.
@@ -65,8 +68,9 @@ def create_page_groups(dataTypes, portfolio_holdings_rows, colorDepths, rows_per
     for i, row in enumerate(portfolio_holdings_rows):
         # Check if adding this row would exceed the current limit
         dType = dataTypes[i]
-        if len(current_page) >= rows_per_page or (rows_per_page - len(current_page) <= 5 and dType in headerSkipOpts):
-            #skip if end of page or a header is at the base of the page
+        if (len(current_page) >= rows_per_page or (rows_per_page - len(current_page) <= 5 and dType in headerSkipOpts) 
+            or (rows_per_page - len(current_page) < 12   and   not any(dType.lower() == 'total target name' for dType in dataTypes[i:min(len(dataTypes) - 1,(i + rows_per_page - len(current_page)))]))):
+            #skip if end of page or a header is at the base of the page OR no investments are shown before the ending (caps at 12 slots of headers/benchmarks)
             pages.append(current_page)
             current_page = [row]
             colorPages.append(currentColorPage)
@@ -178,11 +182,29 @@ def create_benchmark_chart(benchmarks_df, column, title, output_path, y_lim=None
     return output_path
 
 
-def render_report(out_path, holdingDict, colorDepths, snapshotWb = None, benchmarks_df = None,JPMdf = None, narrative_text = None, report_date = None, 
-                  holdings_exclude_keys = None, holdings_header_order = None, onlyHoldings = False):
+def render_report(out_path, holdingDict, colorDepths, snapshotWb = None, benchmarks_df = None,JPMdf = None, narrative_text = None, 
+                  holdings_exclude_keys = None, holdings_header_order = None, onlyHoldings = False, footerData={}):
     print(f"Report generation started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     holdings_header_order = ['',*holdings_header_order]
-   
+    report_date = footerData.get('reportDate')
+    sourceName = footerData.get('portfolioSource','HF Capital')
+
+    """Scale portfolio holdings table sizes"""
+    headerUnits = footerData.get('headerUnits',0.0)
+    sFs = standardFontSize
+    if headerUnits > shrinkPDFthreshold:
+        mFs = minimumFontSize
+        shrinkT = shrinkPDFthreshold
+        scaleRatio = (headerUnits - shrinkT)/(maxPDFheaderUnits - shrinkT)
+        #max of minimum size OR (standard - font adjustment range * unit overreach / unit overeach range)
+        tableFontSize = max(mFs,sFs - (sFs-mFs) * scaleRatio)
+        rowPadding = max(minRowPadding, maxRowPadding - (maxRowPadding - minRowPadding) * scaleRatio)
+        rowShrinkage = math.floor(maxRowsPerPage * (maxRowPadding - rowPadding) * (1/4)) #amount of row space freed under assumption the padding is 1/4 of the row
+    else:
+        tableFontSize = standardFontSize
+        rowPadding = maxRowPadding
+        rowShrinkage = 0
+
     if snapshotWb and not onlyHoldings:
         try:
             dfs = snapshotWb
@@ -294,7 +316,7 @@ def render_report(out_path, holdingDict, colorDepths, snapshotWb = None, benchma
             portfolio_holdings_rows.append(row)
         
         # Split rows into page groups
-        portfolio_holdings_pages, colorDepthPages = create_page_groups(dataTypes, portfolio_holdings_rows, colorDepths)
+        portfolio_holdings_pages, colorDepthPages = create_page_groups(dataTypes, portfolio_holdings_rows, colorDepths, rows_per_page=(maxRowsPerPage + rowShrinkage))
         
         print(f"Loaded {len(portfolio_holdings_rows)} portfolio holdings rows")
         print(f"Split into {len(portfolio_holdings_pages)} pages")
@@ -446,11 +468,11 @@ def render_report(out_path, holdingDict, colorDepths, snapshotWb = None, benchma
     out_path = Path(out_path)
     
     # Format as "Month day, year" (e.g., "September 30, 2025")
-    formatted_date = report_date.strftime("%B %d, %Y")
+    formatted_date = report_date.strftime("%B %Y")
     
     # 7) Generate PDF directly using ReportLab
     try:
-        pdf_gen = PDFReportGenerator(str(out_path), ASSETS_DIR)
+        pdf_gen = PDFReportGenerator(str(out_path), ASSETS_DIR, footerData=footerData)
         
         if not onlyHoldings:
             # Cover page
@@ -534,10 +556,11 @@ def render_report(out_path, holdingDict, colorDepths, snapshotWb = None, benchma
                 if page_num > 0:
                     pdf_gen.story.append(PageBreak())
                 pageColorDepths = colorDepthPages[page_num]
-                pdf_gen.add_header_row("HF Capital Portfolio Holdings", formatted_date)
+                pdf_gen.add_header_row(f"{sourceName} Portfolio Holdings", formatted_date)
                 pdf_gen.add_portfolio_holdings_table(page_rows, pageColorDepths, page_num, 
                                                      exclude_keys=holdings_exclude_keys,
-                                                     header_order=holdings_header_order)
+                                                     header_order=holdings_header_order, 
+                                                     fontSize = tableFontSize, rowPadding = rowPadding)
         
         # Build PDF
         pdf_gen.build()

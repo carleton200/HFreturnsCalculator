@@ -10,9 +10,11 @@ from oldScripts.temp import MultiSelectBox
 from scripts.commonValues import nameHier, nodePathSplitter, balanceTypePriority, nonFundCols, masterFilterOptions, smallHeaders
 from scripts.instantiate_basics import gui_queue, APIexecutor
 import re
-
-def infer_sqlite_type(val):
+defaults = {'nodePath' : 'TEXT'}
+def infer_sqlite_type(val, colHeader = None):
     # Try to infer column types in SQLite: INTEGER, REAL, TEXT, or BLOB
+    if colHeader and colHeader in defaults:
+        return defaults[colHeader]
     if val is None:
         return "TEXT"
     try:
@@ -45,7 +47,7 @@ def infer_sqlite_type(val):
 def nodalToLinkedCalculations(calcs, nodePath : list[int] = None):
     for idx, _ in enumerate(calcs): #build to final calculation format from the node style
         calcs[idx].pop('Node')
-        calcs[idx]['nodePath'] = " " + nodePathSplitter.join((str(n) for n in nodePath)) + " " if nodePath else None
+        calcs[idx]['nodePath'] = " " + nodePathSplitter.join((str(n) for n in nodePath)) + " " if nodePath else ' -1 '
     return calcs
 
 def handleFundClasses(entryList):
@@ -162,7 +164,7 @@ def recursLinkCalcs(baseCalcs, monthDT, nodeLvl : int, node :str, currPath: list
                 tempCalc['Source name'] = aboveCalc['Source name']
                 nodeOwnershipFrac = aboveCalc['Ownership'] / 100
                 targetOwnershipFrac = nodeOwnershipFrac * belowCalc['Ownership'] / 100
-                for field in ('NAV','Monthly Gain', 'MDdenominator', 'Commitment', 'Unfunded'): #split by ownership of the node's investment
+                for field in (f for f in ('NAV','Monthly Gain', 'MDdenominator', 'Commitment', 'Unfunded') if f in tempCalc): #split by ownership of the node's investment
                     tempCalc[field] = tempCalc[field] * nodeOwnershipFrac
                 tempCalc['ownershipAdjust'] = aboveCalc['ownershipAdjust'] or tempCalc['ownershipAdjust'] #any adjustment triggers true
                 tempCalc['Ownership'] = targetOwnershipFrac * 100
@@ -373,9 +375,39 @@ def filt2Query(db, filterDict : dict[MultiSelectBox], startDate : datetime, endD
 def headerUnits(headers):
     units = []
     for h in headers:
-        if h in smallHeaders:
+        if h == '%':
+            units.append(1.5) #give % slightly more space for bolded 100%
+        elif h in smallHeaders:
             units.append(1)
         else:
             units.append(2.5)
     total_units = sum(units)
     return units, total_units
+def calc_DPI_TVPI(entry):
+    capCalled = entry.get('Commitment',0.0) - entry.get('Unfunded',0.0)
+    if capCalled != 0: 
+        distributions = entry.get('Distributions TD',0.0)
+        TVPI = (entry.get('NAV',0.0) + distributions) / capCalled
+        DPI = distributions / capCalled
+        if TVPI:
+            entry['TVPI'] = TVPI
+        if DPI:
+            entry['DPI'] = DPI
+    return entry
+def findSourceName(fams, invs):
+    if not fams and not invs:
+        return 'HF Capital'
+    elif fams and not invs:
+        if len(fams) == 1:
+            return fams[0]
+        else:
+            return 'HF Capital Family'
+    elif invs and not fams:
+        if len(invs) == 1:
+            return invs[0]
+        else:
+            return 'HF Capital Investor'
+    elif invs and fams:
+        return 'HF Capital Investor'
+    else:
+        raise RuntimeError('Failed to find source name for report investors')

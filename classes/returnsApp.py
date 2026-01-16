@@ -1,15 +1,15 @@
-from scripts.generate_port_hldngs_report import build_holdings_pdf
+from math import e
 from scripts.loggingFuncs import attach_logging_to_class
 from classes.DatabaseManager import DatabaseManager, load_from_db, save_to_db
 from scripts.instantiate_basics import ASSETS_DIR, DATABASE_PATH, gui_queue, executor, APIexecutor, HELP_PATH
-from classes.widgetClasses import simpleMonthSelector, MultiSelectBox, SortButtonWidget
+from classes.widgetClasses import CheckboxIntInputWidget, simpleMonthSelector, MultiSelectBox, SortButtonWidget
 from scripts.commonValues import (currentVersion, nameHier, headerOptions, nonDefaultHeaders, ownershipCorrect, masterFilterOptions, importInterval, 
                     currentVersion, demoMode, fullRecalculations, calculationPingTime, dashInactiveMinutes, nonFundCols, mainTableNames,
                     nodePathSplitter,assetClass1Order, assetClass2Order,headerOptions, dataOptions, assetLevelLinks,
                     yearOptions, percent_headers, mainURL, dynamoAPIenvName)
 from scripts.processInvestments import processInvestments
-from scripts.basicFunctions import (headerUnits, updateStatus, annualizeITD, submitAPIcall, get_connected_node_groups, 
-                                 descendingNavSort, accountBalanceKey, filt2Query, separateRowCode)
+from scripts.basicFunctions import (calc_DPI_TVPI, findSign, headerUnits, updateStatus, annualizeITD, submitAPIcall, get_connected_node_groups, 
+                                 descendingNavSort, accountBalanceKey, filt2Query, separateRowCode, findSourceName)
 from classes.windowClasses import reportExportWindow, underlyingDataWindow, linkBenchmarksWindow, tableWindow, exportWindow, displayWindow
 from classes.tableWidgets import DictListModel, SmartStretchTable
 from TreeScripts.dash_launcher import _run_dash_app_process
@@ -18,6 +18,7 @@ from scripts.pyqtFunctions import basicHoldingsReportExport
 from scripts.processClump import processClump
 from classes.nodeLibrary import nodeLibrary
 from openpyxl.utils import get_column_letter
+import statistics
 
 
 import os
@@ -72,6 +73,7 @@ class returnsApp(QWidget):
         self.earliestChangeDate = datetime.now() + relativedelta(months=1)
         self.nodeChangeDates = {"active" : False}
         self.currentTableData = None
+        self.currentTableFlags = None
         self.fullLevelOptions = {}
         self.buildTableCancel = None
         self.buildTableFuture = None
@@ -307,11 +309,11 @@ class returnsApp(QWidget):
         dashAppBtn = QPushButton('Tree Hierarchy Viewer')
         dashAppBtn.clicked.connect(self.openDashApp)
         controlsLayout.addWidget(dashAppBtn, stretch=0)
-        exportReportBtn = QPushButton("Export Report")
+        exportReportBtn = QPushButton("PDF Export")
         exportReportBtn.clicked.connect(self.exportReport)
         exportReportBtn.setObjectName('exportBtn')
         controlsLayout.addWidget(exportReportBtn)
-        exportBtn = QPushButton("Export to Excel")
+        exportBtn = QPushButton("Excel Export")
         exportBtn.clicked.connect(self.exportPage)
         exportBtn.setObjectName("exportBtn")
         controlsLayout.addWidget(exportBtn, stretch=0)
@@ -370,11 +372,10 @@ class returnsApp(QWidget):
         self.consolidateFundsBtn.setChecked(True)
         self.consolidateFundsBtn.clicked.connect(self.buildReturnTable)
         optionsGrid.addWidget(self.consolidateFundsBtn,0,6)
-        self.exitedFundsBtn = QCheckBox("Show Exited Funds (Cannot turn off)")
-        self.exitedFundsBtn.setChecked(False)
-        self.exitedFundsBtn.setEnabled(False) #remove later
-        self.exitedFundsBtn.setChecked(True)  #remove later
-        optionsGrid.addWidget(self.exitedFundsBtn,1,6)
+        self.exitedFundsInput = CheckboxIntInputWidget('Hide Funds With 0 NAV for ', 1, ' Months')
+        self.exitedFundsInput.setChecked(False)
+        self.exitedFundsInput.valChange.connect(self.buildReturnTable)
+        optionsGrid.addWidget(self.exitedFundsInput,1,6)
         self.headerSort = SortButtonWidget()
         self.headerSort.popup.popup_closed.connect(self.headerSortClosed)
         optionsGrid.addWidget(self.headerSort,0,7)
@@ -746,12 +747,18 @@ class returnsApp(QWidget):
             export_type = combo.currentText()
         else:
             return  # User cancelled
+        if not self.complexTableBtn.isChecked():
+            self.complexTableBtn.click() #must be in complex table mode. For now.
         if export_type in (opt3,opt4):
             window = reportExportWindow(self.db, export_type, parentSource = self)
             window.show()
             self.reportExportWindow = window
         elif export_type == opt1:
-            basicHoldingsReportExport(self)
+            classification = ', '.join(self.filterDict['Classification'].checkedItems())
+            famChoices = self.filterDict['Family Branch'].checkedItems()
+            invChoices = self.filterDict['Source name'].checkedItems()
+            sourceName = findSourceName(famChoices,invChoices)
+            basicHoldingsReportExport(self, classification=classification, sourceName=sourceName)
         return
     def exportPage(self,*_):
         # Use a built-in PyQt combobox messagebox for export type selection
@@ -759,7 +766,8 @@ class returnsApp(QWidget):
         msgBox.setWindowTitle("Choose Export Type")
         msgBox.setText("Select export type for Excel export:")
         combo = QComboBox(msgBox)
-        combo.addItems(['Current Table', 'Asset Class Grouping'])
+        ACopt = 'Lookup Friendly'
+        combo.addItems(['Current Table', ACopt])
         msgBox.layout().addWidget(combo, 1, 1)
         msgBox.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
         
@@ -768,34 +776,7 @@ class returnsApp(QWidget):
             export_type = combo.currentText()
         else:
             return  # User cancelled
-        self.exportCurrentTable(ACcols = export_type == "Asset Class Grouping")
-        return
-        if export_type == "Current Table":
-            self.exportCurrentTable()
-        elif export_type == "Asset Class Grouping":
-            # Placeholder: you would implement grouped export here
-            #TODO: rebuild the table for AC grouping
-            try:
-                QMessageBox.informativeText
-                blockMSG = QMessageBox(self)
-                blockMSG.setWindowTitle('Notice')
-                blockMSG.setText('Building export...')
-                blockMSG.setStandardButtons(QMessageBox.NoButton)
-                blockMSG.setModal(False)  # Make it non-modal so it doesn't block
-                blockMSG.show()
-                QApplication.processEvents()
-                self.setEnabled(False)
-                self.sortHierarchy.clearSelection()
-                self.sortHierarchy.setCheckedItems(['assetClass','subAssetClass','subAssetSleeve'])
-                cancelEvent = threading.Event()
-                self.buildTableCancel = cancelEvent
-                self.buildTable(cancelEvent)
-                self.exportCurrentTable(ACcols = True)
-                self.setEnabled(True)
-                blockMSG.destroy()
-            except:
-                QMessageBox.information(self,'Error exporting table','An error occured exporting the table')
-                self.setEnabled(True)
+        self.exportCurrentTable(ACcols = export_type == ACopt)
     def exportCurrentTable(self,*_, ACcols = False):
         #excel export for the returns app excel export
         # helper to darken a 6-digit hex color by a given factor
@@ -848,7 +829,18 @@ class returnsApp(QWidget):
                     headerSort.setEnabled(True)      
                 sorted_cols = col_keys
                 if ACcols:
-                    sorted_cols = ['Level','Name','AC1','AC2','AC3','Investment',*sorted_cols]
+                    insertCols = []
+                    if 'Total Family Branch' in hierarchy_levels:
+                        insertCols = ['Family Branch']
+                        famCol = 2
+                    else:
+                        famCol = None
+                    if 'Total Source name' in hierarchy_levels:
+                        sourceCol = 3 if famCol else 2
+                        insertCols.append('Investor')
+                    else:
+                        sourceCol = None
+                    sorted_cols = ['Level','Name',*insertCols,'AC1','AC2','AC3','Investment',*sorted_cols]
                     fund2trait = self.db.fund2trait
                 # 4) create workbook or add sheet if already exists
                 if os.path.exists(path):
@@ -898,7 +890,7 @@ class returnsApp(QWidget):
                         header_fill = PatternFill("solid", header_color, header_color)
 
                     if not ACcols:
-                        cell = ws.cell(row=r, column=1, value=row_name)
+                        cell = ws.cell(row=r, column=1, value=row_name.strip())
                         cell.fill = header_fill
                         cell.font = Font(bold=True)
                         if dtype == "benchmark":
@@ -918,6 +910,7 @@ class returnsApp(QWidget):
                         else:
                             row_dict['Level'] = f'B{itemDepth}'
                         row_dict['Name'] = row_name
+                        itemHier = code.removeprefix("##(").removesuffix(")##").split("::")
                         if dtype == 'Total':
                             row_dict['Level'] = 'L1'
                         elif dtype == "Total Target name":
@@ -930,16 +923,27 @@ class returnsApp(QWidget):
                             for txt,var in (['AC1',AC1],['AC2',AC2],['AC3',AC3]):
                                 row_dict[txt] = var
                         else:
-                            itemHier = code.removeprefix("##(").removesuffix(")##").split("::")
                             for rowTxt, AClvl in (['AC1','assetClass'],['AC2','subAssetClass'],['AC3','sleeve']):
                                 if AClvl in sortHier and sortHier.index(AClvl) <= len(itemHier) - 1: #check viability
                                     try:
                                         row_dict[rowTxt] = itemHier[sortHier.index(AClvl)]
                                     except:
                                         print('Failed assigning AC levels')
-                                        print(itemHier)
-                                        print(sortHier.index(AClvl))
-                                        print(AClvl)
+                                        raise
+                        for stripKey in (key for key in row_dict if key in ('AC1','AC2','AC3','Name')):
+                            row_dict[stripKey] = row_dict[stripKey].strip() #remove spaces from these cols. (ex: 'Cash  ' --> 'Cash')
+                        sourceSearch = []
+                        if famCol:
+                            sourceSearch.append(['Family Branch','Family Branch'])
+                        if sourceCol:
+                            sourceSearch.append(['Investor','Source name'])
+                        if sourceSearch:
+                            for rowTxt, lvl in sourceSearch:
+                                if lvl in sortHier and sortHier.index(lvl) <= len(itemHier) - 1: #check viability
+                                    try:
+                                        row_dict[rowTxt] = itemHier[sortHier.index(lvl)]
+                                    except:
+                                        print('Failed assigning investors and family branches')
                                         raise
 
                                     
@@ -1177,6 +1181,9 @@ class returnsApp(QWidget):
             out_ref = output
             c_out_ref = complexOutput
             flag_ref = flagOutput
+            dtS = self.dataTimeStart
+            hideMonths , hideMonthsNum = self.exitedFundsInput.getStatus()
+            exitedCheck = {key : dtS for key in out_ref} #dict of all rowkeys and their earliest date with a NAV != 0
             for entry in data:
                 e_get = entry.get
                 # month string from dateTime (with small cache)
@@ -1190,8 +1197,10 @@ class returnsApp(QWidget):
                     set_month(dt_str, month_str)
                 Dtype = entry["Calculation Type"]
                 level = entry["rowKey"]
+                if hideMonths and e_get('NAV',0) != 0: #set the date to the most recent with a NAV
+                    exitedCheck[level] = max(exitedCheck[level], datetime.strptime(dt_str,'%Y-%m-%d %H:%M:%S'))
                 if dataOutputType == "IRR ITD" and ((cFunds_checked and e_get("Target name") in consolidatedFunds_local) or e_get("Calculation Type") != "Total Target name"):
-                    # skip for consolidated funds or non-total
+                    # skip IRR for consolidated funds or non-total
                     continue
                 # ensure output[level]
                 lvl_out = out_ref.get(level)
@@ -1268,10 +1277,17 @@ class returnsApp(QWidget):
                         output[rowKey][strDate] = returnVal
                         if complexMode and strDate == self.dataEndSelect.currentText():
                             complexOutput[rowKey]["Return"] = returnVal
+            if hideMonths:
+                monthThresh = datetime.strptime(self.dataEndSelect.currentText(), '%B %Y') - relativedelta(months=hideMonthsNum)
+                print(f'Hiding empty funds from since {monthThresh}')
+                deleteKeys = {key for key in set(output.keys()) | set(complexOutput.keys()) if exitedCheck.get(key,dtS) <= monthThresh and output[key]['dataType'] != 'benchmark'}
+                print(f"remvoing: {deleteKeys}")
+                for table in (output,complexOutput): #delete the keys from both tables of funds that are empty
+                    for dKey in (key for key in deleteKeys if key in table):
+                        table.pop(dKey)
             if complexMode:
-                for rowKey in complexOutput:
-                    if complexOutput[rowKey].get("NAV",0.0) != 0:
-                        complexOutput[rowKey]["%"] = complexOutput[rowKey].get("NAV",0.0) / complexOutput["Total##()##"].get("NAV",0.0) * 100 if complexOutput["Total##()##"]["NAV"] != 0 else 0
+                for rowKey in (key for key in complexOutput if complexOutput[key].get("NAV",0.0) != 0):
+                    complexOutput[rowKey]["%"] = complexOutput[rowKey].get("NAV",0.0) / complexOutput["Total##()##"].get("NAV",0.0) * 100 if complexOutput["Total##()##"]["NAV"] != 0 else 0
             elif self.returnOutputType.currentText() == "%":
                 for rowKey in reversed(output): #iterate through backwards so total is affected last
                     for date in [header for header in output[rowKey].keys() if header != "dataType"]:
@@ -1327,16 +1343,7 @@ class returnsApp(QWidget):
                 # Skip filtered rows and benchmarks (imported separately)
                 continue
             #TVPI and DPI
-            capCalled = lvl_co.get('Commitment',0.0) - lvl_co.get('Unfunded',0.0)
-            if capCalled != 0: 
-                distributions = lvl_co.get('Distributions TD',0.0)
-                TVPI = (lvl_co.get('NAV',0.0) + distributions) / capCalled
-                DPI = distributions / capCalled
-                if TVPI:
-                    lvl_co['TVPI'] = TVPI
-                if DPI:
-                    lvl_co['DPI'] = DPI
-
+            lvl_co = calc_DPI_TVPI(lvl_co)
 
             # Aggregate MTD/QTD/YTD compounded performance
             for timeFrame, monthOpts in timeSections.items():
@@ -1499,11 +1506,11 @@ class returnsApp(QWidget):
                 grouped_by_level = defaultdict(list)
                 for _e in data: #split into highest node levels
                     nodePath = _e['nodePath']
-                    baseNode = str(nodePath).split(nodePathSplitter)[0].strip() if nodePath not in (None,'None') else nodePath
+                    baseNode = nodePath.split(nodePathSplitter)[0].strip() if nodePath not in (None,'None') else nodePath
                     grouped_by_level[baseNode].append(_e)
                     nodePathOptDict.setdefault(baseNode,set()).update(nodePath.split(nodePathSplitter))
             # Derive options from grouped keys
-            options = list(grouped_by_level.keys())
+            options = [key for key in list(grouped_by_level.keys()) if key]
             if levelName == "subAssetClass":
                 # Sort options so those in assetClass2Order come first (in the given order),
                 # then anything else not in assetClass2Order appears after (sorted alphabetically)
@@ -1524,11 +1531,9 @@ class returnsApp(QWidget):
                         allEntries.extend(allEntriesExtend)
                         continue
 
-                    
-                    
                     highEntries = {}
                     if levelName == 'Node':
-                        name = id2Node.get(int(option),"Node Name Not Found") if option not in (None, 'None') else "No Node"
+                        name = id2Node.get(int(option),"Node Name Not Found") if option not in (None, 'None', ' -1 ') else "No Node"
                     else:
                         name = option 
 
@@ -1580,7 +1585,9 @@ class returnsApp(QWidget):
                     for month in highEntries.keys():
                         highMonth = highEntries[month]
                         mdDen = highMonth['MDdenominator']
-                        highMonth["Return"] = highMonth["Monthly Gain"] / mdDen * 100 if mdDen != 0 else 0
+                        gain = highMonth["Monthly Gain"]
+                        highMonth["Return"] = abs(gain / mdDen * 100) * findSign(gain) if mdDen != 0 else 0
+                        highMonth = calc_DPI_TVPI(highMonth)
                     upperEntries.extend([hEntry for _,hEntry in highEntries.items()])
                 if not noHeader:
                     allEntries.extend(upperEntries)       
@@ -1613,6 +1620,7 @@ class returnsApp(QWidget):
                         levelData = data #dont filter the data for hidden layer
                     nameList = {} #used for sorting by descending NAV
                     investorsAccessed = {}
+                    lowestAggregates = defaultdict(dict)
                     for entry in levelData:
                         dt = entry['dateTime']
                         target_raw = entry["Target name"]
@@ -1630,7 +1638,25 @@ class returnsApp(QWidget):
                         temp = entry.copy()
                         temp["rowKey"] = name_key
                         temp["Calculation Type"] = "Total Target name"
-                        allEntries.append(temp)
+                        if name_key not in lowestAggregates[dt]:
+                            lowAgDt = lowestAggregates[dt]
+                            lowAgDt[name_key] = {k : v for k,v in temp.items() if v not in (None,'None','')}
+                            for header in (h for h in headerOptions_local if h in lowAgDt[name_key]):
+                                lowAgDt[name_key][header] = float(temp[header]) #convert any nums to float
+                        else:
+                            lowAgDict = lowestAggregates[dt][name_key]
+                            lowAgDict['ownershipAdjust'] = lowAgDict.get('ownershipAdjust',False) or temp.get('ownershipAdjust',False)
+                            for h in (h for h in headerOptions_local if temp.get(h) not in (None,'None','',0)):
+                                if h not in lowAgDict:
+                                    lowAgDict[h] = float(temp[h])
+                                elif h not in ('IRR ITD',):
+                                    lowAgDict[h] += float(temp[h])
+                                elif temp.get(h) != 0: #save options to make the median later
+                                    if isinstance(lowAgDict[h],list):
+                                        lowAgDict[h].append(float(temp[h]))
+                                    else:
+                                        lowAgDict[h] = [lowAgDict[h],float(temp[h])]
+
                         if dt not in totalEntriesLow:
                             totalEntriesLow[dt] = copy.deepcopy(entryTemplate)
                             totalLowDt = totalEntriesLow[dt]
@@ -1662,6 +1688,16 @@ class returnsApp(QWidget):
                                         totalLowDt[header] += float(v)
                                         accessed.add(investor)
                                         investorsAccessed[dt] = accessed
+                    for dt in lowestAggregates:
+                        for _, entry in lowestAggregates[dt].items():
+                            gain = entry['Monthly Gain']
+                            MDden = entry['MDdenominator']
+                            entry['Return'] = abs(gain / MDden * 100) * findSign(gain) if MDden != 0 else 0
+                            if 'IRR ITD' in entry and isinstance(entry['IRR ITD'],list):
+                                entry['IRR ITD'] = statistics.median(entry['IRR ITD'])
+                            entry = calc_DPI_TVPI(entry)
+                        allEntries.extend([v for _,v in lowestAggregates[dt].items()])
+                        
                     if not NAVsort:
                         for name in sorted(nameList.keys()): #sort by alphabetical order
                             struc[name] = {}
@@ -1669,7 +1705,12 @@ class returnsApp(QWidget):
                         for name in descendingNavSort(nameList): #sort by descending NAV
                             struc[name] = {}
                     for month in totalEntriesLow.keys():
-                        totalEntriesLow[month]["Return"] = totalEntriesLow[month]["Monthly Gain"] / totalEntriesLow[month]["MDdenominator"] * 100 if totalEntriesLow[month]["MDdenominator"] != 0 else 0
+                        e = totalEntriesLow[month]
+                        gain = e["Monthly Gain"]
+                        MDden = e["MDdenominator"]
+                        e["Return"] = abs(gain / MDden * 100) * findSign(gain) if MDden != 0 else 0
+                        e = calc_DPI_TVPI(e)
+                        
                     upperEntries.extend(totalEntriesLow.values())
                 if not noHeader:
                     allEntries.extend(upperEntries)
@@ -1734,7 +1775,8 @@ class returnsApp(QWidget):
             for month in nodeSumEntryDict:
                 nodeMonth = nodeSumEntryDict[month]
                 mdDen = nodeMonth['MDdenominator']
-                nodeMonth['Return'] =  nodeMonth['Monthly Gain'] / mdDen * 100 if mdDen != 0 else 0.0
+                gain = nodeMonth['Monthly Gain']
+                nodeMonth['Return'] =  abs(gain / mdDen * 100) * findSign(gain) if mdDen != 0 else 0.0
             nodeUpperEntries = nodeSumEntryDict.values()
             return struc, nodeUpperEntries, [*baseAllData, *recursAllData]
 
@@ -1763,7 +1805,9 @@ class returnsApp(QWidget):
                 if header not in ("Ownership", "IRR ITD"):
                     trueTotalEntries[total["dateTime"]][header] += float(total[header])
         for month in trueTotalEntries.keys():
-            trueTotalEntries[month]["Return"] = trueTotalEntries[month]["Monthly Gain"] / trueTotalEntries[month]["MDdenominator"] * 100 if trueTotalEntries[month]["MDdenominator"] != 0 else 0
+            gain = trueTotalEntries[month]["Monthly Gain"]
+            MDden = trueTotalEntries[month]["MDdenominator"]
+            trueTotalEntries[month]["Return"] = abs(gain / MDden * 100) * findSign(gain) if MDden != 0 else 0
             newEntries.append(trueTotalEntries[month])
         return tableStructure,newEntries
                     
@@ -1924,6 +1968,7 @@ class returnsApp(QWidget):
         for filKey in filOptDict.keys():
             self.filterDict[filKey].clearItems()
             self.filterDict[filKey].addItems(sorted(filOptDict[filKey]))
+        self.filterDict['Node'].clearItems()
         self.filterDict['Node'].addItems([str(n) for n in list(self.db.pullId2Node().keys())])
         self.assetClass3Visibility.addItems(sorted(filOptDict['subAssetClass']))
         self.assetClass3Visibility.setCheckedItems([key for key, val in self.db.fetchOptions('asset3Visibility').items() if val == 'hide'])
@@ -2084,7 +2129,7 @@ class returnsApp(QWidget):
             totalCalls = float(6)
             importedTables = {}
             apiData = {
-                "tranCols": "Investment in, Investing Entity, Transaction Type, Effective date, Remaining commitment change, Transaction timing, Cash flow change (USD), ValueInSystemCurrency",
+                "tranCols": "Investment in, Investing Entity, Transaction Type, Effective date, Remaining commitment change, Transaction timing, Cash flow change (USD), ValueInSystemCurrency, HF Cash Flow Type",
                 "tranName": "InvestmentTransaction",
                 "tranSort": "Effective date:desc",
                 "accountCols": "As of Date, Balance Type, Investing entity, Investment in, Value in system currency, Fund class, Sub-account",
@@ -2831,7 +2876,7 @@ class returnsApp(QWidget):
                 return
 
             rows = copy.deepcopy(origRows) #prevents alteration of self.returnsTableData
-            for f in self.filterOptions:
+            for f in self.filterOptions: #remove dataTypes the user has chosen not to see
                 if f["key"] not in self.filterBtnExclusions and not self.filterRadioBtnDict[f["key"]].isChecked():
                     for k,v in rows.items():
                         if "dataType" not in v:
@@ -2857,7 +2902,7 @@ class returnsApp(QWidget):
                 row_entries.append((row_label, code, row_dict, fund_label))
 
             # 2) Determine columns exactly as before, using cleanedRows for header order
-            cleaned = {fund: d.copy() for fund, _, d, _ in row_entries}
+            cleaned = {row_label: d.copy() for row_label, _, d, _ in row_entries}
             for d in cleaned.values():
                 d.pop("dataType", None)
             headerSort : SortButtonWidget = self.headerSort
@@ -2871,11 +2916,17 @@ class returnsApp(QWidget):
                 exceptions = nonDefaultHeaders
                 col_keys = self.orderColumns(col_keys, exceptions=exceptions)
                 if mode == "Complex Table":
-                    allKeys = col_keys.copy()
-                    allKeys.extend(exceptions) #all key options for the header selections
-                    headerSort.set_items(allKeys,[item for item in allKeys if item not in exceptions])
+                    totalRowKeys = list(cleaned[list(cleaned.keys())[0]].keys())
+                    chosenKeys = [key for key in col_keys if key in totalRowKeys and key not in exceptions] #headers in the total, but not the exceptions
+                    allKeys = chosenKeys.copy() #start the sortable options w the chosen ones
+                    for keySet in (col_keys,exceptions): #extend allKeys by the ones not chosen for later selection option
+                        allKeys.extend([key for key in keySet if key not in allKeys])
+                    headerSort.set_items(allKeys,chosenKeys)
                     headerSort.setEnabled(True)
+                    col_keys = chosenKeys
                 else:
+                    totalRowKeys = list(cleaned[list(cleaned.keys())[0]].keys())
+                    col_keys = [key for key in col_keys if key in totalRowKeys and key not in exceptions] #prevents benchmarks alone extending the tables
                     headerSort.setEnabled(False)
             else:
                 col_keys = headerSort.popup.get_checked_sorted_items()

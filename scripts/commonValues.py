@@ -1,6 +1,6 @@
 from dateutil.relativedelta import relativedelta
 
-currentVersion = "1.2.1"
+currentVersion = "1.2.3"
 demoMode = False  #TRUE: exportable mode. FALSE: developer mode
 remoteDBmode = False
 ownershipCorrect = True
@@ -47,9 +47,9 @@ assetClass1Order = ["Illiquid", "Liquid","Cash"]
 assetClass2Order = ["Direct Private Equity", "Private Equity", "Direct Real Assets", "Real Assets", "Public Equity", "Long/Short", "Absolute Return", "Fixed Income", "Cash"] 
 commitmentChangeTransactionTypes = ["Commitment", "Transfer of commitment", "Transfer of commitment (out)", "Secondary - Original commitment (by secondary seller)"]
 ignoreInvTranTypes = [""]
-headerOptions = ["Return","NAV", "Monthly Gain", "Ownership" , "MDdenominator", "Commitment", "Unfunded", "%",'Distributions TD']
+headerOptions = ["Return","NAV", "Monthly Gain", "Ownership" , "MDdenominator", "Commitment", "Unfunded", "%",'Distributions TD', 'DPI', 'TVPI']
 if not demoMode:
-    headerOptions.append("IRR ITD")
+    headerOptions.extend(["IRR ITD", 'Contributions','Redemptions'])
 dataOptions = ["Investor","Family Branch","Classification", "dateTime"]
 dataOptions = ["Classification", "subClassification"]
 tranAppHeaderOptions = ["Transaction Sum"]
@@ -74,6 +74,14 @@ for header in ("Return","Ownership"):
     percent_headers.add(header)
 
 batch_size = 50000
+#PDF Generation values ----------
+shrinkPDFthreshold = 13
+maxPDFheaderUnits = 22
+standardFontSize = 9
+minimumFontSize = 6
+maxRowsPerPage = 30
+maxRowPadding = 1.5
+minRowPadding = 0.5
 
 if remoteDBmode:
     sqlPlaceholder = "%s"

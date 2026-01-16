@@ -83,10 +83,14 @@ def processOneLevelInvestments(month, node, invSourceName, newMonths, cache, pos
             commitment = 0
             unfunded = 0
             distributionsTD = 0.0
+            contributions = 0.0
+            redemptions = 0.0
         else: #instantiate starting data
             commitment = float(startEntry[0].get(nameHier["Commitment"]["local"],0.0))
             unfunded = float(startEntry[0].get(nameHier["Unfunded"]["local"],0.0))
             distributionsTD = float(startEntry[0].get('Distributions TD',0.0))
+            contributions = float(startEntry[0].get('Contributions',0.0))
+            redemptions = float(startEntry[0].get('Redemptions',0.0))
         if len(startEntry) > 1: #combines the values for fund sub classes for calculations
             startEntry = handleFundClasses(startEntry)
         if len(endEntry) < 1: #no end account balance yet, so create it.  
@@ -121,6 +125,11 @@ def processOneLevelInvestments(month, node, invSourceName, newMonths, cache, pos
                     IRRtrack[investment] = {"cashFlows" : [], "dates" : []}
                 if 'Distribution' in transaction['TransactionType']:
                     distributionsM += cashflow
+                if transaction.get('HFCashFlowType','') not in (None,'None') and 'overall' in transaction.get('HFCashFlowType','').lower():
+                    if cashflow > 0:
+                        redemptions += cashflow
+                    else:
+                        contributions -= cashflow
                 IRRtrack[investment]["cashFlows"].append(cashflow)
                 IRRtrack[investment]["dates"].append(datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S") - relativedelta(days=backDate))
                 if investment not in monthFundIRRtrack:
@@ -160,7 +169,8 @@ def processOneLevelInvestments(month, node, invSourceName, newMonths, cache, pos
                 unfunded = 0 #corrects for if original commitment was not logged properly
             if createFinalValue: #builds an entry to put into the database and cache if it is missing
                 fundEOMentry = {"Date" : month["endDay"], "Source name" : invSourceName, "Target name" : investment , nameHier["Value"]["dynLow"] : endEntry[nameHier["Value"]["dynLow"]],
-                                    "Balancetype" : "Calculated_R", nameHier["Commitment"]["local"] : commitment, nameHier["Unfunded"]["local"] : unfunded
+                                    "Balancetype" : "Calculated_R", nameHier["Commitment"]["local"] : commitment, nameHier["Unfunded"]["local"] : unfunded, #'Contributions' : contributions,
+                                    #'Redemptions' : redemptions
                                     }
                 if distributionsM != 0:
                     fundEOMentry['Monthly Distributions'] = distributionsM
@@ -178,6 +188,8 @@ def processOneLevelInvestments(month, node, invSourceName, newMonths, cache, pos
                                 lst[nameHier["Unfunded"]["local"]] = unfunded
                                 if distributionsM != 0:
                                     lst['Monthly Distributions'] = distributionsM
+                                #lst['Contributions'] = contributions
+                                #lst['Redemptions'] = redemptions
             distributionsTD += distributionsM
             #sum each fund value into the pool totals
             nodeGain += invGain
@@ -191,6 +203,8 @@ def processOneLevelInvestments(month, node, invSourceName, newMonths, cache, pos
                             "IRR ITD" : IRRitd,
                             nameHier["Commitment"]["local"] : commitment,
                             nameHier["Unfunded"]["local"] : unfunded,
+                            'Contributions' : contributions,
+                            'Redemptions' : redemptions
                             }
             if distributionsTD != 0:
                 monthInvCalc['Distributions TD'] = distributionsTD

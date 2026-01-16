@@ -1,6 +1,6 @@
 from classes import DatabaseManager
 from classes.DatabaseManager import load_from_db
-from scripts.basicFunctions import filt2Query, separateRowCode
+from scripts.basicFunctions import filt2Query, separateRowCode, findSourceName
 from scripts.loggingFuncs import attach_logging_to_class
 from classes.widgetClasses import SortButtonWidget, MultiSelectBox, simpleMonthSelector
 from scripts.exportTableToExcel import exportTableToExcel
@@ -943,12 +943,14 @@ class reportExportWindow(QWidget):
         self.setWindowTitle('Report Export Options')
 
         self.fam2inv = db.pullInvestorsFromFamilies
+        self.db = db
 
         self.setStyleSheet(self.parent.appStyle)
         self.setObjectName('mainPage')
         layout = QVBoxLayout()
         self.setLayout(layout)
 
+        #Date choice
         dateBox = QWidget()
         dateBox.setObjectName("borderFrame")
         dateLayout = QVBoxLayout()
@@ -959,7 +961,12 @@ class reportExportWindow(QWidget):
         dateBox.setLayout(dateLayout)
         layout.addWidget(dateBox)
 
-
+        #Source choice
+        sourceBox = QWidget()
+        sourceBox.setObjectName('borderFrame')
+        sourceBoxLayout = QVBoxLayout()
+        sourceBox.setLayout(sourceBoxLayout)
+        layout.addWidget(sourceBox)
         self.rGroup = QButtonGroup()
         self.rGroup.buttonClicked.connect(self.swapChoice)
         allBtn = QRadioButton('Full Portfolio')
@@ -967,9 +974,9 @@ class reportExportWindow(QWidget):
         invBtn = QRadioButton("Select by Investor")
         for rb in (allBtn,famBtn,invBtn):
             self.rGroup.addButton(rb)
-        layout.addWidget(allBtn)
+        sourceBoxLayout.addWidget(allBtn)
         splitter = QSplitter(Qt.Horizontal)
-        layout.addWidget(splitter)
+        sourceBoxLayout.addWidget(splitter)
         famSideL = QWidget()
         invSideR = QWidget()
         splitter.addWidget(famSideL)
@@ -985,6 +992,22 @@ class reportExportWindow(QWidget):
         invSelect = MultiSelectBox()
         famSideLlay.addWidget(famSelect)
         invSideRlay.addWidget(invSelect)
+
+        #Classification choice
+        classBox = QWidget()
+        classBox.setObjectName('borderFrame')
+        classBoxLayout = QHBoxLayout()
+        classBox.setLayout(classBoxLayout)
+        layout.addWidget(classBox)
+        classBoxLayout.addWidget(QLabel('Classification:'))
+        self.classChoice = QComboBox()
+        fund2trait = db.fetchFund2Trait()
+        classOpts = set(f.get('Classification') for f in fund2trait.values() if f.get('Classification') is not None)
+        classOpts = ['',*sorted(list(classOpts))]
+        self.classChoice.addItems(classOpts)
+        self.classChoice.setCurrentText('HFC')
+        classBoxLayout.addWidget(self.classChoice)
+
         self.confirmBtn = QPushButton('Generate Report')
         layout.addWidget(self.confirmBtn)
         self.confirmBtn.clicked.connect(self.beginExport)
@@ -1011,35 +1034,42 @@ class reportExportWindow(QWidget):
         try:
             btnText = button.text()
             if btnText == 'Full Portfolio':
-                self.invSelect.setEnabled(False)
-                self.famSelect.setEnabled(False)
+                self.invSelect.setVisible(False)
+                self.famSelect.setVisible(False)
             elif btnText == 'Select by Family Branch':
-                self.invSelect.setEnabled(False)
-                self.famSelect.setEnabled(True)
+                self.invSelect.setVisible(False)
+                self.famSelect.setVisible(True)
             elif btnText == 'Select by Investor':
-                self.famSelect.setEnabled(False)
-                self.invSelect.setEnabled(True)
+                self.famSelect.setVisible(False)
+                self.invSelect.setVisible(True)
             else:
                 raise ValueError('Error: Button Selection could not be connected to options')
         except Exception as e:
             QMessageBox.warning(self,'Error', f"{e}")
     def beginExport(self,*_):
         try:
+            self.enabled = False
             self.confirmBtn.setEnabled(False)
             source = self.rGroup.checkedButton().text()
             print(f"Exporting for : {source}")
+            classification = self.classChoice.currentText()
             if source == 'Full Portfolio':
                 self.invSelect.selectAll()
                 investors = self.invSelect.checkedItems()
+                sourceName = findSourceName([],[])
             elif source == 'Select by Family Branch':
                 fams = self.famSelect.checkedItems()
                 investors = self.fam2inv(fams)
+                sourceName = findSourceName(fams,[])
             elif source == 'Select by Investor':
                 investors = self.invSelect.checkedItems()
+                sourceName = findSourceName([],investors)
             else:
                 raise ValueError('Error: Button Selection could not be connected to options')
             if not investors:
                 raise ValueError('No investors found')
+            endDate = self.dateSelect.currentText()
+            endDate = datetime.strptime(endDate,'%B %Y')
             if 'Full Report' in self.exportType:
                 placeholders = ','.join('?' for _ in investors)
                 date = self.dateSelect.currentText()
@@ -1053,9 +1083,12 @@ class reportExportWindow(QWidget):
                 render_report(self.parent,snapshotWorkbook)
             else:
                 filters = {'Source name' : investors}
-                controlTable(self.parent,reset = True, filterChoices=filters)
-                basicHoldingsReportExport(self.parent)
+                if classification != '':
+                    filters['Classification'] = [classification,]
+                controlTable(self.parent,reset = True, filterChoices=filters, endDate = endDate)
+                basicHoldingsReportExport(self.parent, sourceName = sourceName, classification = classification)
             self.confirmBtn.setEnabled(True)
+            self.enabled = True
         except Exception as e:
             print("Error occured in report export initialization")
             QMessageBox.warning(self,'Error in report export', f"An error occured initializing the report export \n {e.args}")

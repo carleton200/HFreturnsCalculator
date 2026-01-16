@@ -1,14 +1,17 @@
 
+import os
 from PyQt5.QtWidgets import QFileDialog, QMessageBox
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
+from scripts.commonValues import maxPDFheaderUnits
+from scripts.instantiate_basics import ASSETS_DIR
 from scripts.render_report import render_report
 from scripts.basicFunctions import headerUnits
 
 from PyQt5.QtWidgets import QApplication, QMessageBox
 import threading
 
-def basicHoldingsReportExport(self):
+def basicHoldingsReportExport(self , sourceName = None, classification = None):
     if not hasattr(self,'filteredReturnsTableData'):
         QMessageBox.warning(self,'No Table Loaded Yet','WARNING: No table has been loaded and formatted yet for export. Cancelling...')
         return
@@ -21,23 +24,22 @@ def basicHoldingsReportExport(self):
     else:
         headerOrder = None
     _,unitMax = headerUnits(headerOrder)
-    if unitMax > 13:
+    print(f'Max header units {unitMax}')
+    if unitMax > maxPDFheaderUnits:
         r = QMessageBox.question(self,'Continue?','Warning: too many headers selected for pdf export. Export may not format well. Continue?')
         if not r or r != QMessageBox.Yes:
             return
-    outPath, _ = QFileDialog.getSaveFileName(
-        self, "Save PDF as…", "", "PDF Files (*.pdf)"
-    )
-    if not outPath:
-        return
-    if not outPath.lower().endswith(".pdf"):
-        outPath += ".pdf"
+    tempDirPath = os.path.join(ASSETS_DIR,'temp')
+    if not os.path.exists(tempDirPath):
+        os.mkdir(tempDirPath)
+    outPath = os.path.join(ASSETS_DIR, 'temp','tempHoldingsReport.pdf')
     #build_holdings_pdf(outPath, data)
     report_date = self.dataEndSelect.currentText()
-    report_date = datetime.strptime(report_date,'%B %Y') + relativedelta(months=1) - relativedelta(days=1) #report date is EOM date
-    render_report(outPath,data,self.tableColorDepths, holdings_header_order=headerOrder, report_date = report_date, onlyHoldings = True)
+    report_date = datetime.strptime(report_date,'%B %Y')
+    footerData = {'reportDate' : report_date, 'portfolioSource' : sourceName, 'classification' : classification, 'headerUnits' : unitMax}
+    render_report(outPath,data,self.tableColorDepths, holdings_header_order=headerOrder, footerData= footerData, onlyHoldings = True)
 
-def controlTable(rApp, reset : bool = False, reenable : bool = True, filterChoices : dict[list] = {}, sortHierarchy : list[str] = None, benchmarks : list[str] = None, visChoices : dict[bool] = {}):
+def controlTable(rApp, reset : bool = False, reenable : bool = True, filterChoices : dict[list] = {}, sortHierarchy : list[str] = None, benchmarks : list[str] = None, visChoices : dict[bool] = {}, endDate : datetime = None):
     try:
         rApp.setEnabled(False) #hold the entire app from user input
         QMessageBox.informativeText
@@ -62,6 +64,8 @@ def controlTable(rApp, reset : bool = False, reenable : bool = True, filterChoic
         if benchmarks:
             rApp.benchmarkSelection.clearSelection()
             rApp.benchmarkSelection.setCheckedItems(benchmarks)
+        if endDate:
+            rApp.dataEndSelect.setCurrentText(endDate.strftime('%B %Y'))
         #Build table -----
         cancelEvent = threading.Event() #useless here but the function wants it
         rApp.buildTable(cancelEvent)

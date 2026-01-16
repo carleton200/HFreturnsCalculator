@@ -2,7 +2,7 @@ from PyQt5.QtCore import Qt, QPoint, pyqtSignal
 from PyQt5.QtWidgets import (
     QWidget, QLineEdit, QVBoxLayout, QPushButton, QScrollArea,
     QCheckBox, QListWidget, QListWidgetItem, QDialog, QLabel,
-    QHBoxLayout, QComboBox, QDateEdit, QApplication
+    QHBoxLayout, QComboBox, QDateEdit, QApplication, QSpinBox
 )
 from scripts.loggingFuncs import attach_logging_to_class
 
@@ -233,7 +233,7 @@ class SortPopup(QDialog):
             self.list_widget.insertItem(insert_index, item)
 
         # Reselect the item for visual consistency (optional)
-        self.list_widget.setCurrentItem(item)
+        #self.list_widget.setCurrentItem(item)
 
     def get_checked_sorted_items(self):
         return [
@@ -364,3 +364,48 @@ class simpleMonthSelector(QWidget):
     def emitSignal(self):
         if not self.changeLock:
             self.currentTextChanged.emit()
+class CheckboxIntInputWidget(QWidget):
+    valChange = pyqtSignal()
+    def __init__(self, dispString, defaultInt, intStr, parent=None):
+        super().__init__(parent)
+        # Create horizontal layout for one line
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Checkbox with text following it
+        self.checkbox = QCheckBox(dispString, self)
+        self.checkbox.clicked.connect(self.emitChange)
+        
+        # Integer input box
+        self.intInput = QSpinBox(self)
+        self.intInput.setValue(defaultInt)
+        self.intInput.setMinimum(0)  # Minimum integer value
+        self.intInput.setMaximum(2147483647)    # Maximum integer value
+        self.intInput.setMaximumWidth(50)
+        self.intInput.valueChanged.connect(self.emitChange,True)
+        # Text label to the right of integer input
+        self.intLabel = QLabel(intStr, self)
+        
+        # Add widgets to layout in order
+        layout.addWidget(self.checkbox)
+        layout.addWidget(self.intInput)
+        layout.addWidget(self.intLabel)
+        layout.addStretch()  # Push everything to the left
+        
+        self.setLayout(layout)
+    def emitChange(self, intChange = False):
+        if intChange and not self.checkbox.isChecked():
+            return #only emit for change if the widget is even active
+        self.valChange.emit()
+    def setChecked(self,status : bool):
+        self.checkbox.setChecked(status)
+    def setInt(self,val : int):
+        self.intInput.setValue(val)
+    def isChecked(self):
+        return self.checkbox.isChecked()
+    def getStatus(self):
+        """
+        Retrieve both the checkbox and integer status in one call.
+        Returns a tuple: (is_checked: bool, integer_value: int)
+        """
+        return (self.checkbox.isChecked(), self.intInput.value())
