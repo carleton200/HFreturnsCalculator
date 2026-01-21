@@ -9,7 +9,7 @@ dbEditor.py
 dbEditor.spec
 returnEnv/
 oldScripts/
-testExcelOutputs/
+testOutputs/
 IRR_Work/
 build/
 assets/

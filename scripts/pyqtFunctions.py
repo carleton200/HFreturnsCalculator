@@ -25,8 +25,8 @@ def basicHoldingsReportExport(self , sourceName = None, classification = None):
         headerOrder = None
     _,unitMax = headerUnits(headerOrder)
     print(f'Max header units {unitMax}')
-    if unitMax > maxPDFheaderUnits:
-        r = QMessageBox.question(self,'Continue?','Warning: too many headers selected for pdf export. Export may not format well. Continue?')
+    if unitMax > maxPDFheaderUnits + 4:
+        r = QMessageBox.question(self,'Continue?','Warning: More headers selected than the recommended maximum for pdf export. Text may be very small or poorly formatted. Continue?')
         if not r or r != QMessageBox.Yes:
             return
     tempDirPath = os.path.join(ASSETS_DIR,'temp')

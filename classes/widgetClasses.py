@@ -213,6 +213,7 @@ class SortPopup(QDialog):
             list_item.setFlags(list_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsDragEnabled)
             list_item.setCheckState(Qt.Checked if item in checked_set else Qt.Unchecked)
             self.list_widget.addItem(list_item)
+        self.currentOrder = [c for c in items if c in checked_set]
         self.list_widget.blockSignals(False)
 
     def on_item_toggled(self, item: QListWidgetItem):
@@ -253,20 +254,24 @@ class SortPopup(QDialog):
         }
 
     def closeEvent(self, event):
-        self.popup_closed.emit()
+        currOrder = self.get_checked_sorted_items()
+        if currOrder != self.currentOrder: #only emit when actually changed
+            self.currentOrder = currOrder
+            self.popup_closed.emit()
         super().closeEvent(event)
 
 
 class SortButtonWidget(QWidget):
     popup_closed = pyqtSignal(list)  # emits checked, sorted items
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, btnName = 'Header Options'):
         super().__init__(parent)
         self.items = []
         self.checked_items = set()
         self.active = False
+        self.exclusions = []
 
-        self.button = QPushButton("Header Options", self)
+        self.button = QPushButton(btnName, self)
         self.button.clicked.connect(self.show_popup)
 
         layout = QVBoxLayout(self)
@@ -278,6 +283,8 @@ class SortButtonWidget(QWidget):
     def options(self):
         return self.items
     def add_item(self, item, checked=True):
+        if item in self.exclusions:
+            return
         self.items.append(item)
         if checked:
             self.checked_items.add(item)
@@ -285,7 +292,7 @@ class SortButtonWidget(QWidget):
         self.active = True
 
     def set_items(self, items, checked_items=None):
-        self.items = list(items)
+        self.items = list((item for item in items if item not in self.exclusions))
         self.checked_items = set(checked_items or items)
         self.popup.set_items(self.items,self.checked_items)
         self.active = True

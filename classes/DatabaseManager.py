@@ -1,11 +1,14 @@
+from collections import defaultdict
+from datetime import datetime
 import os
 import threading
 import sqlite3
+import traceback
 import pyodbc
 import logging
 import pandas as pd
 from scripts.instantiate_basics import ASSETS_DIR, DATABASE_PATH
-from scripts.commonValues import remoteDBmode, sqlPlaceholder, currentVersion, masterFilterOptions, nonFundCols, displayLinks, batch_size
+from scripts.commonValues import nameHier, remoteDBmode, sqlPlaceholder, currentVersion, masterFilterOptions, nonFundCols, displayLinks, batch_size
 from scripts.basicFunctions import infer_sqlite_type, handleDuplicateFields
 from classes.nodeLibrary import nodeLibrary
 
@@ -220,6 +223,13 @@ class DatabaseManager:
                 self.options[grouping] = {row["id"] : row["value"] for row in options}
                 cursor.close()
         return self.options[grouping]
+    def fetchACorder(self,lvl : int):
+        AC = 'assetClass' if lvl == 1 else 'subAssetClass'
+        opts = self.fetchOptions(f'{AC}_sort')
+        def sortKey( x : str):
+            return opts[x]
+        sortedAC = sorted(list(opts.keys()),key= lambda x: sortKey(x))
+        return sortedAC
     def saveAsset3Visibility(self, visibility : list):
 
         with self._lock:
@@ -232,6 +242,27 @@ class DatabaseManager:
         self.options["asset3Visibility"] = {vis : "hide" for vis in visibility}
         logging.info(f"Saved asset3Visibility: {visibility}")
         print(f"Saved asset3Visibility: {visibility}")
+    def saveNewOptions(self, group: str, newOpts : list[dict]):
+        with self._lock:
+            cursor = self.get_cursor()
+            cursor.execute(f"DELETE FROM options WHERE grouping = {sqlPlaceholder}", (group,))
+            for opt in newOpts:
+                cursor.execute(f"INSERT INTO options (grouping, id, value) VALUES ({sqlPlaceholder}, {sqlPlaceholder}, {sqlPlaceholder})", (group, opt['id'], opt['value']))
+            self._conn.commit()
+            cursor.close()
+        self.options[group] = {opt['id'] : opt['value'] for opt in newOpts}
+        msg = f"Saved option {group}: {newOpts}"
+        logging.info(msg)
+        print(msg)
+    def postAPIupdate(self):
+        """Functions to have the cached data update when relevant. Ideally call in background thread """
+        self.fetchBenchmarks(update=True)
+        self.fetchInvestors(update = True)
+        self.fetchFunds(update=True)
+    def postCalcUpdate(self):
+        """Functions to have the cached data update when relevant. Ideally call in background thread """
+        self.fetchNodes(update=True)
+        self.buildNodeLib(update=True)
     def fetchBenchmarkLinks(self, update: bool = False):
         if not hasattr(self, "benchmarkLinks") or update:
             with self._lock:
@@ -266,6 +297,57 @@ class DatabaseManager:
         for investor in investors:
             inv2fam[investor['Name']] = investor['Parentinvestor']
         return inv2fam
+    def fetchFund2Date(self, update:bool = False, dateType = 'last'):
+        if not hasattr(self,'fund2Date') or update:
+            fund2Date = {'last' : {}, 'inception' : {}}
+            try:
+                self.buildNodeLib() #builds if does not exist yet
+                targs = self.nodeLib.targets
+                placeholder = ','.join(sqlPlaceholder for _ in targs)
+                with self._lock:
+                    cursor = self._conn.cursor()
+                    #positions with actual balance type
+                    cursor.execute(f"SELECT * FROM positions WHERE Balancetype IN ({sqlPlaceholder},{sqlPlaceholder}) and [Target name] IN ({placeholder})", tuple(['Actual','Internal Valuation',*targs]))
+                    headers = [d[0] for d in cursor.description]
+                    actualPositions = [dict(zip(headers,row)) for row in cursor.fetchall()]
+                    #transactions for the targets
+                    cursor.execute(f"SELECT * FROM transactions WHERE [Target name] IN ({placeholder})", tuple(targs))
+                    headers = [d[0] for d in cursor.description]
+                    transactions = [dict(zip(headers,row)) for row in cursor.fetchall()]
+                    cursor.close()
+                
+                for row in actualPositions:
+                    targ = row.get('Target name')
+                    date = row.get('Date')
+                    if targ and date:
+                        date = date.replace('T',' ')
+                        dt = datetime.strptime(date,'%Y-%m-%d %H:%M:%S')
+                        if targ not in fund2Date['last']:
+                            fund2Date['last'][targ] = dt
+                        else:
+                            fund2Date['last'][targ] = max(fund2Date['last'][targ], dt) #latest date
+                for t in transactions: #find first date of transaction w cashflow
+                    targ = t.get('Target name')
+                    date = t.get('Date')
+                    cashFlow = t.get('CashFlowSys')
+                    if cashFlow and targ and date:
+                        date = date.replace('T',' ')
+                        dt = datetime.strptime(date,'%Y-%m-%d %H:%M:%S')
+                        if targ not in fund2Date['inception']:
+                            fund2Date['inception'][targ] = dt
+                        else:
+                            fund2Date['inception'][targ] = min(fund2Date['inception'][targ], dt) #latest date
+                for targ in fund2Date['last']:
+                    fund2Date['last'][targ] = fund2Date['last'][targ].strftime('%m/%d/%Y') #convert to date string
+                for targ in fund2Date['inception']:
+                    fund2Date['inception'][targ] = fund2Date['inception'][targ].strftime('%m/%d/%Y') #convert to date string
+                self.fund2Date = fund2Date
+            except Exception as e:
+                print(f"WARNING: Error occured while fetching fund 2 dates: {e.args}")
+                print(traceback.format_exc())
+                self.fund2Date = fund2Date
+                return {}
+        return self.fund2Date[dateType]
     def fetchFunds(self, update: bool = False):
         if not hasattr(self, "funds") or update:
             try:
@@ -283,7 +365,7 @@ class DatabaseManager:
             except Exception as e:
                 print(f"WARNING: Error occured while fetching fund data: {e.args}")
                 self.fund2trait = {}
-                return []
+                return {}
         return self.funds
     def fetchDyn2Key(self):
         filtOpts = masterFilterOptions
@@ -352,7 +434,7 @@ class DatabaseManager:
         dispDict['disp2id'] = {val : key for key,val in dispDict['id2disp'].items()} #reverse id2disp
         return dispDict
     def buildNodeLib(self, update:bool = False):
-        if not hasattr(self,'nodeLib'):
+        if not hasattr(self,'nodeLib') or update:
             self.nodeLib = nodeLibrary([*load_from_db(self,'transactions'),*load_from_db(self,'positions')])
     
     def load_dash_data(self):

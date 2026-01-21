@@ -20,7 +20,7 @@ from pathlib import Path
 import os
 from typing import List, Dict, Optional, Tuple
 
-from scripts.commonValues import maxRowPadding, standardFontSize
+from scripts.commonValues import maxRowPadding, standardFontSize, textCols
 try:
     from scripts.basicFunctions import headerUnits, separateRowCode
     from scripts.commonValues import smallHeaders, fraction_headers, percent_headers, yearOptions
@@ -814,6 +814,8 @@ class PDFReportGenerator:
                         row_data.append(self._format_percent_holdings(value, benchmark = True, fontSize = fontSize))
                 elif header_key == '':
                     row_data.append(self._format_portfolio_text(investment,bold=bold,fontSize=fontSize, benchmark = benchmark))
+                elif header_key in textCols:
+                    row_data.append(self._format_portfolio_text(value, fontSize=fontSize, benchmark = benchmark, styleInput = 'CustomNormalRight' if not bold else 'CustomBoldRight'))
                 elif header_key not in fraction_headers:
                     row_data.append(self._format_portfolio_num(value, is_currency=True, bold = bold, fontSize = fontSize) if value is not None else '-')
                 else:
@@ -902,8 +904,10 @@ class PDFReportGenerator:
         
         table.setStyle(table_style)
         self.story.append(table)
-    def _format_portfolio_text(self,value, bold = False, fontSize = None, benchmark = False):
-        if bold:
+    def _format_portfolio_text(self,value, bold = False, fontSize = None, benchmark = False, styleInput = None):
+        if styleInput:
+            style = self.styles[styleInput]
+        elif bold:
             style = self.styles['holdingsText-bold']
         else:
             style = self.styles['CustomNormal']

@@ -7,7 +7,7 @@ import pandas as pd
 import pyxirr
 from collections import deque, defaultdict
 from oldScripts.temp import MultiSelectBox
-from scripts.commonValues import nameHier, nodePathSplitter, balanceTypePriority, nonFundCols, masterFilterOptions, smallHeaders
+from scripts.commonValues import nameHier, nodePathSplitter, balanceTypePriority, nonFundCols, masterFilterOptions, smallHeaders, textCols
 from scripts.instantiate_basics import gui_queue, APIexecutor
 import re
 defaults = {'nodePath' : 'TEXT'}
@@ -379,6 +379,8 @@ def headerUnits(headers):
             units.append(1.5) #give % slightly more space for bolded 100%
         elif h in smallHeaders:
             units.append(1)
+        elif h in textCols:
+            units.append(2)
         else:
             units.append(2.5)
     total_units = sum(units)

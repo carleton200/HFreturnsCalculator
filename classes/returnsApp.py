@@ -3,12 +3,12 @@ from scripts.loggingFuncs import attach_logging_to_class
 from classes.DatabaseManager import DatabaseManager, load_from_db, save_to_db
 from scripts.instantiate_basics import ASSETS_DIR, DATABASE_PATH, gui_queue, executor, APIexecutor, HELP_PATH
 from classes.widgetClasses import CheckboxIntInputWidget, simpleMonthSelector, MultiSelectBox, SortButtonWidget
-from scripts.commonValues import (currentVersion, nameHier, headerOptions, nonDefaultHeaders, ownershipCorrect, masterFilterOptions, importInterval, 
+from scripts.commonValues import (currentVersion, headerSortExclusions, nameHier, headerOptions, nonAggregatingCols, nonDefaultHeaders, ownershipCorrect, masterFilterOptions, importInterval, 
                     currentVersion, demoMode, fullRecalculations, calculationPingTime, dashInactiveMinutes, nonFundCols, mainTableNames,
-                    nodePathSplitter,assetClass1Order, assetClass2Order,headerOptions, dataOptions, assetLevelLinks,
+                    nodePathSplitter,assetClass1Order, assetClass2Order,headerOptions, dataOptions, assetLevelLinks, textCols,
                     yearOptions, percent_headers, mainURL, dynamoAPIenvName)
 from scripts.processInvestments import processInvestments
-from scripts.basicFunctions import (calc_DPI_TVPI, findSign, headerUnits, updateStatus, annualizeITD, submitAPIcall, get_connected_node_groups, 
+from scripts.basicFunctions import (calc_DPI_TVPI, findSign, updateStatus, annualizeITD, submitAPIcall, get_connected_node_groups, 
                                  descendingNavSort, accountBalanceKey, filt2Query, separateRowCode, findSourceName)
 from classes.windowClasses import reportExportWindow, underlyingDataWindow, linkBenchmarksWindow, tableWindow, exportWindow, displayWindow
 from classes.tableWidgets import DictListModel, SmartStretchTable
@@ -340,7 +340,7 @@ class returnsApp(QWidget):
             self.tableBtnGroup.addButton(rb)
             buttonLayout.addWidget(rb)
         self.returnOutputType = QComboBox()
-        self.returnOutputType.addItems(headerOptions)
+        self.returnOutputType.addItems([opt for opt in headerOptions if opt not in textCols])
         self.returnOutputType.currentTextChanged.connect(self.buildReturnTable)
         self.dataTypeBox = QWidget()
         dataTypeLayout = QHBoxLayout()
@@ -377,6 +377,7 @@ class returnsApp(QWidget):
         self.exitedFundsInput.valChange.connect(self.buildReturnTable)
         optionsGrid.addWidget(self.exitedFundsInput,1,6)
         self.headerSort = SortButtonWidget()
+        self.headerSort.exclusions = headerSortExclusions
         self.headerSort.popup.popup_closed.connect(self.headerSortClosed)
         optionsGrid.addWidget(self.headerSort,0,7)
         self.sortStyle = QPushButton("Sort Style: NAV")
@@ -398,6 +399,17 @@ class returnsApp(QWidget):
         self.linkBenchmarksBtn = QPushButton("Link Benchmarks")
         self.linkBenchmarksBtn.clicked.connect(self.linkBenchmarks)
         optionsGrid.addWidget(self.linkBenchmarksBtn,4,2)
+
+        #assetClassOrderSorts
+        self.AC1sort = SortButtonWidget(btnName='Asset Level 1 Sorting')
+        self.AC1sort.set_items(assetClass1Order,[])
+        self.AC1sort.popup.popup_closed.connect(lambda: self.ACsortChange(lvl=1))
+        self.AC2sort = SortButtonWidget(btnName='Asset Level 2 Sorting')
+        self.AC2sort.set_items(assetClass2Order,[])
+        self.AC2sort.popup.popup_closed.connect(lambda: self.ACsortChange(lvl=2))
+        optionsGrid.addWidget(self.AC1sort,3,5)
+        optionsGrid.addWidget(self.AC2sort,4,5)
+
         optionsBox.setLayout(optionsGrid)
         tableControlsLayout.addWidget(optionsBox)
 
@@ -1184,6 +1196,8 @@ class returnsApp(QWidget):
             dtS = self.dataTimeStart
             hideMonths , hideMonthsNum = self.exitedFundsInput.getStatus()
             exitedCheck = {key : dtS for key in out_ref} #dict of all rowkeys and their earliest date with a NAV != 0
+            fund2LastDate = self.db.fetchFund2Date(dateType = 'last')
+            fund2Inception = self.db.fetchFund2Date(dateType = 'inception')
             for entry in data:
                 e_get = entry.get
                 # month string from dateTime (with small cache)
@@ -1196,9 +1210,15 @@ class returnsApp(QWidget):
                     month_str = datetime.strftime(datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S"), "%B %Y")
                     set_month(dt_str, month_str)
                 Dtype = entry["Calculation Type"]
+                targ = e_get('Target name')
+                if complexMode_local and Dtype == 'Total Target name': 
+                    if targ in fund2LastDate:
+                        entry['Last Actual Date'] = fund2LastDate[targ]
+                    if targ in fund2Inception:
+                        entry['Inception'] = fund2Inception[targ]
                 level = entry["rowKey"]
                 if hideMonths and e_get('NAV',0) != 0: #set the date to the most recent with a NAV
-                    exitedCheck[level] = max(exitedCheck[level], datetime.strptime(dt_str,'%Y-%m-%d %H:%M:%S'))
+                    exitedCheck[level] = max(exitedCheck.get(level,dtS), datetime.strptime(dt_str,'%Y-%m-%d %H:%M:%S'))
                 if dataOutputType == "IRR ITD" and ((cFunds_checked and e_get("Target name") in consolidatedFunds_local) or e_get("Calculation Type") != "Total Target name"):
                     # skip IRR for consolidated funds or non-total
                     continue
@@ -1215,7 +1235,7 @@ class returnsApp(QWidget):
                     level_flags[month_str] = (e_get("ownershipAdjust", False)) or level_flags[month_str]
                     # aggregate
                     if month_str not in lvl_out:
-                        lvl_out[month_str] = float(val)
+                        lvl_out[month_str] = float(val)  if dataOutputType not in textCols else val
                     elif dataOutputType not in ("Return", "Ownership"):
                         lvl_out[month_str] += float(val)
                     else:
@@ -1234,13 +1254,15 @@ class returnsApp(QWidget):
                     level_flags = flag_ref.setdefault(level, {})
                     nav_flag = level_flags.setdefault("NAV", False)
                     level_flags["NAV"] = (e_get("ownershipAdjust", False)) or nav_flag
+                    consolidated = (cFunds_checked and e_get("Target name") in consolidatedFunds_local)
                     if headerOptions_local and headerOptions_local[0] not in lvl_c_out:
-                        for option in (option for option in headerOptions_local if option != "Ownership"):
-                            if option == "IRR ITD" and ((cFunds_checked and e_get("Target name") in consolidatedFunds_local) or e_get("Calculation Type") != "Total Target name"):
-                                continue
+                        for option in headerOptions_local:
+                            if (option in ('IRR ITD',*textCols) and (consolidated or e_get("Calculation Type") != "Total Target name")):
+                                continue #skip IRR for consolidated or aggregate levels  OR ownership for consolidated funds #TODO: build lowestAggregates to handle consolidated ownership
                             ov = e_get(option)
-                            lvl_c_out[option] = float(ov if ov not in (None, "None", "") else 0)
+                            lvl_c_out[option] = float(ov if ov not in (None, "None", "") else 0) if option not in textCols else ov
                     else:
+                        print('multiple per rowkey')
                         for option in headerOptions_local:
                             if option not in ("Ownership", "IRR ITD"):
                                 ov = e_get(option)
@@ -1279,9 +1301,7 @@ class returnsApp(QWidget):
                             complexOutput[rowKey]["Return"] = returnVal
             if hideMonths:
                 monthThresh = datetime.strptime(self.dataEndSelect.currentText(), '%B %Y') - relativedelta(months=hideMonthsNum)
-                print(f'Hiding empty funds from since {monthThresh}')
                 deleteKeys = {key for key in set(output.keys()) | set(complexOutput.keys()) if exitedCheck.get(key,dtS) <= monthThresh and output[key]['dataType'] != 'benchmark'}
-                print(f"remvoing: {deleteKeys}")
                 for table in (output,complexOutput): #delete the keys from both tables of funds that are empty
                     for dKey in (key for key in deleteKeys if key in table):
                         table.pop(dKey)
@@ -1453,6 +1473,8 @@ class returnsApp(QWidget):
     def calculateUpperLevels(self, tableStructure,data):
         # Hot-path caches and precomputations for performance on large inputs
         headerOptions_local = headerOptions
+        AC1order = self.db.fetchACorder(1)
+        AC2order = self.db.fetchACorder(2)
         fund2traitGet = self.db.fetchFund2Trait().get
         id2Node = self.db.pullId2Node()
         filteredTargets = self.filterDict["Target name"].checkedItems()
@@ -1514,9 +1536,9 @@ class returnsApp(QWidget):
             if levelName == "subAssetClass":
                 # Sort options so those in assetClass2Order come first (in the given order),
                 # then anything else not in assetClass2Order appears after (sorted alphabetically)
-                options = [v for v in assetClass2Order if v in options] + sorted([v for v in options if v not in assetClass2Order])
+                options = [v for v in AC2order if v in options] + sorted([v for v in options if v not in AC2order])
             elif levelName == "assetClass":
-                options = [v for v in assetClass1Order if v in options] + sorted([v for v in options if v not in assetClass1Order])
+                options = [v for v in AC1order if v in options] + sorted([v for v in options if v not in AC1order])
             elif levelName == 'Node':
                 def nodeSortKey(n):
                     return id2Node[int(n)] if n not in (None, 'None') else n
@@ -1638,7 +1660,7 @@ class returnsApp(QWidget):
                         temp = entry.copy()
                         temp["rowKey"] = name_key
                         temp["Calculation Type"] = "Total Target name"
-                        if name_key not in lowestAggregates[dt]:
+                        if name_key not in lowestAggregates[dt]: #note: aggregating like this will have datapoints with random investor attached if not sourced by investor. Irrelevant when made
                             lowAgDt = lowestAggregates[dt]
                             lowAgDt[name_key] = {k : v for k,v in temp.items() if v not in (None,'None','')}
                             for header in (h for h in headerOptions_local if h in lowAgDt[name_key]):
@@ -1649,8 +1671,14 @@ class returnsApp(QWidget):
                             for h in (h for h in headerOptions_local if temp.get(h) not in (None,'None','',0)):
                                 if h not in lowAgDict:
                                     lowAgDict[h] = float(temp[h])
-                                elif h not in ('IRR ITD',):
+                                elif h not in ('IRR ITD','Ownership'):
                                     lowAgDict[h] += float(temp[h])
+                                elif h == 'Ownership':
+                                    if lowAgDict[h] == 0: #if no ownership, assume empty fund, replace. Replace is for empty funds in a consolidated fund
+                                        lowAgDict['Target name'] = temp['Target name']
+                                        lowAgDict[h] = float(temp[h])
+                                    elif lowAgDict['Target name'] == temp['Target name']: #only aggregate within the same target. All within consolidated should be equal
+                                        lowAgDict[h] += float(temp[h])
                                 elif temp.get(h) != 0: #save options to make the median later
                                     if isinstance(lowAgDict[h],list):
                                         lowAgDict[h].append(float(temp[h]))
@@ -1677,7 +1705,7 @@ class returnsApp(QWidget):
                             v = entry.get(header)
                             if header not in ("Ownership", "IRR ITD") and v not in (None,"None",""):
                                 totalLowDt[header] += float(v)
-                            elif header == "Ownership" and levelName in ("Source name", "Family Branch") and "Node" in sortHierarchy and v not in (None,"None","") and float(v) != 0:
+                            elif header == "Ownership" and levelName in ("Source name", "Family Branch", 'Node') and "Node" in sortHierarchy and v not in (None,"None","") and float(v) != 0:
                                 investor = entry.get("Source name")
                                 if totalLowDt.get(header) is None:
                                     totalLowDt[header] = float(v) #assign investor to ownership based on fund
@@ -1911,6 +1939,21 @@ class returnsApp(QWidget):
             exitFunc()
 
         executor.submit(processFilter)
+    def ACsortChange(self,lvl : int):
+        AC = 'assetClass' if lvl == 1 else 'subAssetClass'
+        #Update database
+        newOrder = self.AC1sort.popup.get_checked_sorted_items() if lvl == 1 else self.AC2sort.popup.get_checked_sorted_items()
+        if newOrder: #only if choices are made
+            newOpts = [{'id' : item, 'value' : idx} for idx, item in enumerate(newOrder)]
+            self.db.saveNewOptions(f'{AC}_sort',newOpts)
+
+            #update the table
+            sortHier = self.sortHierarchy.checkedItems()
+            if AC in sortHier:
+                self.buildReturnTable() #if a relevant sort item was changed, rebuild the table
+
+        
+
     def assetClass3VisibilityChanged(self):
         hiddenItems = self.assetClass3Visibility.checkedItems()
         self.db.saveAsset3Visibility(hiddenItems)
@@ -1973,6 +2016,14 @@ class returnsApp(QWidget):
         self.assetClass3Visibility.addItems(sorted(filOptDict['subAssetClass']))
         self.assetClass3Visibility.setCheckedItems([key for key, val in self.db.fetchOptions('asset3Visibility').items() if val == 'hide'])
         self.benchmarkSelection.addItems(sorted(self.db.fetchBenchmarks()))
+        
+        AC1order = self.db.fetchACorder(1)
+        AC1opts = [*AC1order,*[opt for opt in filOptDict['assetClass'] if opt not in AC1order]]
+        AC2order = self.db.fetchACorder(2)
+        AC2opts = [*AC2order,*[opt for opt in filOptDict['subAssetClass'] if opt not in AC2order]]
+
+        self.AC1sort.set_items(AC1opts,AC1order)
+        self.AC2sort.set_items(AC2opts,AC2order)
         if not keepChoices: #defaults
             self.filterDict["Classification"].setCheckedItem("HFC")
         else: #set back to previous values
@@ -2523,7 +2574,7 @@ class returnsApp(QWidget):
                     for node in self.nodeChangeDates:
                         print(f"        {node} : {self.nodeChangeDates.get(node)}")
             gui_queue.put(lambda: self.apiLoadingBar.setValue(100))
-
+            executor.submit(self.db.postAPIupdate) #make sure the new api data is in the caches
 
             self.apiCallTime = datetime.now().strftime("%B %d, %Y @ %I:%M %p")
             self.processFunds()
@@ -2805,6 +2856,7 @@ class returnsApp(QWidget):
             print("Updating database...")
             save_to_db(self.db,"calculations",nodeCalculations, keys=keys)
             save_to_db(self.db, "nodes", [node for _, node in self.cachedNodePaths.items()])
+            executor.submit(self.db.postCalcUpdate) #make sure the cached node data is up to date
             for table in mainTableNames:
                 save_to_db(self.db,table, allDynTables[table])
             print("Database updated.")
@@ -2907,7 +2959,7 @@ class returnsApp(QWidget):
                 d.pop("dataType", None)
             headerSort : SortButtonWidget = self.headerSort
             currentHeaders = set(key for cRow in cleaned.values() for key in cRow.keys())
-            if not headerSort.active or mode == "Monthly Table" or any(opt not in headerSort.options() for opt in currentHeaders):
+            if not headerSort.active or mode == "Monthly Table" or any(opt not in headerSort.options() and opt not in headerSortExclusions for opt in currentHeaders):
                 col_keys = set()
                 for d in cleaned.values():
                     col_keys |= set(d.keys())
@@ -2917,7 +2969,7 @@ class returnsApp(QWidget):
                 col_keys = self.orderColumns(col_keys, exceptions=exceptions)
                 if mode == "Complex Table":
                     totalRowKeys = list(cleaned[list(cleaned.keys())[0]].keys())
-                    chosenKeys = [key for key in col_keys if key in totalRowKeys and key not in exceptions] #headers in the total, but not the exceptions
+                    chosenKeys = [key for key in col_keys if key in (*totalRowKeys,*nonAggregatingCols) and key not in exceptions] #headers in the total, but not the exceptions
                     allKeys = chosenKeys.copy() #start the sortable options w the chosen ones
                     for keySet in (col_keys,exceptions): #extend allKeys by the ones not chosen for later selection option
                         allKeys.extend([key for key in keySet if key not in allKeys])
@@ -2926,7 +2978,8 @@ class returnsApp(QWidget):
                     col_keys = chosenKeys
                 else:
                     totalRowKeys = list(cleaned[list(cleaned.keys())[0]].keys())
-                    col_keys = [key for key in col_keys if key in totalRowKeys and key not in exceptions] #prevents benchmarks alone extending the tables
+                    if totalRowKeys: #only if the values are aggregated to the total
+                        col_keys = [key for key in col_keys if key in totalRowKeys and key not in exceptions] #prevents benchmarks alone extending the tables
                     headerSort.setEnabled(False)
             else:
                 col_keys = headerSort.popup.get_checked_sorted_items()

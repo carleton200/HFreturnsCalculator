@@ -1,7 +1,7 @@
 from dateutil.relativedelta import relativedelta
 
 currentVersion = "1.2.3"
-demoMode = False  #TRUE: exportable mode. FALSE: developer mode
+demoMode = True  #TRUE: exportable mode. FALSE: developer mode
 remoteDBmode = False
 ownershipCorrect = True
 fullRecalculations = True
@@ -39,7 +39,10 @@ masterFilterOptions = [
                             
                         ]
 nonFundCols = ('Source name', 'Node', nameHier["Family Branch"]["local"])
+nonAggregatingCols = ('Ownership', 'IRR ITD', 'Last Actual Date', 'Inception')
+textCols = ('Last Actual Date', 'Inception')
 nonDefaultHeaders = ["Return", "Ownership", "MDdenominator", "Monthly Gain"]
+headerSortExclusions = ['Return']
 mainTableNames = ["positions", "transactions"]
 nodePathSplitter = " > "
 #TODO: make this database stored variable later
@@ -47,7 +50,7 @@ assetClass1Order = ["Illiquid", "Liquid","Cash"]
 assetClass2Order = ["Direct Private Equity", "Private Equity", "Direct Real Assets", "Real Assets", "Public Equity", "Long/Short", "Absolute Return", "Fixed Income", "Cash"] 
 commitmentChangeTransactionTypes = ["Commitment", "Transfer of commitment", "Transfer of commitment (out)", "Secondary - Original commitment (by secondary seller)"]
 ignoreInvTranTypes = [""]
-headerOptions = ["Return","NAV", "Monthly Gain", "Ownership" , "MDdenominator", "Commitment", "Unfunded", "%",'Distributions TD', 'DPI', 'TVPI']
+headerOptions = ["Return","NAV", "Monthly Gain", "Ownership" , "MDdenominator", "Commitment", "Unfunded", "%",'Distributions TD', 'DPI', 'TVPI', 'Last Actual Date', 'Inception']
 if not demoMode:
     headerOptions.extend(["IRR ITD", 'Contributions','Redemptions'])
 dataOptions = ["Investor","Family Branch","Classification", "dateTime"]

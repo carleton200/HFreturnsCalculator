@@ -55,8 +55,6 @@ def processNode(nodeData : dict,selfData : dict, statusQueue, _, failed, transac
             positionsBelow = cache.get("positions_below", {}).get(month["dateTime"], []) #account balances for the pool
             transactionsBelow = cache.get("transactions_below", {}).get(month["dateTime"], []) #account balances for the pool
             _ , cache,aboveData = processOneLevelInvestments(month,node,node,newMonths,cache,positionsBelow,transactionsBelow,IRRtrack)
-            if node == 'Fidelity - 663-039085' and month['Month'] == 'January 2023':
-                print(aboveData)
             #calculationDict.setdefault(month['dateTime'],[]).extend(calculationExtend)
             if aboveData['skip']:
                 pass #allows exited nodes to continue as zeros
@@ -67,8 +65,6 @@ def processNode(nodeData : dict,selfData : dict, statusQueue, _, failed, transac
             aboveStartEntries = {}
             aboveEndEntries = {}
             abovePositions = cache.get("positions_above", {}).get(month["dateTime"], []) #account balances for investors into the pool for the month
-            if node == 'Fidelity - 663-039085' and month['Month'] == 'January 2023':
-                print(abovePositions)
             for pos in abovePositions: #find start and end entries for each investor and sort them
                 source = pos["Source name"]
                 if pos["Date"] == month["accountStart"]:
@@ -95,19 +91,13 @@ def processNode(nodeData : dict,selfData : dict, statusQueue, _, failed, transac
             aboveMDdenominatorSum = 0
             tempAboveDicts = {}
             nodeOwnershipSum = 0
-            if node == 'Fidelity - 663-039085' and month['Month'] == 'January 2023':
-                print(set(aboveStartEntries.keys()) | set(aboveEndEntries.keys()) | set(aboveTransactionDict.keys() | set(distSourceTrack.keys())))
             for source in set(aboveStartEntries.keys()) | set(aboveEndEntries.keys()) | set(aboveTransactionDict.keys() | set(distSourceTrack.keys())): 
-                if node == 'Fidelity - 663-039085' and month['Month'] == 'January 2023':
-                    print(f'ITERATING SOURCES: {source}')
                 #iterate through each investor in the pool for the month
                 #pool level loop for investors
                 sourceWeightedCashFlow = 0
                 sourceCashFlow = 0
                 tempAboveDict = {}
                 startEntry_cache = aboveStartEntries.get(source)
-                if node == 'Fidelity - 663-039085' and month['Month'] == 'January 2023':
-                    print(f'    Start entry cache: {startEntry_cache}')
                 if startEntry_cache: #use starting entry
                     if len(startEntry_cache) > 1:
                         # Choose the balance where Balancetype is the highest of the list, otherwise just the first
@@ -126,8 +116,6 @@ def processNode(nodeData : dict,selfData : dict, statusQueue, _, failed, transac
                     noStartValue = False
                 else: #if no starting entry, take necessary variables and zero out the value
                     end_cache = aboveEndEntries.get(source)
-                    if node == 'Fidelity - 663-039085' and month['Month'] == 'January 2023':
-                        print(f'    End entry cache: {end_cache}')
                     if end_cache: #continue if there is a future entry
                         startEntry = copy.deepcopy(end_cache[0])
                         startEntry[nameHier["Value"]["dynHigh"]] = 0
@@ -160,8 +148,6 @@ def processNode(nodeData : dict,selfData : dict, statusQueue, _, failed, transac
                     aboveMDdenominatorSum += sourceMDdenominator
                 tempAboveDicts[source] = tempAboveDict #store source calculations for secondary iteration for target level data
             monthNodeSourceEntryList = [] #stores investor data for third iteration (not needed to be split, but remnant from old logic.)
-            if node == 'Fidelity - 663-039085' and month['Month'] == 'January 2023':
-                print(tempAboveDicts)
             for source in tempAboveDicts.keys():
                 # second investor iteration to find the gain, return,ownership, and NAV values at pool level (i think it is not needed to be split, but remnant from old logic.)
                 EOMcheck = aboveEndEntries.get(source,[])
@@ -198,9 +184,6 @@ def processNode(nodeData : dict,selfData : dict, statusQueue, _, failed, transac
                 monthNodeSourceEntryList.append([monthNodeSourceEntry, EOMcheck])
             adjustedOwnershipBool = abs(nodeOwnershipSum - 100) > ownershipFlagTolerance and ownershipCorrect #boolean for if ownership is adjusted. Tolerance for thousandth of a percent off
             fundEntryList = aboveData['fundEntryList']
-            if node == 'Fidelity - 663-039085' and month['Month'] == 'January 2023':
-                print(monthNodeSourceEntryList)
-                print(distSourceTrack)
             for sourceEntry, EOMcheck in monthNodeSourceEntryList:
                 source = sourceEntry["Source name"]
                 sourceEOM = sourceEntry["NAV"]
@@ -270,8 +253,6 @@ def processNode(nodeData : dict,selfData : dict, statusQueue, _, failed, transac
                     distTD = distSourceTrack[source].get(target,0.0)
                     if distTD != 0:
                         monthTargetSourceEntry['Distributions TD'] = distTD
-                    if node == 'Fidelity - 663-039085' and month['Month'] == 'January 2023':
-                        print(monthTargetSourceEntry)
                     calculationDict.setdefault(month['dateTime'],[]).append(monthTargetSourceEntry) #add fund level data to calculations for use in aggregation and report generation
             #end of months loop
         #commands to add database updates to the queues
