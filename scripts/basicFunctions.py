@@ -7,7 +7,7 @@ import pandas as pd
 import pyxirr
 from collections import deque, defaultdict
 from oldScripts.temp import MultiSelectBox
-from scripts.commonValues import nameHier, nodePathSplitter, balanceTypePriority, nonFundCols, masterFilterOptions, smallHeaders, textCols
+from scripts.commonValues import maxRecursion, nameHier, nodePathSplitter, balanceTypePriority, nonFundCols, masterFilterOptions, smallHeaders, textCols
 from scripts.instantiate_basics import gui_queue, APIexecutor
 import re
 defaults = {'nodePath' : 'TEXT'}
@@ -148,6 +148,11 @@ def recursLinkCalcs(baseCalcs, monthDT, nodeLvl : int, node :str, currPath: list
     aboveNodes = list(nodeLib.id2node[aboveID] for aboveID in aboveIds)
     aboveCalcDict = {aboveNode : [] for aboveNode in aboveNodes}
     baseCalcs = [calc for calc in baseCalcs if calc['Target name'] in nodeLib.targets]
+    if nodeLvl > 5:
+        print(f'Warning: above expected node values. node level: {nodeLvl} node: {node}, currPath: {currPath}')
+    if nodeLvl > maxRecursion:
+            print(f'WARNING: Calculations for {node} : {currPath} skipped due to recursive looping. [Investing entity] and [Investment in] are likely circular')
+            return []
     for belowCalc in baseCalcs:
         if belowCalc['Source name'] not in aboveNodes:
             #Scenario 1: calcs have linked to their highest level (investor) Return with nodePath

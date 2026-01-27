@@ -1,6 +1,6 @@
 from dateutil.relativedelta import relativedelta
 
-currentVersion = "1.2.3"
+currentVersion = "1.2.4"
 demoMode = True  #TRUE: exportable mode. FALSE: developer mode
 remoteDBmode = False
 ownershipCorrect = True
@@ -9,6 +9,7 @@ importInterval = relativedelta(hours=2)
 calculationPingTime = 2
 ownershipFlagTolerance = 0.01
 dashInactiveMinutes = 1
+maxRecursion = 10
 
 databaseName = 'CRSPRdata.db'
 dynamoAPIenvName = "Dynamo_API"
@@ -41,7 +42,7 @@ masterFilterOptions = [
 nonFundCols = ('Source name', 'Node', nameHier["Family Branch"]["local"])
 nonAggregatingCols = ('Ownership', 'IRR ITD', 'Last Actual Date', 'Inception')
 textCols = ('Last Actual Date', 'Inception')
-nonDefaultHeaders = ["Return", "Ownership", "MDdenominator", "Monthly Gain"]
+nonDefaultHeaders = ["Return", "Ownership", "MDdenominator", "Monthly Gain", 'Distributions TD', 'DPI', 'TVPI', 'Inception', 'Last Actual Date']
 headerSortExclusions = ['Return']
 mainTableNames = ["positions", "transactions"]
 nodePathSplitter = " > "

@@ -26,6 +26,7 @@ import re
 import json
 import time
 import copy
+import logging
 import requests
 import calendar
 import traceback
@@ -193,6 +194,12 @@ class returnsApp(QWidget):
             # Shutdown the manager (this will also signal subprocesses)
             if hasattr(self, 'dash_manager'):
                 self.dash_manager.shutdown()
+            
+            logging.shutdown()
+            if APIexecutor:
+                APIexecutor.shutdown(wait=True)
+            if executor:
+                executor.shutdown(wait=True)
             
         except Exception as e:
             print(f"Error during cleanup: {e}")
@@ -459,7 +466,7 @@ class returnsApp(QWidget):
         self.tableLoadingLabel = QLabel("Building returns table...")
         t1.addWidget(self.tableLoadingLabel)
         self.buildTableLoadingBar = QProgressBar()
-        self.buildTableLoadingBar.setRange(0,8)
+        self.buildTableLoadingBar.setRange(0,100)
         t1.addWidget(self.buildTableLoadingBar)
         self.buildTableLoadingBox.setLayout(t1)
         self.buildTableLoadingBox.setVisible(False)
@@ -1077,7 +1084,7 @@ class returnsApp(QWidget):
     def filterBtnUpdate(self, button, checked):
         if not self.filterCallLock:
             self.buildTableLoadingBox.setVisible(True)
-            self.buildTableLoadingBar.setValue(1)
+            self.buildTableLoadingBar.setValue(5)
             self.filterCallLock = True
             reloadRequired = False
             for filter in self.filterOptions:
@@ -1129,9 +1136,15 @@ class returnsApp(QWidget):
         #open the link benchmarks window as its own window that is non blocking
         self.linkBenchmarksWindow = linkBenchmarksWindow(parentSource=self)
         self.linkBenchmarksWindow.show()
+    def updateTableLoading(self, val : int, text = None):
+        gui_queue.put(lambda: self.buildTableLoadingBar.setValue(val))
+        if text:
+            gui_queue.put(lambda: self.tableLoadingLabel.setText(f"Building returns table...       ({text})"))
+        else:
+            gui_queue.put(lambda: self.tableLoadingLabel.setText("Building returns table..."))
     def buildReturnTable(self, *_):
         self.buildTableLoadingBox.setVisible(True)
-        self.buildTableLoadingBar.setValue(2)
+        self.updateTableLoading(7)
         if not self.cFundsCalculated:
             self.processFunds()
         
@@ -1154,7 +1167,7 @@ class returnsApp(QWidget):
             startDate = datetime.strptime(self.dataStartSelect.currentText(), "%B %Y")
             endDate = datetime.strptime(self.dataEndSelect.currentText(), "%B %Y")
             condStatement, parameters = filt2Query(self.db, self.filterDict,startDate,endDate)
-            gui_queue.put(lambda: self.buildTableLoadingBar.setValue(3))
+            self.updateTableLoading(20,  text = 'Loading from Database')
             if cancelEvent.is_set(): #exit if new table build request is made
                 return
             data = load_from_db(self.db,"calculations",condStatement, tuple(parameters))
@@ -1164,11 +1177,14 @@ class returnsApp(QWidget):
             flagOutput = {"Total##()##" : {}}
             if self.benchmarkSelection.checkedItems() != [] or self.showBenchmarkLinksBtn.isChecked():
                 output = self.applyBenchmarks(output)
+            self.updateTableLoading(45,  text = 'Sorting and aggregating')
+            if cancelEvent.is_set(): #exit if new table build request is made
+                return
             output , data = self.calculateUpperLevels(output,data)
             for benchmark in self.pendingBenchmarks: #remove the benchmarks used only in benchmark links
                 if benchmark not in self.benchmarkChoices and benchmark + self.buildCode([]) in output.keys():
                     output.pop(benchmark + self.buildCode([]))
-            gui_queue.put(lambda: self.buildTableLoadingBar.setValue(4))
+            self.updateTableLoading(80,  text = 'Inserting data into table')
             if cancelEvent.is_set(): #exit if new table build request is made
                 return
             complexOutput = copy.deepcopy(output)
@@ -1228,7 +1244,8 @@ class returnsApp(QWidget):
                     lvl_out = {}
                     out_ref[level] = lvl_out
                 val = e_get(dataOutputType)
-                if val not in (None, "None", ""):
+                if val not in (None, "None", "") and not (dataOutputType == 'Return' and e_get('MDdenominator') == 0):
+                    #only add if there is a value and if it is not adding a return for empty level
                     # flags
                     level_flags = flag_ref.setdefault(level, {})
                     level_flags.setdefault(month_str, False)
@@ -1312,12 +1329,12 @@ class returnsApp(QWidget):
                 for rowKey in reversed(output): #iterate through backwards so total is affected last
                     for date in [header for header in output[rowKey].keys() if header != "dataType"]:
                         output[rowKey][date] = float(output[rowKey][date]) / float(output["Total##()##"][date]) * 100 if  float(output["Total##()##"][date]) != 0 else 0                
-            gui_queue.put(lambda: self.buildTableLoadingBar.setValue(5))
+            self.updateTableLoading(85,  text = 'Calculating time based data')
             if cancelEvent.is_set(): #exit if new table build request is made
                 return
             if  complexMode:
                 output = self.calculateComplexTable(output,complexOutput)
-            gui_queue.put(lambda: self.buildTableLoadingBar.setValue(6))
+            self.updateTableLoading(90, text = 'Populating table')
             if cancelEvent.is_set(): #exit if new table build request is made
                 return
             for key in (key for key in output.keys() if len(output[key].keys()) == 0):
@@ -1471,6 +1488,7 @@ class returnsApp(QWidget):
             code = f"##({"::".join(path)})##"
             return code
     def calculateUpperLevels(self, tableStructure,data):
+        
         # Hot-path caches and precomputations for performance on large inputs
         headerOptions_local = headerOptions
         AC1order = self.db.fetchACorder(1)
@@ -1483,18 +1501,15 @@ class returnsApp(QWidget):
         buildCode = self.buildCode
         showBenchLinks = self.showBenchmarkLinksBtn.isChecked()
         consolidateFunds = self.consolidateFundsBtn.isChecked()
-        consolidatedFunds_map = self.consolidatedFunds
+        consolidatedFunds_map = self.consolidatedFunds if consolidateFunds else {}
         # Precompute end-of-period datetime once for NAV sorting comparisons
-        try:
-            end_period_dt = datetime.strptime(self.dataEndSelect.currentText(), "%B %Y")
-        except Exception:
-            end_period_dt = None
+        end_period_dt = datetime.strptime(self.dataEndSelect.currentText(), "%B %Y")
         def applyLinkedBenchmarks(struc,code, levelName, option):
             for entry in benchmarkLinks:
                 if levelName == assetLevelLinks[entry.get("assetLevel")].get("Link") and option == entry.get("asset"):
                     benchmark = entry.get("benchmark")
-                    if benchmark + self.buildCode([]) in struc.keys(): #pull the benchmark data in if it exists
-                        temp = struc[benchmark + self.buildCode([])]
+                    if benchmark + buildCode([]) in struc.keys(): #pull the benchmark data in if it exists
+                        temp = struc[benchmark + buildCode([])]
                         struc[benchmark + code] = temp.copy()
                     else:
                         struc[benchmark + code] = {} #place table space for that level selection. Will not populate if previous failed
@@ -1515,7 +1530,7 @@ class returnsApp(QWidget):
             grouped_by_level = defaultdict(list)
             if levelName not in nonFundCols:
                 for _e in data:
-                    grouped_by_level[fund2traitGet(_e['Target name'],{}).get(levelName,"")].append(_e)
+                    grouped_by_level[fund2traitGet(_e['Target name'],{}).get(levelName,"Not Found")].append(_e)
             elif levelName == 'Source name':
                 for _e in data:
                     grouped_by_level[_e[levelName]].append(_e)
@@ -1532,6 +1547,8 @@ class returnsApp(QWidget):
                     grouped_by_level[baseNode].append(_e)
                     nodePathOptDict.setdefault(baseNode,set()).update(nodePath.split(nodePathSplitter))
             # Derive options from grouped keys
+
+            
             options = [key for key in list(grouped_by_level.keys()) if key]
             if levelName == "subAssetClass":
                 # Sort options so those in assetClass2Order come first (in the given order),
@@ -1545,6 +1562,7 @@ class returnsApp(QWidget):
                 options.sort(key=lambda n: nodeSortKey(n))
             else:
                 options.sort()
+            
             if len(hier) > levelIdx: #more hierarchy levels to parse
                 for option in options:
                     if levelName == 'Node' and len(nodePathOptDict[option]) > 1: #Break apart to lower node levels and remove from processing in this loop
@@ -1578,6 +1596,7 @@ class returnsApp(QWidget):
                     else:
                         struc, lowTotals, fullEntries = buildLevel(hier, hier[levelIdx],levelIdx,struc,levelData,tempPath, insertedOption = option)
                     allEntries.extend(fullEntries)
+                    
                     for total in lowTotals:
                         dt =  total['dateTime']
                         if dt not in highEntries.keys():
@@ -1612,7 +1631,8 @@ class returnsApp(QWidget):
                         highMonth = calc_DPI_TVPI(highMonth)
                     upperEntries.extend([hEntry for _,hEntry in highEntries.items()])
                 if not noHeader:
-                    allEntries.extend(upperEntries)       
+                    allEntries.extend(upperEntries)
+                   
                 #high totals: all totals for the exact level
                 #newTotalEntries: all totals for every level being tracked
                 return struc, upperEntries, allEntries
@@ -1620,6 +1640,7 @@ class returnsApp(QWidget):
                 if levelName == "subAssetSleeve" and sortHierarchy[levelIdx - 2] == "subAssetClass" and insertedOption in self.db.fetchOptions("asset3Visibility").keys():
                     options = ["hiddenLayer"]
                 NAVsort = "NAV" in self.sortStyle.text()
+                
                 for option in options:
                     if levelName == 'Node' and len(nodePathOptDict[option]) > 1: #Break apart to lower node levels and remove from processing in this loop
                         struc, upperEntriesExtend, allEntriesExtend = nodeRecursion(hier, levelName,levelIdx, struc,grouped_by_level[option],path, insertedOption,option)
@@ -1640,82 +1661,127 @@ class returnsApp(QWidget):
                         levelData = grouped_by_level.get(option, []) #separates out only relevant data
                     else:
                         levelData = data #dont filter the data for hidden layer
-                    nameList = {} #used for sorting by descending NAV
-                    investorsAccessed = {}
+                    nameList = defaultdict(float) #used for sorting by descending NAV
                     lowestAggregates = defaultdict(dict)
+                    
+                    # Pre-compute sets and caches for performance
+                    excluded_headers = {"Ownership", "IRR ITD"}
+                    excluded_values = {None, "None", "", 0}
+                    excluded_values_no_zero = {None, "None", ""}  # For lowAgDt creation (0 is allowed)
+                    excluded_levels = {"Source name", "Family Branch"}
+                    has_node_in_hierarchy = "Node" in sortHierarchy
+                    ownership_levels = {"Source name", "Family Branch", "Node"}
+                    parsed_dates_cache = {}
+                    target_trait_cache = {}
+                    investorsAccessed = defaultdict(set)  # Use defaultdict for efficiency
+                    
                     for entry in levelData:
+                        # Cache entry lookups
                         dt = entry['dateTime']
                         target_raw = entry["Target name"]
-                        if not consolidateFunds or target_raw not in consolidatedFunds_map or target_raw in filteredTargets:
-                            targetName = target_raw
-                        else:
-                            targetName = consolidatedFunds_map.get(target_raw)
-                        targetTraitGet = fund2traitGet(target_raw,{}).get
+                        entry_get = entry.get
+                        
+                        # Cache target name mapping
+                        targetName = consolidatedFunds_map.get(target_raw, target_raw)
                         name_key = targetName + code
-                        nameList[name_key] = nameList.get(name_key, 0.0)
-                        if NAVsort and end_period_dt is not None and datetime.strptime(dt, "%Y-%m-%d %H:%M:%S") == end_period_dt:
-                            #store list of names and NAVs to sort by descending NAV
-                            nav_val = entry.get("NAV", 0.0)
-                            nameList[name_key] += float(nav_val) if nav_val not in (None,"None","" ,0) else 0.0
+                        
+                        # Cache fund trait dictionary lookup
+                        if target_raw not in target_trait_cache:
+                            target_trait_cache[target_raw] = fund2traitGet(target_raw, {}).get
+                        targetTraitGet = target_trait_cache[target_raw]
+                        
+                        # Handle NAV sorting with cached datetime parsing
+                        nameList[name_key] += 0 #assures the key is present
+                        if NAVsort:
+                            if dt not in parsed_dates_cache:
+                                parsed_dates_cache[dt] = datetime.strptime(dt, "%Y-%m-%d %H:%M:%S")
+                            if parsed_dates_cache[dt] == end_period_dt:
+                                nav_val = entry_get("NAV", 0.0)
+                                if nav_val not in excluded_values:
+                                    nameList[name_key] += float(nav_val)
+                        
+                        # Create temp dict - copy all fields (matching original entry.copy() behavior)
                         temp = entry.copy()
                         temp["rowKey"] = name_key
                         temp["Calculation Type"] = "Total Target name"
-                        if name_key not in lowestAggregates[dt]: #note: aggregating like this will have datapoints with random investor attached if not sourced by investor. Irrelevant when made
-                            lowAgDt = lowestAggregates[dt]
-                            lowAgDt[name_key] = {k : v for k,v in temp.items() if v not in (None,'None','')}
-                            for header in (h for h in headerOptions_local if h in lowAgDt[name_key]):
-                                lowAgDt[name_key][header] = float(temp[header]) #convert any nums to float
+                        ownership_adjust = entry_get('ownershipAdjust', False)
+                        
+                        # Process lowestAggregates
+                        lowAgDt = lowestAggregates[dt]
+                        if name_key not in lowAgDt:
+                            # Create new entry with filtered values (exclude None, 'None', '' but allow 0)
+                            lowAgDt[name_key] = {k: v for k, v in temp.items() if v not in excluded_values_no_zero}
+                            # Convert header options to float
+                            for h in headerOptions_local:
+                                if h in lowAgDt[name_key]:
+                                    lowAgDt[name_key][h] = float(temp[h])
                         else:
-                            lowAgDict = lowestAggregates[dt][name_key]
-                            lowAgDict['ownershipAdjust'] = lowAgDict.get('ownershipAdjust',False) or temp.get('ownershipAdjust',False)
-                            for h in (h for h in headerOptions_local if temp.get(h) not in (None,'None','',0)):
+                            lowAgDict = lowAgDt[name_key]
+                            # Update ownershipAdjust
+                            if ownership_adjust:
+                                lowAgDict['ownershipAdjust'] = True
+                            
+                            # Process header options
+                            for h in headerOptions_local:
+                                h_val = temp.get(h)
+                                if h_val in excluded_values:
+                                    continue
+                                
+                                h_float = float(h_val)
                                 if h not in lowAgDict:
-                                    lowAgDict[h] = float(temp[h])
-                                elif h not in ('IRR ITD','Ownership'):
-                                    lowAgDict[h] += float(temp[h])
+                                    lowAgDict[h] = h_float
+                                elif h not in excluded_headers:
+                                    lowAgDict[h] += h_float
                                 elif h == 'Ownership':
-                                    if lowAgDict[h] == 0: #if no ownership, assume empty fund, replace. Replace is for empty funds in a consolidated fund
+                                    if lowAgDict[h] == 0:
                                         lowAgDict['Target name'] = temp['Target name']
-                                        lowAgDict[h] = float(temp[h])
-                                    elif lowAgDict['Target name'] == temp['Target name']: #only aggregate within the same target. All within consolidated should be equal
-                                        lowAgDict[h] += float(temp[h])
-                                elif temp.get(h) != 0: #save options to make the median later
-                                    if isinstance(lowAgDict[h],list):
-                                        lowAgDict[h].append(float(temp[h]))
+                                        lowAgDict[h] = h_float
+                                    elif lowAgDict['Target name'] == temp['Target name']:
+                                        lowAgDict[h] += h_float
+                                elif h_float != 0:
+                                    if isinstance(lowAgDict[h], list):
+                                        lowAgDict[h].append(h_float)
                                     else:
-                                        lowAgDict[h] = [lowAgDict[h],float(temp[h])]
+                                        lowAgDict[h] = [lowAgDict[h], h_float]
 
+                        # Process totalEntriesLow
                         if dt not in totalEntriesLow:
-                            totalEntriesLow[dt] = copy.deepcopy(entryTemplate)
-                            totalLowDt = totalEntriesLow[dt]
+                            totalLowDt = copy.deepcopy(entryTemplate)
+                            totalEntriesLow[dt] = totalLowDt
                             totalLowDt["rowKey"] = name + code
                             totalLowDt["dateTime"] = dt
                             for label in dataOptions_local:
-                                totalLowDt[label] = targetTraitGet(label,"")
-                            if levelName not in ("Source name","Family Branch"):
-                                lvl_val = targetTraitGet(levelName,"")
+                                totalLowDt[label] = targetTraitGet(label, "")
+                            if levelName not in excluded_levels:
+                                lvl_val = targetTraitGet(levelName, "")
                                 totalLowDt[levelName] = lvl_val
                                 if levelName == "subAssetClass":
-                                    totalLowDt["assetClass"] = targetTraitGet("assetClass","")
+                                    totalLowDt["assetClass"] = targetTraitGet("assetClass", "")
                         else:
                             totalLowDt = totalEntriesLow[dt]
-                        if not totalLowDt.get("ownershipAdjust", False) and entry.get('ownershipAdjust',False):
+                        
+                        # Update ownershipAdjust
+                        if ownership_adjust and not totalLowDt.get("ownershipAdjust", False):
                             totalLowDt["ownershipAdjust"] = True
+                        
+                        # Process header aggregations
                         for header in headerOptions_local:
-                            v = entry.get(header)
-                            if header not in ("Ownership", "IRR ITD") and v not in (None,"None",""):
-                                totalLowDt[header] += float(v)
-                            elif header == "Ownership" and levelName in ("Source name", "Family Branch", 'Node') and "Node" in sortHierarchy and v not in (None,"None","") and float(v) != 0:
-                                investor = entry.get("Source name")
-                                if totalLowDt.get(header) is None:
-                                    totalLowDt[header] = float(v) #assign investor to ownership based on fund
-                                    investorsAccessed[dt] = {investor}
-                                else:
-                                    accessed = investorsAccessed.get(dt, set())
-                                    if investor not in accessed: #accounts for family branch level to add the investor level ownerships
-                                        totalLowDt[header] += float(v)
-                                        accessed.add(investor)
-                                        investorsAccessed[dt] = accessed
+                            v = entry_get(header)
+                            if header not in excluded_headers:
+                                if v not in excluded_values:
+                                    totalLowDt[header] += float(v)
+                            elif header == "Ownership" and levelName in ownership_levels and has_node_in_hierarchy:
+                                if v not in excluded_values:
+                                    v_float = float(v)
+                                    if v_float != 0:
+                                        investor = entry_get("Source name")
+                                        if totalLowDt.get(header) is None:
+                                            totalLowDt[header] = v_float
+                                            investorsAccessed[dt].add(investor)
+                                        elif investor not in investorsAccessed[dt]:
+                                            totalLowDt[header] += v_float
+                                            investorsAccessed[dt].add(investor)
+                    
                     for dt in lowestAggregates:
                         for _, entry in lowestAggregates[dt].items():
                             gain = entry['Monthly Gain']
@@ -1725,6 +1791,7 @@ class returnsApp(QWidget):
                                 entry['IRR ITD'] = statistics.median(entry['IRR ITD'])
                             entry = calc_DPI_TVPI(entry)
                         allEntries.extend([v for _,v in lowestAggregates[dt].items()])
+
                         
                     if not NAVsort:
                         for name in sorted(nameList.keys()): #sort by alphabetical order
@@ -1742,8 +1809,10 @@ class returnsApp(QWidget):
                     upperEntries.extend(totalEntriesLow.values())
                 if not noHeader:
                     allEntries.extend(upperEntries)
+                
                 return struc, upperEntries, allEntries
         def nodeRecursion(hier, levelName,levelIdx, struc,data,path, insertedOption,baseNodeId):
+            node_rec_start = time.time()
             baseNode = id2Node[int(baseNodeId)]
             rowKey = baseNode + buildCode(path)
             struc[rowKey] = {}
@@ -1759,6 +1828,7 @@ class returnsApp(QWidget):
                     lowerPath = nodePathSplitter.join(part.strip() for part in nPath.split(nodePathSplitter)[1:])
                     temp['nodePath'] = lowerPath
                     lowNodeData.append(temp)
+            
             #send both types back through buildLevel. Isolated node data will build as normal. data to be split more will appear back here and split again
             #TODO: base data needs a false heading to sum at. Lower nodes will sum at their node headings
             newHier = [*hier[:levelIdx], 'Node', *hier[levelIdx:]]
@@ -1806,22 +1876,27 @@ class returnsApp(QWidget):
                 gain = nodeMonth['Monthly Gain']
                 nodeMonth['Return'] =  abs(gain / mdDen * 100) * findSign(gain) if mdDen != 0 else 0.0
             nodeUpperEntries = nodeSumEntryDict.values()
+            
             return struc, nodeUpperEntries, [*baseAllData, *recursAllData]
 
         if self.showBenchmarkLinksBtn.isChecked():
             benchmarkLinks = self.db.fetchBenchmarkLinks()
-            tableStructure = applyLinkedBenchmarks(tableStructure,self.buildCode(["Total",]), "Total", "Total") #apply benchmark links to total
+            tableStructure = applyLinkedBenchmarks(tableStructure,buildCode(["Total",]), "Total", "Total") #apply benchmark links to total
+        else:
+            benchmarkLinks = []
         levelIdx = 0
         buildHier = sortHierarchy
+        
         tableStructure, highestEntries, newEntries = buildLevel(buildHier, buildHier[0],levelIdx,tableStructure,data, [])
         trueTotalEntries = {}
+        
         for total in highestEntries:
             if total["dateTime"] not in trueTotalEntries.keys():
                 trueTotalEntries[total["dateTime"]] = {"dateTime" : None, "Calculation Type" : "Total", "Node" : None, "Fund" : None ,
                                             "assetClass" : None, "subAssetClass" : None, "Source name" : None,
                                             "Return" : None , nameHier["sleeve"]["local"] : None,
                                             "Ownership" : None, "IRR ITD" : None}
-                trueTotalEntries[total["dateTime"]]["rowKey"] = "Total" + self.buildCode([])
+                trueTotalEntries[total["dateTime"]]["rowKey"] = "Total" + buildCode([])
                 for header in headerOptions_local:
                     if header != "Ownership":
                         trueTotalEntries[total["dateTime"]][header] = 0
@@ -1832,11 +1907,14 @@ class returnsApp(QWidget):
             for header in headerOptions_local:
                 if header not in ("Ownership", "IRR ITD"):
                     trueTotalEntries[total["dateTime"]][header] += float(total[header])
+        
         for month in trueTotalEntries.keys():
             gain = trueTotalEntries[month]["Monthly Gain"]
             MDden = trueTotalEntries[month]["MDdenominator"]
             trueTotalEntries[month]["Return"] = abs(gain / MDden * 100) * findSign(gain) if MDden != 0 else 0
             newEntries.append(trueTotalEntries[month])
+        current_time = time.time()
+        
         return tableStructure,newEntries
                     
     def filterUpdate(self):
@@ -2629,10 +2707,11 @@ class returnsApp(QWidget):
                 self.workerProgress = {}
 
                 nodeLib = nodeLibrary([*dynImportData['transactions'],*dynImportData['positions']])
+                if nodeLib.badNodes:
+                    gui_queue.put(lambda: QMessageBox.warning(self,'Failed Nodes',f'WARNING: The following nodes will not be calculated due to illogical investment pattern. (Likely the investment was marked as owning the investing entity) \n \n {list(nodeLib.badNodes)}'))
                 # INSERT_YOUR_CODE
                 nodeClumps = get_connected_node_groups(nodeLib.nodePaths)
                 clumpIdxs = {node : idx for idx, clump in enumerate(nodeClumps) for node in clump}
-
                 # ------------------- build data cache ----------------------
                 tables = mainTableNames
                 table_rows = {t: dynImportData[t] for t in tables}
@@ -2652,7 +2731,7 @@ class returnsApp(QWidget):
                             for direction in ["Target name" , "Source name", 'node']:
                                 potNode = row.get(direction)
                                 if potNode not in nodeLib.nodes:
-                                    continue
+                                    continue #Note: this also ignored deleted recursive nodes
                                 else:
                                     if table == 'positions': #if the node is the source, it is below. Otherwise, above
                                         tableName = 'positions_below' if 'Source' in direction else 'positions_above'
@@ -2917,13 +2996,14 @@ class returnsApp(QWidget):
         return keys
     def populateReturnsTable(self, origRows: dict, flagStruc : dict = {}):
         try:
-            self.buildTableLoadingBar.setValue(7)
+            self.updateTableLoading(95, text='Populating table')
             mode = self.tableBtnGroup.checkedButton().text()
             if not origRows:
                 # nothing to show
                 self.returnsTable.clear()
                 self.returnsTable.setRowCount(0)
                 self.returnsTable.setColumnCount(0)
+                self.updateTableLoading(0)
                 self.buildTableLoadingBox.setVisible(False)
                 return
 
@@ -3074,6 +3154,7 @@ class returnsApp(QWidget):
                         item.setForeground(QColor(0,0,255))
                     item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                     self.returnsTable.setItem(r, c, item)
+            self.updateTableLoading(100)
             self.buildTableLoadingBox.setVisible(False)
         except Exception as e:
             QMessageBox.warning(self,'Build Table Failed',f'Error occured attempting to format the table. Please try again. \n {e.args} {traceback.format_exc()}')

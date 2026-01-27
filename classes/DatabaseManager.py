@@ -29,7 +29,7 @@ class DatabaseManager:
         self.password = "Griffine1124"
         self.driver = 'ODBC Driver 18 for SQL Server'
         self.batch_size = 50000
-        self.fetch_batch_size = 2000
+        self.fetch_batch_size = 50000
         self.instantiateConnections()
         self.instantiateTables()
 
@@ -658,14 +658,15 @@ def load_from_db(db : DatabaseManager, table, condStatement = "",parameters = No
                 else:
                     cur.execute(f'SELECT * FROM {table}')
                 cols = [d[0] for d in cur.description]
+                dict_factory = lambda r: dict(zip(cols, r))
                 rows = []
-                fetch_size = getattr(db, "fetch_batch_size", 2000)
+                fetch_size = db.fetch_batch_size
                 while True:
                     batch = cur.fetchmany(fetch_size)
                     if not batch:
                         break
-                    rows.extend(dict(zip(cols, row)) for row in batch)
-                conn.commit()
+                    
+                    rows.extend([dict_factory(row) for row in batch])
                 return rows
             except Exception as e:
                 try:

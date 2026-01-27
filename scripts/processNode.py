@@ -4,6 +4,8 @@ import logging
 from operator import xor
 import traceback
 import copy
+
+from dateutil.relativedelta import relativedelta
 from scripts.commonValues import nameHier, balanceTypePriority, mainTableNames, ownershipCorrect, ownershipFlagTolerance
 from scripts.basicFunctions import calculateBackdate, calculate_xirr, accountBalanceKey, findSign
 from scripts.processInvestments import processAboveBelow, processOneLevelInvestments
@@ -130,7 +132,16 @@ def processNode(nodeData : dict,selfData : dict, statusQueue, _, failed, transac
                     if transaction.get(nameHier["CashFlow"]["dynHigh"]) not in (None,"None"):
                         sourceCashFlow -= float(transaction[nameHier["CashFlow"]["dynHigh"]])
                         backDate = calculateBackdate(transaction, noStartValue=noStartValue) #dynamo revert by a day logic
+                        backDate = 0
                         sourceWeightedCashFlow -= float(transaction[nameHier["CashFlow"]["dynHigh"]])  *  (totalDays -int(datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S").day) + backDate)/totalDays
+                        if backDate:
+                            for m in newMonths:
+                                if m["tranStart"] <= month["endDay"] <= m["endDay"]:
+                                    for lst in cache.get('transactions_above', {}).get(m["dateTime"], []):
+                                        if all(lst[header] == transaction[header] for header in list(lst.keys())): #if all values match
+                                            date = datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S") - relativedelta(days=backDate) #datetime and subtract a day
+                                            date = datetime.strftime(date, "%Y-%m-%dT%H:%M:%S")  #revert to string
+                                            lst['Calculation Date'] = date #add calculation date to transaction in cache
                 sourceMDdenominator = float(startEntry[nameHier["Value"]["dynHigh"]]) + sourceWeightedCashFlow
                 tempAboveDict["MDden"] = sourceMDdenominator
                 tempAboveDict["cashFlow"] = sourceCashFlow
@@ -214,8 +225,8 @@ def processNode(nodeData : dict,selfData : dict, statusQueue, _, failed, transac
                     targetNAV = targetEntry["NAV"]
                     target = targetEntry["Target name"]
                     targetSourceNAV = srcOwnDec * targetNAV
-                    targetSourceGain = srcOwnDec * targetEntry["Monthly Gain"]
-                    targetSourceMDdenominator = srcOwnDec * targetEntry["MDdenominator"]
+                    targetSourceGain = srcMDdenDec * targetEntry["Monthly Gain"]
+                    targetSourceMDdenominator = srcMDdenDec * targetEntry["MDdenominator"]
                     targetSourceReturn = abs(targetSourceGain / targetSourceMDdenominator) * findSign(targetSourceGain) if targetSourceMDdenominator != 0 else 0
                     targetSourceOwnership = targetSourceNAV /  targetNAV if targetNAV != 0 else 0
                     #account for commitment calculations on closed funds
