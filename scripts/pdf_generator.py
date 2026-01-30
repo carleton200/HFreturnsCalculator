@@ -22,7 +22,7 @@ from typing import List, Dict, Optional, Tuple
 
 from scripts.commonValues import maxRowPadding, standardFontSize, textCols
 try:
-    from scripts.basicFunctions import headerUnits, separateRowCode
+    from scripts.basicFunctions import headerUnits
     from scripts.commonValues import smallHeaders, fraction_headers, percent_headers, yearOptions
 except:
     print('ERROR: Failed to access script modules')

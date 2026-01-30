@@ -1,6 +1,8 @@
 
+from collections import defaultdict
 from classes.nodeLibrary import nodeLibrary
-from scripts.basicFunctions import accountBalanceKey, nodalToLinkedCalculations, recursLinkCalcs
+from scripts.basicFunctions import accountBalanceKey, fullPortfolioCalcs, nodalToLinkedCalculations, recursLinkCalcs
+from scripts.commonValues import fullPortAggCols, fullPortStr
 from scripts.processNode import processNode
 import traceback, logging
 
@@ -55,7 +57,7 @@ def processClump(clumpData : list[dict],nodeLib : nodeLibrary, selfData : dict, 
                 for monthDT, baseCalcs in clumpCalculationsDict[nodeLevel][node].items():
                     #recursively link each nodes targets (targets don't include other nodes) up to the highest above for a full link 
                     linkedClumpCalculations.extend(recursLinkCalcs(baseCalcs, monthDT, nodeLevel ,node,[nodeLib.node2id[node],], nodeLib,clumpCalculationsDict))
-
+        linkedClumpCalculations = fullPortfolioCalcs(linkedClumpCalculations)
                 
         return linkedClumpCalculations, {'positions' : clumpPositions, 'transactions' : clumpTransactions}
     except Exception as e: #halt operations for failure or force close/cancel

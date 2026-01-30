@@ -1,15 +1,13 @@
 from classes import nodeLibrary
-import copy
 import traceback
 import queue
 from datetime import datetime
-import pandas as pd
 import pyxirr
 from collections import deque, defaultdict
-from oldScripts.temp import MultiSelectBox
-from scripts.commonValues import maxRecursion, nameHier, nodePathSplitter, balanceTypePriority, nonFundCols, masterFilterOptions, smallHeaders, textCols
+from scripts.commonValues import fullPortAggCols, fullPortStr, maxRecursion, nameHier, nodePathSplitter, balanceTypePriority, smallHeaders, textCols
 from scripts.instantiate_basics import gui_queue, APIexecutor
 import re
+
 defaults = {'nodePath' : 'TEXT'}
 def infer_sqlite_type(val, colHeader = None):
     # Try to infer column types in SQLite: INTEGER, REAL, TEXT, or BLOB
@@ -316,67 +314,6 @@ def handleDuplicateFields(rows, fields):
     except Exception as e:
         print(f"ERROR: failed to handle duplicate fields: {e.args}")
     return rows
-def filt2Query(db, filterDict : dict[MultiSelectBox], startDate : datetime, endDate : datetime) -> (str,list[str]):
-    condStatement = ""
-    parameters = []
-    invSelections = filterDict["Source name"].checkedItems()
-    famSelections = filterDict["Family Branch"].checkedItems()
-    if invSelections != [] or famSelections != []: #handle investor level
-        invsF = set()
-        for fam in famSelections:
-            invsF.update(db.pullInvestorsFromFamilies(fam))
-        invsI = set(invSelections)
-        if invSelections != [] and famSelections != []: #Intersect if both are selected
-            invs = invsF.intersection(invsI)
-        else: #Union if only one is valid
-            invs = invsF.union(invsI)
-        placeholders = ','.join('?' for _ in invs)
-        if condStatement in ("", " WHERE"):
-            condStatement = f' WHERE [Source name] in ({placeholders})'
-        else:
-            condStatement += f' AND [Source name] in ({placeholders})'
-        parameters.extend(invs)
-    if filterDict['Node'].checkedItems() != []:
-        selectedNodes = filterDict['Node'].checkedItems()
-        sNodeIds = [" "+ str(node['id'])+" " for node in db.fetchNodes() if str(node['id']) in selectedNodes]
-        # Build LIKE conditions to check if any node ID appears within the nodePath column
-        if sNodeIds:
-            likeConditions = ' OR '.join('[nodePath] LIKE ?' for _ in sNodeIds)
-            if condStatement in (""," WHERE"):
-                condStatement = f"WHERE ({likeConditions})"
-            else:
-                condStatement += f" AND ({likeConditions})"
-            # Add each node ID with wildcards to search for it within the column
-            for sNodeId in sNodeIds:
-                parameters.append(f'%{sNodeId}%')
-        else:
-            print(f"Warning: Failed to find corresponding node Id's for {selectedNodes}")
-    filterParamDict = {}
-    for filter in masterFilterOptions:
-        if filter["key"] not in nonFundCols:
-            if filterDict[filter["key"]].checkedItems() != []:
-                filterParamDict[filter['key']] = filterDict[filter["key"]].checkedItems()
-    if filterParamDict:
-        if condStatement == "":
-            condStatement = " WHERE"
-        filteredFunds = db.pullFundsFromFilters(filterParamDict)
-        for param in filteredFunds:
-            parameters.append(param)
-        placeholders = ','.join('?' for _ in filteredFunds)
-        if condStatement in ("", " WHERE"):
-            condStatement = f"WHERE [Target name] IN ({placeholders})"
-        else:
-            condStatement += f" AND [Target name] IN ({placeholders})"
-    # Add time filter to condStatement for database-level filtering
-    startDateStr = startDate.strftime("%Y-%m-%d %H:%M:%S") #TODO: is this even necessary?
-    endDateStr = endDate.strftime("%Y-%m-%d %H:%M:%S")
-    if condStatement == "":
-        condStatement = f" WHERE [dateTime] >= ? AND [dateTime] <= ?"
-    else:
-        condStatement += f" AND [dateTime] >= ? AND [dateTime] <= ?"
-    parameters.append(startDateStr)
-    parameters.append(endDateStr)
-    return condStatement,parameters
 def headerUnits(headers):
     units = []
     for h in headers:
@@ -418,3 +355,25 @@ def findSourceName(fams, invs):
         return 'HF Capital Investor'
     else:
         raise RuntimeError('Failed to find source name for report investors')
+def fullPortfolioCalcs(calculations:list[dict]):
+    portfolioCalcs = defaultdict(dict) #dict of dateTime:nodePath:[Target name] for full portfolio data
+    for c in calculations: 
+        #aggregate the calculations up to the Full Portfolio level
+        dt = c['dateTime']
+        nP = c['nodePath']
+        t = c['Target name']
+        if nP not in portfolioCalcs[dt]:
+            portfolioCalcs[dt][nP] = {}
+        if t not in portfolioCalcs[dt][nP]:
+            portfolioCalcs[dt][nP][t] = c.copy()
+            portfolioCalcs[dt][nP][t]['Source name'] = fullPortStr
+        else: #aggregate all later entries
+            pC = portfolioCalcs[dt][nP][t]
+            for h in fullPortAggCols: #aggregate by relevant headers
+                if h not in c or not c[h]:
+                    continue
+                elif h not in pC or not pC[h]:
+                    pC[h] = 0
+                pC[h] += c[h]
+    calculations.extend([entry for dt in portfolioCalcs for nP in portfolioCalcs[dt] for entry in portfolioCalcs[dt][nP].values()])
+    return calculations

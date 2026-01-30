@@ -1,6 +1,6 @@
 from dateutil.relativedelta import relativedelta
 
-currentVersion = "1.2.4"
+currentVersion = "1.2.5"
 demoMode = True  #TRUE: exportable mode. FALSE: developer mode
 remoteDBmode = False
 ownershipCorrect = True
@@ -39,6 +39,7 @@ masterFilterOptions = [
                             {"key": "Target name",  "name": "Fund/Investment",  "dynNameLow" : "Target name", 'fundDyn' : 'Name'}
                             
                         ]
+fullPortStr = 'Full Portfolio'
 nonFundCols = ('Source name', 'Node', nameHier["Family Branch"]["local"])
 nonAggregatingCols = ('Ownership', 'IRR ITD', 'Last Actual Date', 'Inception')
 textCols = ('Last Actual Date', 'Inception')
@@ -52,6 +53,7 @@ assetClass2Order = ["Direct Private Equity", "Private Equity", "Direct Real Asse
 commitmentChangeTransactionTypes = ["Commitment", "Transfer of commitment", "Transfer of commitment (out)", "Secondary - Original commitment (by secondary seller)"]
 ignoreInvTranTypes = [""]
 headerOptions = ["Return","NAV", "Monthly Gain", "Ownership" , "MDdenominator", "Commitment", "Unfunded", "%",'Distributions TD', 'DPI', 'TVPI', 'Last Actual Date', 'Inception']
+fullPortAggCols = [h for h in headerOptions if h not in ('Return','%','DPI','TVPI','Last Actual Date','Inception')]
 if not demoMode:
     headerOptions.extend(["IRR ITD", 'Contributions','Redemptions'])
 dataOptions = ["Investor","Family Branch","Classification", "dateTime"]

@@ -3,7 +3,9 @@ import os
 from PyQt5.QtWidgets import QFileDialog, QMessageBox
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
-from scripts.commonValues import maxPDFheaderUnits
+from classes.DatabaseManager import DatabaseManager
+from classes.widgetClasses import MultiSelectBox
+from scripts.commonValues import fullPortStr, masterFilterOptions, maxPDFheaderUnits, nonFundCols, sqlPlaceholder
 from scripts.instantiate_basics import ASSETS_DIR
 from scripts.render_report import render_report
 from scripts.basicFunctions import headerUnits
@@ -79,3 +81,74 @@ def controlTable(rApp, reset : bool = False, reenable : bool = True, filterChoic
         blockMSG.destroy()
         rApp.setEnabled(True)
         raise
+def comboInvestorOpts(db: DatabaseManager, invSelections,famSelections):
+    if invSelections != [] or famSelections != []:
+        invsF = set()
+        for fam in famSelections:
+            invsF.update(db.pullInvestorsFromFamilies(fam))
+        invsI = set(invSelections)
+        if invSelections != [] and famSelections != []: #Intersect if both are selected
+            invs = invsF.intersection(invsI)
+        else: #Union if only one is valid
+            invs = invsF.union(invsI)
+    return invs
+def filt2Query(db, filterDict : dict[MultiSelectBox], startDate : datetime, endDate : datetime, invSort:bool = False) -> (str,list[str]):
+    condStatement = ""
+    parameters = []
+    invSelections = filterDict["Source name"].checkedItems()
+    famSelections = filterDict["Family Branch"].checkedItems()
+    if invSelections != [] or famSelections != []: #handle investor level
+        invs = comboInvestorOpts(db,invSelections,famSelections)
+        placeholders = ','.join(sqlPlaceholder for _ in invs)
+        if condStatement in ("", " WHERE"):
+            condStatement = f' WHERE [Source name] in ({placeholders})'
+        else:
+            condStatement += f' AND [Source name] in ({placeholders})'
+        parameters.extend(invs)
+    elif invSort: #if grouped by an investor level, must pull individualized data
+        condStatement = f' WHERE [Source name] != {sqlPlaceholder}'
+        parameters.append(fullPortStr)
+    else: #if no investor selection, the full portfolio values will work the same and be faster
+        condStatement = f' WHERE [Source name] = {sqlPlaceholder}'
+        parameters.append(fullPortStr)
+    if filterDict['Node'].checkedItems() != []:
+        selectedNodes = filterDict['Node'].checkedItems()
+        sNodeIds = [" "+ str(node['id'])+" " for node in db.fetchNodes() if str(node['id']) in selectedNodes]
+        # Build LIKE conditions to check if any node ID appears within the nodePath column
+        if sNodeIds:
+            likeConditions = ' OR '.join('[nodePath] LIKE ?' for _ in sNodeIds)
+            if condStatement in (""," WHERE"):
+                condStatement = f"WHERE ({likeConditions})"
+            else:
+                condStatement += f" AND ({likeConditions})"
+            # Add each node ID with wildcards to search for it within the column
+            for sNodeId in sNodeIds:
+                parameters.append(f'%{sNodeId}%')
+        else:
+            print(f"Warning: Failed to find corresponding node Id's for {selectedNodes}")
+    filterParamDict = {}
+    for filter in masterFilterOptions:
+        if filter["key"] not in nonFundCols:
+            if filterDict[filter["key"]].checkedItems() != []:
+                filterParamDict[filter['key']] = filterDict[filter["key"]].checkedItems()
+    if filterParamDict:
+        if condStatement == "":
+            condStatement = " WHERE"
+        filteredFunds = db.pullFundsFromFilters(filterParamDict)
+        for param in filteredFunds:
+            parameters.append(param)
+        placeholders = ','.join('?' for _ in filteredFunds)
+        if condStatement in ("", " WHERE"):
+            condStatement = f"WHERE [Target name] IN ({placeholders})"
+        else:
+            condStatement += f" AND [Target name] IN ({placeholders})"
+    # Add time filter to condStatement for database-level filtering
+    startDateStr = startDate.strftime("%Y-%m-%d %H:%M:%S") #TODO: is this even necessary?
+    endDateStr = endDate.strftime("%Y-%m-%d %H:%M:%S")
+    if condStatement == "":
+        condStatement = f" WHERE [dateTime] >= ? AND [dateTime] <= ?"
+    else:
+        condStatement += f" AND [dateTime] >= ? AND [dateTime] <= ?"
+    parameters.append(startDateStr)
+    parameters.append(endDateStr)
+    return condStatement,parameters

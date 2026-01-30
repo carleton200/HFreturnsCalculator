@@ -4,7 +4,7 @@ import traceback
 import logging
 import copy
 from scripts.commonValues import nameHier, commitmentChangeTransactionTypes, mainTableNames
-from scripts.basicFunctions import handleFundClasses, calculateBackdate, calculate_xirr, nodalToLinkedCalculations, findSign, accountBalanceKey
+from scripts.basicFunctions import fullPortfolioCalcs, handleFundClasses, calculateBackdate, calculate_xirr, nodalToLinkedCalculations, findSign, accountBalanceKey
 
 def processAboveBelow(newMonths,cache,node,failed,statusQueue):
     calculations = []
@@ -144,7 +144,7 @@ def processOneLevelInvestments(month, node, invSourceName, newMonths, cache, pos
                                     date = datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S") - relativedelta(days=backDate) #datetime and subtract a day
                                     date = datetime.strftime(date, "%Y-%m-%dT%H:%M:%S")  #revert to string
                                     lst['Calculation Date'] = date #add calculation date to transaction in cache
-            elif transaction["TransactionType"] in commitmentChangeTransactionTypes and transaction.get("TransactionType") not in (None,"None"):
+            elif transaction["TransactionType"] in commitmentChangeTransactionTypes:
                 com = transaction.get(nameHier["Commitment"]["dynLow"],0.0)
                 com = float(com)
                 commitment += com
@@ -276,7 +276,7 @@ def processInvestments(nodeData : dict,selfData : dict, statusQueue, _, failed, 
                 for monthL in cache.get(table, {}).keys():
                     dynTables[table].extend(cache.get(table, {}).get(monthL, []))
         calculations = nodalToLinkedCalculations(calculations)
-            
+        calculations = fullPortfolioCalcs(calculations)
         statusQueue.put((node,len(newMonths),"Completed")) #push completed status update to the main thread
         return calculations, dynTables
     except Exception as e: #halt operations for failure or force close/cancel

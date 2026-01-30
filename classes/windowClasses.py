@@ -1,17 +1,17 @@
 from classes import DatabaseManager
 from classes.DatabaseManager import load_from_db
-from scripts.basicFunctions import filt2Query, separateRowCode, findSourceName
+from scripts.basicFunctions import separateRowCode, findSourceName
 from scripts.loggingFuncs import attach_logging_to_class
 from classes.widgetClasses import SortButtonWidget, MultiSelectBox, simpleMonthSelector
 from scripts.exportTableToExcel import exportTableToExcel
-from scripts.pyqtFunctions import basicHoldingsReportExport, controlTable
+from scripts.pyqtFunctions import basicHoldingsReportExport, comboInvestorOpts, controlTable, filt2Query
 from scripts.render_report import render_report
 from scripts.reportWorkbooks import portfolioSnapshot
 from openpyxl.utils import get_column_letter
 from dateutil.relativedelta import relativedelta
 from openpyxl import Workbook
 from scripts.instantiate_basics import gui_queue, executor
-from scripts.commonValues import timeOptions, percent_headers, demoMode, nonFundCols
+from scripts.commonValues import sqlPlaceholder, timeOptions, percent_headers, demoMode, nonFundCols
 import sqlite3
 import logging
 import traceback
@@ -675,39 +675,45 @@ class underlyingDataWindow(QWidget):
         hier = code.removeprefix("##(").removesuffix(")##").split("::")
         hierSelections = self.parent.sortHierarchy.checkedItems()
         if dataType == "Target name":
-            hier.append(header)
+            hier[-1] = header #sets the final hier (Target) to the actual target name
             hierSelections.append(dataType)
         self.parent.db.buildNodeLib()
         nodeLib = self.parent.db.nodeLib
         nodes = nodeLib.nodes
-        lowNodes = nodeLib.lowNodes
         if 'Node' in hierSelections: 
             #Check if needs extra node places. occurs from recursive node hierarchy
             nodeIdx = hierSelections.index('Node')
-            # We want to ensure hierSelections matches up with hier; for every extra node at the appropriate positions, insert "Node"
-            # We iterate from nodeIdx forwards over hier, checking which items represent nodes that should be declared as such in hierSelections
-            i = nodeIdx
-            delta = 0  # How many have been inserted (shifts index in hierSelections)
-            while i + delta < len(hier):
-                val = hier[i + delta]
-                if val in nodes:
-                    # Only insert if this isn't already 'Node' at this position (in case already inserted)
-                    if i + delta >= len(hierSelections) or hierSelections[i + delta] != 'Node':
-                        hierSelections.insert(i + delta, 'Node')
-                        delta += 1
-                    else:
-                        # Already correct, move on
-                        pass
-                i += 1
-            nodeIdx = hierSelections.index('Node')
-            hierSelections = [*hierSelections[:nodeIdx], *(['Node'] * (len(hier) - len(hierSelections))), *hierSelections[nodeIdx:]]
+            nodeName = hier[nodeIdx]
+            belowNodes = nodeLib.nodePaths.get(nodeName,{}).get('below',set())
+            if belowNodes:
+                belowNodes = [nodeLib.id2node[nId] for nId in belowNodes]
+                # We want to ensure hierSelections matches up with hier; for every extra node at the appropriate positions, insert "Node"
+                # We iterate from nodeIdx forwards over hier, checking which items represent nodes that should be declared as such in hierSelections
+                i = nodeIdx
+                delta = 0  # How many have been inserted (shifts index in hierSelections)
+                while i + delta < len(hier):
+                    val = hier[i + delta]
+                    if val in belowNodes:
+                        # Only insert if this isn't already 'Node' at this position (in case already inserted)
+                        if i + delta >= len(hierSelections) or hierSelections[i + delta] != 'Node':
+                            hierSelections.insert(i + delta, 'Node')
+                            delta += 1
+                        else:
+                            # Already correct, move on
+                            pass
+                    i += 1
+                nodeIdx = hierSelections.index('Node')
+                hierSelections = [*hierSelections[:nodeIdx], *(['Node'] * (len(hier) - len(hierSelections))), *hierSelections[nodeIdx:]]
         tables = {"positions": accountStart,"transactions": tranStart} if not self.db else {"transactions": tranStart}
         all_rows = []
-        if not self.db:
-            condStatement = "WHERE"
+        if not self.db: #regular, non transaction mode TODO: make a better boolean here
             fundOptionSets = []
+            nodesInPath = []
             filterDict = {}
             inputs = []
+            sourceOpts = set()
+            invSelections = self.parent.filterDict["Source name"].checkedItems()
+            famSelections = self.parent.filterDict["Family Branch"].checkedItems()
             for hierIdx, tier in enumerate(hier): #iterate through each tier down to selection
                 tierType = hierSelections[hierIdx]
                 if tier == "hiddenLayer":
@@ -717,12 +723,16 @@ class underlyingDataWindow(QWidget):
                     nodeName = tier
                     if nodeName == '': #occurs from base nodes
                         nodeName = header
-                    fundOptionSets.append(set(nodeLib.node2Funds[nodeName]))
-                    if nodeName not in (None,'None') and nodeName in lowNodes:
-                        condStatement = f'WHERE [Source name] = ?'
-                        inputs.append(nodeName)
+                    nodesInPath.append(nodeName)
+                    allTargs = set(nodeLib.node2AllTargets[nodeName])
+                    fundOptionSets.append(allTargs)
+                    nodesInPath.extend([t for t in allTargs if t in nodes]) #adds nodes that are targets of the selected node
                 elif tierType == 'Target name':
                     fundOptionSets.append(set(self.parent.cFundToFundLinks.get(tier,[tier,])))
+                elif tierType == 'Source name':
+                    sourceOpts.add(tier)
+                elif tierType == 'Family Branch':
+                    sourceOpts.update(self.parent.db.pullInvestorsFromFamilies([tier,]))
                 elif tierType not in nonFundCols:
                     filterDict[tierType] = [tier,]
             for key, cb in self.parent.filterDict.items():
@@ -733,79 +743,31 @@ class underlyingDataWindow(QWidget):
                 fundOptionSets.append(set(self.parent.db.pullFundsFromFilters(filterDict)))
             if fundOptionSets:
                 fundOpts = set.intersection(*(set(funds) for funds in fundOptionSets))
-                placeholders = ','.join('?' for _ in fundOpts)
-                if condStatement == 'WHERE':
-                    condStatement = f"WHERE [Target name] in ({placeholders}) AND [Date] BETWEEN ? AND ?"
-                else:
-                    condStatement += f' AND [Target name] in ({placeholders}) AND [Date] BETWEEN ? AND ?'
-                inputs.extend(list(fundOpts))
-            elif inputs == []:
+                if invSelections != [] or famSelections != []:
+                    invs = comboInvestorOpts(self.parent.db,invSelections,famSelections)
+                    sourceOpts.update(invs)
+                sourceOpts.update(nodesInPath)
+                targetOpts = fundOpts.union(set(nodesInPath)) #add nodes so nodes as targets can be selected
+                targetPholders = ','.join(sqlPlaceholder for _ in targetOpts)
+                condStatement = f"WHERE [Target name] in ({targetPholders})"
+                inputs.extend(list(targetOpts))
+                if sourceOpts:
+                    sourcePholders = ','.join(sqlPlaceholder for _ in sourceOpts)
+                    condStatement += f' AND [Source name] in ({sourcePholders})'
+                    inputs.extend(list(sourceOpts))
+                condStatement += ' AND [Date] BETWEEN ? AND ?'
+            else:
                 print("WARNING: No relevant funds found for the cell selected.")
-                condStatement = f"WHERE [Date] BETWEEN ? AND ?"
-            sourceNames = set()
+                return
             for table, start in tables.items():
                 try:
                     if not demoMode:
                         print(f"    Underlying data conditional (1): {condStatement} for: {(*inputs,start,allEnd)}")
-                    baseRows = load_from_db(self.parent.db,table,condStatement, tuple((*inputs,start,allEnd)))
+                    rows = load_from_db(self.parent.db,table,condStatement, tuple((*inputs,start,allEnd)))
                 except Exception as e:
                     print(f"Error in call : {e} ; {e.args}")
-                    baseRows = []
-                sourceNames.update([row['Source name'] for row in baseRows])
-                all_rows.extend(baseRows)
-            loopIdx = 0
-            nodeCrosses = set()
-            while any(src in lowNodes for src in sourceNames) and loopIdx < 10: #handle intermediate (nodal) entries/connections
-                loopIdx += 1
-                if loopIdx == 10:
-                    print('WARNING: Iterative search through lowNodes for underlying data has reached maximum iteration')
-                currentSearch = [src for src in sourceNames if src in lowNodes]
-                nodeCrosses.update(n for n in sourceNames if n in nodes)
-                sourceNames = [src for src in sourceNames if src not in currentSearch] #remove middle nodes found for next search
-                placeholders = ','.join('?' for _ in currentSearch)
-                condStatement = f'WHERE [Target name] in ({placeholders})  AND [Date] BETWEEN ? AND ?'
-                interRows = []
-                for table, start in tables.items():
-                    try:
-                        if not demoMode:
-                            print(f"    Underlying data conditional (2): {condStatement} for: {(*currentSearch,start,allEnd)}")
-                        rows = load_from_db(self.parent.db,table,condStatement, tuple((*currentSearch,start,allEnd)))
-                    except Exception as e:
-                        print(f"Error in call : {e} ; {e.args}")
-                        rows = []
-                    interRows.extend(rows)
-                sourceNames.extend([row['Source name'] for row in interRows])
-                all_rows.extend([row for row in interRows if row['Source name'] in nodes]) #tracks intermediate entries only as investors are filtered later
-            nodeCrosses = nodeCrosses | set((src for src in sourceNames if src in nodes))
-            if loopIdx > 0:
-                print(f"INFO: Completed iterative underlying data search in {loopIdx} iterations.")
-            else:
-                nodeCrosses = sourceNames
-            invSelections = self.parent.filterDict["Source name"].checkedItems()
-            famSelections = self.parent.filterDict["Family Branch"].checkedItems()
-            if invSelections != [] or famSelections != []: #handle investor level     
-                invsF = set()
-                for fam in famSelections:
-                    invsF.update(self.parent.db.pullInvestorsFromFamilies(fam))
-                invsI = set(invSelections)
-                if invSelections != [] and famSelections != []: #Union if both are selected
-                    invs = invsF and invsI
-                else: #combine if only one is valid
-                    invs = invsF or invsI
-                placeholders = ','.join('?' for _ in invs)
-                sourcePlaceHolders = ','.join('?' for _ in nodeCrosses)
-                condStatement = f'WHERE ([Source name] in ({placeholders}) AND [Target name] in ({sourcePlaceHolders}))'
-                inputs = list(invs)
-                inputs.extend(nodeCrosses)
-                for table, start in tables.items():
-                    try:
-                        if not demoMode:
-                            print(f"    Underlying data conditional (3): {condStatement} for: {(*inputs,start,allEnd)}")
-                        upperRows = load_from_db(self.parent.db,table,condStatement.removesuffix("AND") + " AND [Date] BETWEEN ? AND ?", tuple((*inputs,start,allEnd)))
-                    except Exception as e:
-                        print(f"Error in call : {e} ; {e.args}")
-                        baseRows = []
-                    all_rows.extend(upperRows)
+                    rows = []
+                all_rows.extend(rows)
         elif self.db:
             try:
                 condStatement = 'WHERE ([Source name] = ? OR [Target name] = ?)'

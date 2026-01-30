@@ -9,12 +9,12 @@ from scripts.commonValues import (currentVersion, headerSortExclusions, nameHier
                     yearOptions, percent_headers, mainURL, dynamoAPIenvName)
 from scripts.processInvestments import processInvestments
 from scripts.basicFunctions import (calc_DPI_TVPI, findSign, updateStatus, annualizeITD, submitAPIcall, get_connected_node_groups, 
-                                 descendingNavSort, accountBalanceKey, filt2Query, separateRowCode, findSourceName)
+                                 descendingNavSort, accountBalanceKey, separateRowCode, findSourceName)
 from classes.windowClasses import reportExportWindow, underlyingDataWindow, linkBenchmarksWindow, tableWindow, exportWindow, displayWindow
 from classes.tableWidgets import DictListModel, SmartStretchTable
 from TreeScripts.dash_launcher import _run_dash_app_process
 from classes.transactionApp import transactionApp
-from scripts.pyqtFunctions import basicHoldingsReportExport
+from scripts.pyqtFunctions import basicHoldingsReportExport, filt2Query
 from scripts.processClump import processClump
 from classes.nodeLibrary import nodeLibrary
 from openpyxl.utils import get_column_letter
@@ -1166,7 +1166,9 @@ class returnsApp(QWidget):
             gui_queue.put(lambda: self.dataTypeBox.setVisible(not complexMode))
             startDate = datetime.strptime(self.dataStartSelect.currentText(), "%B %Y")
             endDate = datetime.strptime(self.dataEndSelect.currentText(), "%B %Y")
-            condStatement, parameters = filt2Query(self.db, self.filterDict,startDate,endDate)
+            sortHier = self.sortHierarchy.checkedItems()
+            invSort = any(invStr in sortHier for invStr in ('Source name', 'Family Branch'))
+            condStatement, parameters = filt2Query(self.db, self.filterDict,startDate,endDate, invSort = invSort)
             self.updateTableLoading(20,  text = 'Loading from Database')
             if cancelEvent.is_set(): #exit if new table build request is made
                 return
@@ -1220,7 +1222,7 @@ class returnsApp(QWidget):
                 dt_str = e_get("dateTime","")
                 if dt_str is None:
                     print(f"Warning: data with no date in table build: {entry}")
-                    continue #can't use data with no date. Shouldn't have gotten this fay anyways
+                    continue #can't use data with no date. Shouldn't have gotten this far anyways
                 month_str = get_month(dt_str)
                 if month_str is None:
                     month_str = datetime.strftime(datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S"), "%B %Y")
@@ -1279,7 +1281,7 @@ class returnsApp(QWidget):
                             ov = e_get(option)
                             lvl_c_out[option] = float(ov if ov not in (None, "None", "") else 0) if option not in textCols else ov
                     else:
-                        print('multiple per rowkey')
+                        print(f'WARNING: multiple per rowkey. entry: {entry}')
                         for option in headerOptions_local:
                             if option not in ("Ownership", "IRR ITD"):
                                 ov = e_get(option)
@@ -1653,9 +1655,10 @@ class returnsApp(QWidget):
                     else:
                         name = option 
                     code = buildCode([*path,name])
+                    optionRowKey = name + code
                     if option != "hiddenLayer":
                         if not noHeader:
-                            struc[name + code] = {} #place table space for that level selection
+                            struc[optionRowKey] = {} #place table space for that level selection
                             if showBenchLinks:
                                 struc = applyLinkedBenchmarks(struc,code, levelName, option)
                         levelData = grouped_by_level.get(option, []) #separates out only relevant data
@@ -1675,6 +1678,7 @@ class returnsApp(QWidget):
                     target_trait_cache = {}
                     investorsAccessed = defaultdict(set)  # Use defaultdict for efficiency
                     
+                    code = buildCode([*path,name,'Target'])
                     for entry in levelData:
                         # Cache entry lookups
                         dt = entry['dateTime']
@@ -1748,7 +1752,7 @@ class returnsApp(QWidget):
                         if dt not in totalEntriesLow:
                             totalLowDt = copy.deepcopy(entryTemplate)
                             totalEntriesLow[dt] = totalLowDt
-                            totalLowDt["rowKey"] = name + code
+                            totalLowDt["rowKey"] = optionRowKey
                             totalLowDt["dateTime"] = dt
                             for label in dataOptions_local:
                                 totalLowDt[label] = targetTraitGet(label, "")
@@ -3072,7 +3076,7 @@ class returnsApp(QWidget):
 
             bg = None
             # 4) Populate each row
-            colorDepths = [code.count("::") + 1 * (row_dict['dataType'] == 'Total Target name') for _, code, row_dict,_ in row_entries]
+            colorDepths = [code.count("::") for _, code, _,_ in row_entries]
             maxDepth = max(colorDepths)
             fundsPresent = any(row_dict['dataType'] == 'Total Target name' for _, _, row_dict,_ in row_entries)
             trackIdx = 0
@@ -3109,8 +3113,6 @@ class returnsApp(QWidget):
                             for i in range(3)
                         )
                         bg = QColor(*color)
-                
-                    
 
                 # — vertical header: only show the fund, stash the code —
                 hdr = QTableWidgetItem(fund_label)

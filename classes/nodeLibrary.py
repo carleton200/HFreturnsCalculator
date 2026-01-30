@@ -1,3 +1,4 @@
+from collections import defaultdict
 from scripts.commonValues import maxRecursion
 
 
@@ -11,11 +12,11 @@ class nodeLibrary:
         self.nodePaths = self.findNodeStructure(self.sources,self.nodes,self.targets,listInput)
         self.id2node = {nodeDict['id'] : nodeDict['name'] for nodeDict in self.nodePaths.values()}
         self.node2id = {nodeDict['name'] : nodeDict['id'] for nodeDict in self.nodePaths.values()}
-        self.node2Funds = self.findNode2Funds(listInput, self.nodes)
+        self.node2AllTargets = self.findNode2AllTargets(listInput, self.nodes)
         self.lowNodes = [e['Target name'] for e in listInput if e['Target name'] in self.nodes and e['Source name'] in self.nodes] #Nodes that are targets of other nodes
  
 
-    def findNode2Funds(self,tableEntries,nodes):
+    def findNode2AllTargets(self,tableEntries,nodes):
         node2Funds = {node : set() for node in (*nodes,'None')}
         for entry in tableEntries:
             src = entry['Source name']
@@ -25,16 +26,17 @@ class nodeLibrary:
                 node2Funds['None'].add(entry['Target name'])
         searching = True
         loopIdx = 0
-        while searching and loopIdx < 10:
+        foundBelows = defaultdict(set)
+        while searching and loopIdx < maxRecursion:
             searching = False 
             loopIdx += 1
-            if loopIdx == 10:
+            if loopIdx == maxRecursion - 1:
                 print("WARNING: node2Funds build iteration reached maximum depth")
-            for node, targets in ([n,ts] for n,ts in node2Funds.items() if any(t in nodes for t in ts)): #iteratively assign any node's targets to the node's source
+            for node, targets in ([n,ts] for n,ts in node2Funds.items() if any(t in nodes and t not in foundBelows[n] for t in ts)): #iteratively assign any node's targets to the node's source
                 searching = True #turns back on if anything found to alter
                 tCopy = targets.copy()
-                for target in (t for t in tCopy if t in nodes):
-                    node2Funds[node].remove(target)
+                for target in (t for t in tCopy if t in nodes and t not in foundBelows[node]):
+                    foundBelows[node].add(target)
                     node2Funds[node].update(node2Funds[target])
         return node2Funds
     def findNodes(self,table1, table2 = None):
@@ -68,7 +70,8 @@ class nodeLibrary:
             idx += 1
             if idx == maxRecursion - 1:
                 print("Warning: node structure search has reached maximum index. Should not occur")
-        deleteKeys = [node for node in nodeStruc if len(nodeStruc[node]['below'].intersection(nodeStruc[node]['above'])) > 0]
+        #find keys for nodes with looped investment or depths past the max allowance
+        deleteKeys = [node for node in nodeStruc if len(nodeStruc[node]['below'].intersection(nodeStruc[node]['above'])) > 0  or nodeStruc[node]['lowestLevel'] > maxRecursion]
         for dKey in deleteKeys:
             print(f'WARNING: Deleting the following node for circular ownership: {dKey}')
             nodeStruc.pop(dKey)
