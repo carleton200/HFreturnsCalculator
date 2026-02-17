@@ -7,6 +7,7 @@ from PyInstaller.utils.hooks import collect_data_files, collect_all
 assets = [
     ('assets/CRSPRdata.db', 'assets'),
     ('assets/helpInfo.txt', 'assets'),
+    ('assets/images','assets/images'),
     ('calculateReturns.py','sourceCode'),
     ('calculateReturns.spec','sourceCode'),
     *[(str(f), 'sourceCode/classes') for f in Path('classes').glob('*.py')],

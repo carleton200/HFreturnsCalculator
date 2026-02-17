@@ -1,6 +1,6 @@
 from dateutil.relativedelta import relativedelta
 
-currentVersion = "1.2.5"
+currentVersion = "1.2.6"
 demoMode = True  #TRUE: exportable mode. FALSE: developer mode
 remoteDBmode = False
 ownershipCorrect = True
@@ -43,19 +43,35 @@ fullPortStr = 'Full Portfolio'
 nonFundCols = ('Source name', 'Node', nameHier["Family Branch"]["local"])
 nonAggregatingCols = ('Ownership', 'IRR ITD', 'Last Actual Date', 'Inception')
 textCols = ('Last Actual Date', 'Inception')
-nonDefaultHeaders = ["Return", "Ownership", "MDdenominator", "Monthly Gain", 'Distributions TD', 'DPI', 'TVPI', 'Inception', 'Last Actual Date']
+nonDefaultHeaders = ["Return", "Ownership", "MDdenominator", "Monthly Gain", 'DPI', 'TVPI', 'Inception', 'Last Actual Date', 'Redemptions','Distributions','Contributions']
 headerSortExclusions = ['Return']
 mainTableNames = ["positions", "transactions"]
 nodePathSplitter = " > "
-#TODO: make this database stored variable later
+#Default asset class sort orders
 assetClass1Order = ["Illiquid", "Liquid","Cash"]
 assetClass2Order = ["Direct Private Equity", "Private Equity", "Direct Real Assets", "Real Assets", "Public Equity", "Long/Short", "Absolute Return", "Fixed Income", "Cash"] 
+#Transaction Types that affect total commitment for a fund
 commitmentChangeTransactionTypes = ["Commitment", "Transfer of commitment", "Transfer of commitment (out)", "Secondary - Original commitment (by secondary seller)"]
+#part transfer transaction types to indicate when to pull the distributions/contributions to another investor
+pTransferTtypes = ('Partner transfer (in)','Partner transfer (out)')
+#lists of phrases for usage in calculations to determine if transactions apply to certain values (phrase must be in transactionType)
+contributionPhrases = ['Capital call','Contribution','Capital call']
+redemptionPhrases = ['Redemption']
+distributionPhrases = ['Distribution']
+#Dict to connect headers that are aggregates of all time to their transaction type phrases
+aggTransFields = {'Distributions': distributionPhrases,
+                    'Contributions' : contributionPhrases,
+                    'Redemptions' : redemptionPhrases,
+                    'Commitment' :  commitmentChangeTransactionTypes,
+                    'Unfunded' : [*commitmentChangeTransactionTypes,*contributionPhrases]
+                    }
+#I forgot what this does
 ignoreInvTranTypes = [""]
-headerOptions = ["Return","NAV", "Monthly Gain", "Ownership" , "MDdenominator", "Commitment", "Unfunded", "%",'Distributions TD', 'DPI', 'TVPI', 'Last Actual Date', 'Inception']
+headerOptions = ["Return","NAV", "Monthly Gain", "Ownership" , "MDdenominator", "Commitment", "Unfunded", "%",'Distributions', 'DPI', 'TVPI', 'Last Actual Date', 'Inception',"IRR ITD", 'Contributions','Redemptions']
+#investor & Node only headers. Values only relevant at directly the node level direct from investors
+invNodeOnlyHeaders = ['Contributions','Redemptions']
 fullPortAggCols = [h for h in headerOptions if h not in ('Return','%','DPI','TVPI','Last Actual Date','Inception')]
-if not demoMode:
-    headerOptions.extend(["IRR ITD", 'Contributions','Redemptions'])
+
 dataOptions = ["Investor","Family Branch","Classification", "dateTime"]
 dataOptions = ["Classification", "subClassification"]
 tranAppHeaderOptions = ["Transaction Sum"]

@@ -3,7 +3,7 @@ from dateutil.relativedelta import relativedelta
 import traceback
 import logging
 import copy
-from scripts.commonValues import nameHier, commitmentChangeTransactionTypes, mainTableNames
+from scripts.commonValues import contributionPhrases, distributionPhrases, nameHier, commitmentChangeTransactionTypes, mainTableNames
 from scripts.basicFunctions import fullPortfolioCalcs, handleFundClasses, calculateBackdate, calculate_xirr, nodalToLinkedCalculations, findSign, accountBalanceKey
 
 def processAboveBelow(newMonths,cache,node,failed,statusQueue):
@@ -16,12 +16,12 @@ def processAboveBelow(newMonths,cache,node,failed,statusQueue):
         belowCashFlow = 0
         lowTransactions = cache.get("transactions_below", {}).get(month["dateTime"], [])
         for transaction in lowTransactions: #get fund data, cash flows, and commitment alterations
-            if transaction["TransactionType"] not in commitmentChangeTransactionTypes and transaction[nameHier["CashFlow"]["dynLow"]] not in (None, "None"):
+            if transaction.get(nameHier["CashFlow"]["dynLow"]) not in (None, "None",0):
                 belowCashFlow -= float(transaction[nameHier["CashFlow"]["dynLow"]])
         aboveCashFlow = 0
         transactionsAbove = cache.get("transactions_above", {}).get(month["dateTime"], []) #all cashflow and commitment based transactions for investors into the pool for the month
         for tran in transactionsAbove:
-            if tran["TransactionType"] not in commitmentChangeTransactionTypes and tran[nameHier["CashFlow"]["dynHigh"]] not in (None, "None"):
+            if tran.get(nameHier["CashFlow"]["dynHigh"]) not in (None, "None",0):
                 aboveCashFlow -= float(tran[nameHier["CashFlow"]["dynHigh"]])
         difference = round(belowCashFlow - aboveCashFlow,2) * -1
         if difference != 0:
@@ -34,13 +34,14 @@ def processAboveBelow(newMonths,cache,node,failed,statusQueue):
     statusQueue.put((node,len(newMonths),"Completed")) #push completed status update to the main thread
     return calculations
 
-def processOneLevelInvestments(month, node, invSourceName, newMonths, cache, positions,transactions, IRRtrack):
+def processOneLevelInvestments(month, node, invSourceName, newMonths, cache, positions,transactions, IRRtrack, tranEffects):
     #function to handle the target level investment data. Pass only data from one source name (node or investor)
     investments = set()
     startEntries = {}
     endEntries = {}
     monthFundIRRtrack = {}
     calculationExtend = []
+    commitChangeTtypes = tranEffects.get('Commitment',[])
     posTableName = 'positions_below' if node == invSourceName else 'positions' #node vs non-nodal data
     tranTableName = 'transactions_below' if node == invSourceName else 'transactions' #node vs non-nodal data
     totalDays = int(datetime.strptime(month["endDay"], "%Y-%m-%dT%H:%M:%S").day  - datetime.strptime(month["tranStart"], "%Y-%m-%dT%H:%M:%S").day) + 1 #total days in month for MD den
@@ -72,25 +73,24 @@ def processOneLevelInvestments(month, node, invSourceName, newMonths, cache, pos
     nodeCashFlow = 0
     fundEntryList = []
     for investment in investments: #iterate through all funds to find the node NAV and MD den
+        if investment in (None,'None'):
+            continue
         startEntry = copy.deepcopy(startEntries.get(investment, []))
         endEntry = copy.deepcopy(endEntries.get(investment, []))
         createFinalValue = False
         noStartValue = False
-        distributionsM = 0
         if len(startEntry) < 1: #no start value, so NAV = 0
             startEntry = [{nameHier["Value"]["dynLow"] : 0.0}]  #nameHier is a dictionary for common references to specific names. 
             noStartValue = True
             commitment = 0
             unfunded = 0
-            distributionsTD = 0.0
+            distributions = 0.0
             contributions = 0.0
-            redemptions = 0.0
         else: #instantiate starting data
             commitment = float(startEntry[0].get(nameHier["Commitment"]["local"],0.0))
             unfunded = float(startEntry[0].get(nameHier["Unfunded"]["local"],0.0))
-            distributionsTD = float(startEntry[0].get('Distributions TD',0.0))
+            distributions = float(startEntry[0].get('Distributions',0.0))
             contributions = float(startEntry[0].get('Contributions',0.0))
-            redemptions = float(startEntry[0].get('Redemptions',0.0))
         if len(startEntry) > 1: #combines the values for fund sub classes for calculations
             startEntry = handleFundClasses(startEntry)
         if len(endEntry) < 1: #no end account balance yet, so create it.  
@@ -114,7 +114,8 @@ def processOneLevelInvestments(month, node, invSourceName, newMonths, cache, pos
         else:
             dayCalcDenominator = totalDays
         for transaction in targetTransactions: #get fund data, cash flows, and commitment alterations
-            if transaction["TransactionType"] not in commitmentChangeTransactionTypes and transaction[nameHier["CashFlow"]["dynLow"]] not in (None, "None"):
+            tType = transaction["TransactionType"]
+            if tType not in commitChangeTtypes and transaction[nameHier["CashFlow"]["dynLow"]] not in (None, "None"):
                 cashflow = float(transaction[nameHier["CashFlow"]["dynLow"]])
                 invCashFlowSum -= cashflow
                 backDate = calculateBackdate(transaction, noStartValue) #Uses dynamo transaction time logic to decide to subtract one day or not
@@ -123,13 +124,10 @@ def processOneLevelInvestments(month, node, invSourceName, newMonths, cache, pos
                     unfunded += float(transaction[nameHier["Unfunded"]["value"]])
                 if investment not in IRRtrack:
                     IRRtrack[investment] = {"cashFlows" : [], "dates" : []}
-                if 'Distribution' in transaction['TransactionType']:
-                    distributionsM += cashflow
-                if transaction.get('HFCashFlowType','') not in (None,'None') and 'overall' in transaction.get('HFCashFlowType','').lower():
-                    if cashflow > 0:
-                        redemptions += cashflow
-                    else:
-                        contributions -= cashflow
+                if tType in tranEffects.get('Contributions',[]):
+                    contributions -= cashflow
+                elif tType in tranEffects.get('Distributions',[]):
+                    distributions += cashflow
                 IRRtrack[investment]["cashFlows"].append(cashflow)
                 IRRtrack[investment]["dates"].append(datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S") - relativedelta(days=backDate))
                 if investment not in monthFundIRRtrack:
@@ -144,7 +142,7 @@ def processOneLevelInvestments(month, node, invSourceName, newMonths, cache, pos
                                     date = datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S") - relativedelta(days=backDate) #datetime and subtract a day
                                     date = datetime.strftime(date, "%Y-%m-%dT%H:%M:%S")  #revert to string
                                     lst['Calculation Date'] = date #add calculation date to transaction in cache
-            elif transaction["TransactionType"] in commitmentChangeTransactionTypes:
+            elif transaction["TransactionType"] in commitChangeTtypes:
                 com = transaction.get(nameHier["Commitment"]["dynLow"],0.0)
                 com = float(com)
                 commitment += com
@@ -169,11 +167,9 @@ def processOneLevelInvestments(month, node, invSourceName, newMonths, cache, pos
                 unfunded = 0 #corrects for if original commitment was not logged properly
             if createFinalValue: #builds an entry to put into the database and cache if it is missing
                 fundEOMentry = {"Date" : month["endDay"], "Source name" : invSourceName, "Target name" : investment , nameHier["Value"]["dynLow"] : endEntry[nameHier["Value"]["dynLow"]],
-                                    "Balancetype" : "Calculated_R", nameHier["Commitment"]["local"] : commitment, nameHier["Unfunded"]["local"] : unfunded, #'Contributions' : contributions,
-                                    #'Redemptions' : redemptions
+                                    "Balancetype" : "Calculated_R", nameHier["Commitment"]["local"] : commitment, nameHier["Unfunded"]["local"] : unfunded, 'Contributions' : contributions,
+                                    'Distributions' : distributions
                                     }
-                if distributionsM != 0:
-                    fundEOMentry['Monthly Distributions'] = distributionsM
                 # update cache for subsequent months
                 for m in newMonths:
                     if m["accountStart"] <= month["endDay"] <= m["endDay"]:
@@ -186,11 +182,8 @@ def processOneLevelInvestments(month, node, invSourceName, newMonths, cache, pos
                             if lst["Target name"] == investment and lst["Date"] == month["endDay"]:
                                 lst[nameHier["Commitment"]["local"]] = commitment
                                 lst[nameHier["Unfunded"]["local"]] = unfunded
-                                if distributionsM != 0:
-                                    lst['Monthly Distributions'] = distributionsM
-                                #lst['Contributions'] = contributions
-                                #lst['Redemptions'] = redemptions
-            distributionsTD += distributionsM
+                                lst['Contributions'] = contributions
+                                lst['Distributions'] = distributions
             #sum each fund value into the pool totals
             nodeGain += invGain
             nodeMDdenominator += invMDdenominator
@@ -204,15 +197,10 @@ def processOneLevelInvestments(month, node, invSourceName, newMonths, cache, pos
                             nameHier["Commitment"]["local"] : commitment,
                             nameHier["Unfunded"]["local"] : unfunded,
                             'Contributions' : contributions,
-                            'Redemptions' : redemptions
+                            'Distributions' : distributions
                             }
-            if distributionsTD != 0:
-                monthInvCalc['Distributions TD'] = distributionsTD
-            if distributionsM != 0:
-                monthInvCalc['Monthly Distributions'] = distributionsM
-            if investment not in (None,"None"): #removing blank funds (found duplicate of Monogram in 'HF Direct Investments Pool, LLC - PE (2021)' with most None values)
-                calculationExtend.append(monthInvCalc) #append to calculations for use in report generation and aggregation
-                fundEntryList.append(monthInvCalc) #fund data stored on its own for investor calculations
+            calculationExtend.append(monthInvCalc) #append to calculations for use in report generation and aggregation
+            fundEntryList.append(monthInvCalc) #fund data stored on its own for investor calculations
 
         except Exception as e:
             print(f"Skipped fund {investment} for {invSourceName} in {month["Month"]} because: {traceback.format_exc()}")
@@ -237,6 +225,7 @@ def processInvestments(nodeData : dict,selfData : dict, statusQueue, _, failed, 
     try:
         months = selfData.get("months") #list of pre-prepared data for each month
         fundList = selfData.get("fundList") #list of funds/investments and some accompanying data (such as asset class level 3)
+        tranEffects = selfData.get('tranEffects',{})
         calculations = []
         node = nodeData.get('name')
         cache = nodeData.get("cache") #dataset of all relevant transactions and account balances for the pool
@@ -261,7 +250,7 @@ def processInvestments(nodeData : dict,selfData : dict, statusQueue, _, failed, 
                 #Divice the data by source name (investor) for the investment calc function
                 invPositions = [pos for pos in allPositions if pos['Source name'] == sourceName]
                 invTransactions = [tran for tran in allTransactions if tran['Source name'] == sourceName]
-                calculationExtend, cache, _ = processOneLevelInvestments(month,node,sourceName,newMonths,cache,invPositions,invTransactions,IRRtrack)
+                calculationExtend, cache, _ = processOneLevelInvestments(month,node,sourceName,newMonths,cache,invPositions,invTransactions,IRRtrack,tranEffects)
                 calculations.extend(calculationExtend)
             #end of months loop
         #commands to add database updates to the queues

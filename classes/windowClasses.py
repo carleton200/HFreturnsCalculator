@@ -11,7 +11,7 @@ from openpyxl.utils import get_column_letter
 from dateutil.relativedelta import relativedelta
 from openpyxl import Workbook
 from scripts.instantiate_basics import gui_queue, executor
-from scripts.commonValues import sqlPlaceholder, timeOptions, percent_headers, demoMode, nonFundCols
+from scripts.commonValues import aggTransFields, sqlPlaceholder, timeOptions, percent_headers, demoMode, nonFundCols
 import sqlite3
 import logging
 import traceback
@@ -639,6 +639,7 @@ class underlyingDataWindow(QWidget):
         executor.submit(processExport)    
     def buildTable(self):
         monthTableBool = self.parent.tableBtnGroup.checkedButton().text()  == "Monthly Table"
+        tranEffects = self.parent.db.pullTranEffects()
         if monthTableBool:
             selectedMonth = datetime.strptime(self.parent.selectedCell["month"], "%B %Y")
             tranStart = selectedMonth.replace(day = 1)
@@ -648,10 +649,10 @@ class underlyingDataWindow(QWidget):
             endTime = datetime.strptime(self.parent.dataEndSelect.currentText(),"%B %Y")
             allEnd = (endTime.replace(day = 1) + relativedelta(months=1)) - relativedelta(days=1)
             selection = self.parent.selectedCell["month"]
-            if selection not in (*timeOptions, 'Distributions TD', 'TVPI','DPI') or selection == "MTD": #MTD timeframe
+            if selection not in (*timeOptions, *list(tranEffects.keys()), 'TVPI','DPI') or selection == "MTD": #MTD timeframe
                 tranStart = endTime.replace(day = 1)
                 accountStart = tranStart - relativedelta(days= 1)
-            elif selection in ("ITD","IRR ITD",'Distributions TD', 'TVPI','DPI'):
+            elif selection in ("ITD","IRR ITD",*list(tranEffects.keys()), 'TVPI','DPI'):
                 tranStart = self.parent.dataTimeStart
                 accountStart = self.parent.dataTimeStart
             else:
@@ -776,8 +777,9 @@ class underlyingDataWindow(QWidget):
             except Exception as e:
                 print(f"Error in call : {e} ; {e.args}")
                 all_rows = []
-        if not monthTableBool and selection == 'Distributions TD':
-            all_rows = [r for r in all_rows if 'Distribution' in r.get('TransactionType','')]
+        if not monthTableBool and selection in list(tranEffects.keys()):
+            tTypes = tranEffects[selection]
+            all_rows = [r for r in all_rows if r.get('TransactionType','') in tTypes]
         self.allData = all_rows
 
         if self.db:

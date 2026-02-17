@@ -6,7 +6,7 @@ import traceback
 import copy
 
 from dateutil.relativedelta import relativedelta
-from scripts.commonValues import nameHier, balanceTypePriority, mainTableNames, ownershipCorrect, ownershipFlagTolerance
+from scripts.commonValues import contributionPhrases, nameHier, balanceTypePriority, mainTableNames, ownershipCorrect, ownershipFlagTolerance, pTransferTtypes, redemptionPhrases
 from scripts.basicFunctions import calculateBackdate, calculate_xirr, accountBalanceKey, findSign
 from scripts.processInvestments import processAboveBelow, processOneLevelInvestments
 
@@ -22,6 +22,7 @@ def processNode(nodeData : dict,selfData : dict, statusQueue, _, failed, transac
         noCalculations = selfData.get("noCalculations") #boolean of whether or not previous calculations exist to pull from
         months = selfData.get("months") #list of pre-prepared data for each month
         fundList = selfData.get("fundList") #list of funds/investments and some accompanying data (such as asset class level 3)
+        tranEffects = selfData.get('tranEffects',{})
         calculationDict = {}
         earliestChangeDate = nodeData.get("earliestChangeDate") #earliest date for new data from last API pull
         node = nodeData.get('name')
@@ -43,8 +44,7 @@ def processNode(nodeData : dict,selfData : dict, statusQueue, _, failed, transac
         else:
             newMonths = months #check all months if there are no previous calculations
         IRRtrack = {} #dict of each fund's cash flows and dates for IRR calculation
-        IRRsourceTrack = {} #dict of each investor's cash flows and dates for IRR calculation
-        distSourceTrack = defaultdict(dict) #dict of each investor's distributions to date (defaults to 0.0)
+        redeSourceTrack = defaultdict(dict) #dict of each investor's distributions to date (defaults to 0.0)
         if transactionCalc: #run transaction app calculations
             return processAboveBelow(newMonths,cache,node,failed,statusQueue)
         for month in newMonths: #loops through every month relevant to the pool
@@ -56,7 +56,7 @@ def processNode(nodeData : dict,selfData : dict, statusQueue, _, failed, transac
             totalDays = int(datetime.strptime(month["endDay"], "%Y-%m-%dT%H:%M:%S").day  - datetime.strptime(month["tranStart"], "%Y-%m-%dT%H:%M:%S").day) + 1 #total days in month for MD den
             positionsBelow = cache.get("positions_below", {}).get(month["dateTime"], []) #account balances for the pool
             transactionsBelow = cache.get("transactions_below", {}).get(month["dateTime"], []) #account balances for the pool
-            _ , cache,aboveData = processOneLevelInvestments(month,node,node,newMonths,cache,positionsBelow,transactionsBelow,IRRtrack)
+            _ , cache,aboveData = processOneLevelInvestments(month,node,node,newMonths,cache,positionsBelow,transactionsBelow,IRRtrack,tranEffects)
             #calculationDict.setdefault(month['dateTime'],[]).extend(calculationExtend)
             if aboveData['skip']:
                 pass #allows exited nodes to continue as zeros
@@ -92,10 +92,15 @@ def processNode(nodeData : dict,selfData : dict, statusQueue, _, failed, transac
 
             aboveMDdenominatorSum = 0
             tempAboveDicts = {}
+            pTransferDict = defaultdict(list)
+            pTransfers = cache.get("pTransfers", {}).get(month["dateTime"], [])
+            for pT in pTransfers:
+                source = pT.get('TransferFromInvestingEntity','')
+                pTransferDict[source].append(pT)
             nodeOwnershipSum = 0
-            for source in set(aboveStartEntries.keys()) | set(aboveEndEntries.keys()) | set(aboveTransactionDict.keys() | set(distSourceTrack.keys())): 
+            for source in set(aboveStartEntries.keys()) | set(aboveEndEntries.keys()) | set(aboveTransactionDict.keys() | set(redeSourceTrack.keys())): 
                 #iterate through each investor in the pool for the month
-                #pool level loop for investors
+                #node level loop for investors
                 sourceWeightedCashFlow = 0
                 sourceCashFlow = 0
                 tempAboveDict = {}
@@ -127,13 +132,16 @@ def processNode(nodeData : dict,selfData : dict, statusQueue, _, failed, transac
                 if startEntry.get(nameHier["Value"]["dynHigh"]) in (None,"None"):
                     startEntry[nameHier["Value"]["dynHigh"]] = 0 #prevent float conversion errors
                 investorTransactions = aboveTransactionDict.get(source,[]) #all investor transactions in the pool for the month
-                
+                redemptions = startEntry.get('Redemptions',0.0)
+                contributions = startEntry.get('Contributions',0.0)
                 for transaction in investorTransactions: 
-                    if transaction.get(nameHier["CashFlow"]["dynHigh"]) not in (None,"None"):
-                        sourceCashFlow -= float(transaction[nameHier["CashFlow"]["dynHigh"]])
+                    cashFlow = transaction.get(nameHier["CashFlow"]["dynHigh"])
+                    if  cashFlow not in (None,"None"):
+                        cashFlow = float(cashFlow)
+                        sourceCashFlow -= cashFlow
                         backDate = calculateBackdate(transaction, noStartValue=noStartValue) #dynamo revert by a day logic
                         backDate = 0
-                        sourceWeightedCashFlow -= float(transaction[nameHier["CashFlow"]["dynHigh"]])  *  (totalDays -int(datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S").day) + backDate)/totalDays
+                        sourceWeightedCashFlow -= cashFlow  *  (totalDays -int(datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S").day) + backDate)/totalDays
                         if backDate:
                             for m in newMonths:
                                 if m["tranStart"] <= month["endDay"] <= m["endDay"]:
@@ -142,21 +150,23 @@ def processNode(nodeData : dict,selfData : dict, statusQueue, _, failed, transac
                                             date = datetime.strptime(transaction["Date"], "%Y-%m-%dT%H:%M:%S") - relativedelta(days=backDate) #datetime and subtract a day
                                             date = datetime.strftime(date, "%Y-%m-%dT%H:%M:%S")  #revert to string
                                             lst['Calculation Date'] = date #add calculation date to transaction in cache
+                        tType = transaction.get('TransactionType','')  
+                        if transaction.get('HFCashFlowType','') not in (None,'None') and 'overall' in transaction.get('HFCashFlowType','').lower():
+                            if tType in tranEffects.get('Redemptions',[]):
+                                redemptions += cashFlow
+                            elif tType in tranEffects.get('Contributions',[]):
+                                contributions -= cashFlow
                 sourceMDdenominator = float(startEntry[nameHier["Value"]["dynHigh"]]) + sourceWeightedCashFlow
                 tempAboveDict["MDden"] = sourceMDdenominator
                 tempAboveDict["cashFlow"] = sourceCashFlow
                 tempAboveDict["startVal"] = float(startEntry[nameHier["Value"]["dynHigh"]])
-                if tempAboveDict["startVal"] == 0 and sourceCashFlow == 0:
-                    pass #allow exited investor values to persist
-                    #continue #ignore investors with no value
+                tempAboveDict['Contributions'] = contributions
+                tempAboveDict['Redemptions'] = redemptions
                 sEOM = aboveEndEntries.get(source,[])
                 if len(sEOM) > 0:
                     if sEOM[0].get(nameHier["Value"]["dynHigh"]) in (None,"None"):
                         sEOM[0][nameHier["Value"]["dynHigh"]] = 0
-                if round(tempAboveDict.get("startVal") + tempAboveDict.get("cashFlow")) != 0 and len(sEOM) > 0 and round(float(sEOM[0].get(nameHier["Value"]["dynHigh"],0))) != 0:
-                    #only accounts for investor gain (MD den) if they have not exited
-                    #exit check: starting value + cashflow is zero OR there is no ending value
-                    aboveMDdenominatorSum += sourceMDdenominator
+                aboveMDdenominatorSum += sourceMDdenominator
                 tempAboveDicts[source] = tempAboveDict #store source calculations for secondary iteration for target level data
             monthNodeSourceEntryList = [] #stores investor data for third iteration (not needed to be split, but remnant from old logic.)
             for source in tempAboveDicts.keys():
@@ -177,10 +187,12 @@ def processNode(nodeData : dict,selfData : dict, statusQueue, _, failed, transac
                 if round(tempAboveDicts[source]["startVal"] + tempAboveDicts[source]["cashFlow"]) == 0 or len(EOMcheck) == 0 or round(float(EOMcheck[0].get(nameHier["Value"]["dynHigh"],0))) == 0: 
                     #zero values if exited source
                     #exit check: start value and cashflow sums to zero OR no end value OR end value is zero
-                    sourceEOM = 0
-                    sourceGain = 0
-                    sourceMDdenominator = 0
-                    sourceReturn = 0
+                    sourceEOM = tempAboveDicts[source]["startVal"] + tempAboveDicts[source]["cashFlow"] + sourceGain
+                    if False: #this code is to remove values from exited investors. The NAV EOM zeroing out may still be beneficial for small scale errors
+                        sourceEOM = 0
+                        sourceGain = 0
+                        sourceMDdenominator = 0
+                        sourceReturn = 0
                 else:
                     sourceEOM = tempAboveDicts[source]["startVal"] + tempAboveDicts[source]["cashFlow"] + sourceGain
                 monthNodeSourceEntry = copy.deepcopy(monthNodeCalc) #uses node data as template
@@ -191,28 +203,73 @@ def processNode(nodeData : dict,selfData : dict, statusQueue, _, failed, transac
                 monthNodeSourceEntry["MDdenominator"] = sourceMDdenominator
                 ownershipPerc = sourceEOM/nodeNAV * 100 if nodeNAV != 0 else 0
                 monthNodeSourceEntry["Ownership"] = ownershipPerc
+                for key in ('Redemptions','Contributions', 'startVal'):
+                    monthNodeSourceEntry[key] = tempAboveDicts[source][key]
                 nodeOwnershipSum += ownershipPerc
                 monthNodeSourceEntryList.append([monthNodeSourceEntry, EOMcheck])
             adjustedOwnershipBool = abs(nodeOwnershipSum - 100) > ownershipFlagTolerance and ownershipCorrect #boolean for if ownership is adjusted. Tolerance for thousandth of a percent off
             fundEntryList = aboveData['fundEntryList']
+            for idx, sourceEntry, _ in ([idx,*mnE] for idx, mnE in enumerate(monthNodeSourceEntryList) if mnE[0]['Source name'] in pTransferDict):
+                #iterate through any sources w/ partner transfers to allocate their Redemptions and contributions
+                source = sourceEntry['Source name']
+                for pT in pTransferDict[source]:
+                    if pT.get('Amountinsystemcurrency') not in (None,'None'):
+                        date = pT['Date']
+                        if date == month['tranStart']:
+                            alloDec = float(pT.get('Amountinsystemcurrency')) / sourceEntry['startVal'] if sourceEntry['startVal'] != 0 else 0
+                        elif date == month['endDay']:
+                            alloDec = float(pT.get('Amountinsystemcurrency')) / sourceEntry['NAV'] if sourceEntry['NAV'] != 0 else 0
+                        else:
+                            print(f'WARNING: Partner transfer date not at BOM or EOM')
+                            continue
+                    elif pT.get('Percent') not in (None,'None'): 
+                        alloDec = float(pT.get('Percent'))
+                    else:
+                        print(f'WARNING: Partner transfer passed with no value')
+                        continue #Failed
+                    amounts = {}
+                    for h in ('Redemptions','Contributions'):
+                        val = monthNodeSourceEntryList[idx][0].get(h)
+                        if val not in (None,'None'):
+                            amounts[h] = alloDec * val
+                            monthNodeSourceEntryList[idx][0][h] -= alloDec * val
+                    recievingPs = pT.get('Transferto').split(';')
+                    if not amounts or len(recievingPs) == 0:
+                        print('WARNING: No amounts found or no target partners')
+                        continue
+                    else:
+                        amounts = {k : v/len(recievingPs) for k,v in amounts.items()} #evenly divide to partners
+                    for p in recievingPs:
+                        p = p.strip()
+                        for idx, sourceEntry, _ in ([idx,*mnE] for idx, mnE in enumerate(monthNodeSourceEntryList) if mnE[0]['Source name'] == p):
+                            for h in amounts.keys():
+                                if h not in monthNodeSourceEntryList[idx][0]:
+                                    monthNodeSourceEntryList[idx][0][h] = 0.0
+                                monthNodeSourceEntryList[idx][0][h] += amounts[h]
             for sourceEntry, EOMcheck in monthNodeSourceEntryList:
                 source = sourceEntry["Source name"]
                 sourceEOM = sourceEntry["NAV"]
                 sourceOwnership = sourceEntry["Ownership"] * 100 /  nodeOwnershipSum if nodeOwnershipSum != 0 and ownershipCorrect else sourceEntry["Ownership"]
                 if len(EOMcheck) > 0:
                     #update cache for the following month's calculations
-                    if round(float(EOMcheck[0].get(nameHier["Value"]["dynHigh"],0))) != round(sourceEOM): #don't push an update if the values are the same
+                    if any(round(float(EOMcheck[0].get(header,0))) != round(val) for header, val  in ([nameHier["Value"]["dynHigh"],sourceEOM],['Redemptions',sourceEntry['Redemptions']],['Contributions',sourceEntry['Contributions']])): #don't push an update if the values are the same
+                        bTypeChange = round(float(EOMcheck[0].get(nameHier["Value"]["dynHigh"],0))) != round(sourceEOM)
                         for m in newMonths:
                             if m["accountStart"] <= month["endDay"] <= m["endDay"]: #access the both the current month and next month
                                 for lst in cache.get("positions_above", {}).get(m["dateTime"], []):
                                     if lst["Source name"] == source and lst["Target name"] == node and lst["Date"] == month["endDay"]:
                                         #access the EOM current month and BOM next month as endDay hits both of those
                                         lst[nameHier["Value"]["dynHigh"]] = sourceEOM #this does not represent adjusted values
-                                        lst["Balancetype"] = "Calculated_R"
+                                        if bTypeChange:
+                                            lst["Balancetype"] = "Calculated_R"
+                                        for key in ('Redemptions','Contributions'):
+                                            lst[key] = sourceEntry[key]
                 elif len(EOMcheck) == 0: #continue a zero for exited fund calculations
                     sourceEOMentry = {"Date" : month["endDay"], "Source name" : source, "Target name" : node , nameHier["Value"]["dynLow"] : sourceEOM,
                                         "Balancetype" : "Calculated_R"
                                         }
+                    for key in ('Redemptions','Contributions'):
+                        sourceEOMentry[key] = sourceEntry[key]
                     # update cache for subsequent months
                     for m in newMonths:
                         if m["accountStart"] <= month["endDay"] <= m["endDay"]:
@@ -221,8 +278,11 @@ def processNode(nodeData : dict,selfData : dict, statusQueue, _, failed, transac
                 #final (3rd) investor level iteration to use the pool level results for the investor to calculate the fund level information
                 srcOwnDec = sourceOwnership / 100
                 srcMDdenDec = sourceEntry["MDdenominator"] / aboveMDdenominatorSum if aboveMDdenominatorSum != 0 else 0
+                targetDecSum = 0
                 for targetEntry in fundEntryList:
                     targetNAV = targetEntry["NAV"]
+                    targetDec = targetNAV / nodeNAV if nodeNAV != 0 else 0
+                    targetDecSum += targetDec
                     target = targetEntry["Target name"]
                     targetSourceNAV = srcOwnDec * targetNAV
                     targetSourceGain = srcMDdenDec * targetEntry["Monthly Gain"]
@@ -230,40 +290,20 @@ def processNode(nodeData : dict,selfData : dict, statusQueue, _, failed, transac
                     targetSourceReturn = abs(targetSourceGain / targetSourceMDdenominator) * findSign(targetSourceGain) if targetSourceMDdenominator != 0 else 0
                     targetSourceOwnership = targetSourceNAV /  targetNAV if targetNAV != 0 else 0
                     #account for commitment calculations on closed funds
-                    tempFundOwnership = targetSourceOwnership if targetSourceOwnership != 0 else sourceOwnership / 100
+                    tempFundOwnership = targetSourceOwnership if targetSourceOwnership != 0 else srcOwnDec
                     targetSourceCommitment = targetEntry[nameHier["Commitment"]["local"]] * tempFundOwnership 
                     targetSourceUnfunded = targetEntry[nameHier["Unfunded"]["local"]] * tempFundOwnership
-                    tsDistM = targetEntry.get('Distributions TD',0) * srcMDdenDec #allocate distributions by MDden for the month
-                    if srcMDdenDec != 0: 
-                        #only run IRR data if there is investor value
-                        if source not in IRRsourceTrack:
-                            IRRsourceTrack[source] = {}
-                        if target not in IRRsourceTrack[source]:
-                            IRRsourceTrack[source][target] = {"cashFlows" : [], "dates" : []}
-                        cashflows = monthFundIRRtrack.get(target, {}).get("cashFlows", [])
-                        dates = monthFundIRRtrack.get(target, {}).get("dates", [])
-                        for cashflow, date in zip(cashflows, dates):
-                            adjustedCashflow = cashflow * srcMDdenDec #ratio the cashflow to their MDdenominator
-                            IRRsourceTrack[source][target]["cashFlows"].append(adjustedCashflow)
-                            IRRsourceTrack[source][target]["dates"].append(date)
-                    if source in IRRsourceTrack and target in IRRsourceTrack[sourceEntry["Source name"]]:
-                        eom =  datetime.strptime(month["endDay"], "%Y-%m-%dT%H:%M:%S")
-                        targetSourceIRR = calculate_xirr([*IRRsourceTrack[source][target]["cashFlows"], targetSourceNAV], [*IRRsourceTrack[source][target]["dates"],eom])
-                    else:
-                        targetSourceIRR = None
                     monthTargetSourceEntry = {"dateTime" : month["dateTime"], "Source name" : sourceEntry["Source name"], "Node" : node, "Target name" : target ,
                                     "NAV" : targetSourceNAV, "Monthly Gain" : targetSourceGain , "Return" :  targetSourceReturn * 100, 
                                     "MDdenominator" : targetSourceMDdenominator, "Ownership" : targetSourceOwnership * 100,
                                     nameHier["Commitment"]["local"] : targetSourceCommitment, nameHier["Unfunded"]["local"] : targetSourceUnfunded, 
-                                    "IRR ITD" : targetSourceIRR,
-                                    "ownershipAdjust" : xor(adjustedOwnershipBool, targetNAV == 0) and targetNAV != 0} #only ownership adjusted if there is value in the fund (may be investors with no value)
-                    if tsDistM != 0:
-                        if target not in distSourceTrack[source]:
-                            distSourceTrack[source][target] = 0.0
-                        distSourceTrack[source][target] += tsDistM
-                    distTD = distSourceTrack[source].get(target,0.0)
-                    if distTD != 0:
-                        monthTargetSourceEntry['Distributions TD'] = distTD
+                                    "IRR ITD" : targetEntry['IRR ITD'],
+                                    "ownershipAdjust" : xor(adjustedOwnershipBool, targetNAV == 0) and targetNAV != 0,
+                                    'fDist' : targetEntry.get('Distributions',0.0),
+                                    'fCont' : targetEntry.get('Contributions',0.0),
+                                            }
+                    for key in ('Redemptions','Contributions'):
+                        monthTargetSourceEntry[key] = sourceEntry[key] * targetDec
                     calculationDict.setdefault(month['dateTime'],[]).append(monthTargetSourceEntry) #add fund level data to calculations for use in aggregation and report generation
             #end of months loop
         #commands to add database updates to the queues
@@ -295,4 +335,4 @@ def processNode(nodeData : dict,selfData : dict, statusQueue, _, failed, transac
             pass
         logging.error(e)
         print("\n")
-        return [], {}
+        return {}, {}

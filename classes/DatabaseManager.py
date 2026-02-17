@@ -146,8 +146,7 @@ class DatabaseManager:
                     ("[IRR ITD]", "REAL"),
                     ("ownershipAdjust", "BOOL"),
                     ('nodePath', 'TEXT'),
-                    ('[Distributions TD]','REAL'),
-                    ('[Monthly Distributions]','REAL'),
+                    ('Distributions','REAL'),
                     ('Contributions', 'REAL'),
                     ('Redemptions','REAL')
                 ],
@@ -160,9 +159,10 @@ class DatabaseManager:
                 [
                     ("grouping", "TEXT"),
                     ("id", "TEXT"),
+                    ('idx','INTEGER'),
                     ("value", "TEXT"),
                 ],
-                primary_keys=["grouping", "id"]
+                primary_keys=["grouping", "id",'idx']
             )
             # benchmarkLinks
             self.create_table_if_not_exists(
@@ -220,7 +220,20 @@ class DatabaseManager:
                 cursor.execute(f"SELECT * FROM options WHERE grouping = {sqlPlaceholder}", (grouping,))
                 headers = [d[0] for d in cursor.description]
                 options = [dict(zip(headers, row)) for row in cursor.fetchall()]
-                self.options[grouping] = {row["id"] : row["value"] for row in options}
+                def optSort(x:dict):
+                    val = x.get('idx',0)
+                    return val if val is not None else 0
+                sOptions = sorted(options, key = lambda x: optSort(x)) #sort by index value (releveant for ordered items)
+                optStruc = {}
+                for opt in sOptions: #build into lists 
+                    if opt['id'] not in optStruc:
+                        optStruc[opt['id']] = [opt['value'],]
+                    else:
+                        optStruc[opt['id']].append(opt['value'])
+                for opt in optStruc: #turn back into an item for non-list types
+                    if len(optStruc[opt]) == 1:
+                        optStruc[opt] = optStruc[opt][0]
+                self.options[grouping] = {k : v for k,v in optStruc.items()}
                 cursor.close()
         return self.options[grouping]
     def fetchACorder(self,lvl : int):
@@ -242,23 +255,39 @@ class DatabaseManager:
         self.options["asset3Visibility"] = {vis : "hide" for vis in visibility}
         logging.info(f"Saved asset3Visibility: {visibility}")
         print(f"Saved asset3Visibility: {visibility}")
-    def saveNewOptions(self, group: str, newOpts : list[dict]):
+    def saveNewOptions(self, group: str, newOpts : list[dict], multiIdx = False, delete = True):
         with self._lock:
             cursor = self.get_cursor()
-            cursor.execute(f"DELETE FROM options WHERE grouping = {sqlPlaceholder}", (group,))
-            for opt in newOpts:
-                cursor.execute(f"INSERT INTO options (grouping, id, value) VALUES ({sqlPlaceholder}, {sqlPlaceholder}, {sqlPlaceholder})", (group, opt['id'], opt['value']))
+            if delete:
+                cursor.execute(f"DELETE FROM options WHERE grouping = {sqlPlaceholder}", (group,))
+            if not multiIdx:
+                for opt in newOpts:
+                    cursor.execute(f"INSERT INTO options (grouping, id, value) VALUES ({sqlPlaceholder}, {sqlPlaceholder}, {sqlPlaceholder})", (group, opt['id'], opt['value']))
+            else:
+                for opt in newOpts:
+                    cursor.execute(f"INSERT INTO options (grouping, id, value, idx) VALUES ({sqlPlaceholder}, {sqlPlaceholder}, {sqlPlaceholder}, {sqlPlaceholder})", (group, opt['id'], opt['value'], opt['idx']))
             self._conn.commit()
             cursor.close()
-        self.options[group] = {opt['id'] : opt['value'] for opt in newOpts}
+        if delete:
+            self.options[group] = {opt['id'] : opt['value'] for opt in newOpts}
+        else:
+            self.fetchOptions(group, update=True)
         msg = f"Saved option {group}: {newOpts}"
         logging.info(msg)
         print(msg)
+    def removeOption(self,group,id):
+        with self._lock:
+            cursor = self.get_cursor()
+            cursor.execute(f'DELETE from options WHERE grouping = {sqlPlaceholder} AND id = {sqlPlaceholder}',(group,id))
+            self._conn.commit()
+            cursor.close()
     def postAPIupdate(self):
         """Functions to have the cached data update when relevant. Ideally call in background thread """
         self.fetchBenchmarks(update=True)
         self.fetchInvestors(update = True)
         self.fetchFunds(update=True)
+        self.pullTranEffects(update=True)
+        self.pullPtransfers(update=True)
     def postCalcUpdate(self):
         """Functions to have the cached data update when relevant. Ideally call in background thread """
         self.fetchNodes(update=True)
@@ -436,7 +465,30 @@ class DatabaseManager:
     def buildNodeLib(self, update:bool = False):
         if not hasattr(self,'nodeLib') or update:
             self.nodeLib = nodeLibrary([*load_from_db(self,'transactions'),*load_from_db(self,'positions')])
-    
+    def pullTranEffects(self, update:bool = False):
+        if not hasattr(self,'tranEffects') or update:
+            typeMatch = {'Effectoncontributions' : ['Contributions',], 'Effectondistributions': ['Distributions','Redemptions'],
+                        'Effectonoriginalcommitment':['Commitment','Unfunded'], 'Effectonremainingcommitment':['Unfunded',]}
+            try:
+                tEs = defaultdict(set)
+                rows = self.loadFromDB('tranDefs')
+                for r in rows:
+                    for dynName, lNames in typeMatch.items():
+                        if r.get(dynName) not in (None,'None'):
+                            for lName in lNames:
+                                tEs[lName].add(r.get('Transactiontype',''))
+                self.tranEffects = tEs
+            except:
+                self.tranEffects = {}
+        return self.tranEffects
+    def pullPtransfers(self, update:bool = False):
+        if not hasattr(self,'pTransfers') or update:
+            try:
+                rows = self.loadFromDB('pTransfers')
+                self.pTransfers = rows
+            except:
+                self.pTransfers = []
+        return self.pTransfers
     def load_dash_data(self):
         """
         Load position data for Dash Tree Hierarchy Viewer app.
@@ -498,10 +550,15 @@ class DatabaseManager:
             rows = [dict(zip(headers,row)) for row in cursor.fetchall()]
             cursor.close()
         return rows
-    def loadFromDB(self,table,condStatement,inputs):
+    def loadFromDB(self,table,condStatement = None,inputs = None):
         with self._lock:
             cursor = self._conn.cursor()
-            cursor.execute(f'SELECT * FROM {table}' + condStatement,tuple(inputs))
+            if condStatement and inputs:
+                cursor.execute(f'SELECT * FROM {table}' + condStatement,tuple(inputs))
+            elif condStatement:
+                cursor.execute(f'SELECT * FROM {table}' + condStatement)
+            else:
+                cursor.execute(f'SELECT * FROM {table}')
             headers = [d[0] for d in cursor.description]
             rows = [dict(zip(headers,row)) for row in cursor.fetchall()]
             cursor.close()
@@ -588,7 +645,7 @@ def save_to_db(db : DatabaseManager, table, rows, action = "", query = "",inputs
                 conn.commit()
             elif rows:
                 if keys is None:
-                    cols = list(rows[0].keys())
+                    cols = list(set(k for r in rows for k in r.keys()))
                 else:
                     cols = list(keys)
                 quoted_cols = ','.join(f'"{c}"' for c in cols)

@@ -24,7 +24,6 @@ def processClump(clumpData : list[dict],nodeLib : nodeLibrary, selfData : dict, 
             for nodeData in (nodeDict for nodeDict in clumpData if nodeLib.nodePaths[nodeDict['name']]['lowestLevel'] == nodeLevel): #run all nodes at the level
                 nodeName = nodeData['name']
                 nodeCalculations, nodeDynTables = processNode(nodeData,selfData,statusQueue,_,failed,transactionCalc)
-                clumpCalculations.extend(nodeCalculations)
                 clumpCalculationsDict.setdefault(nodeLevel,{})[nodeName] = nodeCalculations
                 #pull account balances relevant to an upper node
                 nodeAboves = nodeLib.nodePaths[nodeName]['above']

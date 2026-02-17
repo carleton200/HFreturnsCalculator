@@ -46,6 +46,9 @@ def nodalToLinkedCalculations(calcs, nodePath : list[int] = None):
     for idx, _ in enumerate(calcs): #build to final calculation format from the node style
         calcs[idx].pop('Node')
         calcs[idx]['nodePath'] = " " + nodePathSplitter.join((str(n) for n in nodePath)) + " " if nodePath else ' -1 '
+        if 'Distributions' in calcs[idx]: #distribution at highest level should be redemptions
+            calcs[idx]['Redemptions'] = calcs[idx].get('Redemptions',0.0) + calcs[idx].get('Distributions',0.0)
+            calcs[idx].pop('Distributions')
     return calcs
 
 def handleFundClasses(entryList):
@@ -328,9 +331,9 @@ def headerUnits(headers):
     total_units = sum(units)
     return units, total_units
 def calc_DPI_TVPI(entry):
-    capCalled = entry.get('Commitment',0.0) - entry.get('Unfunded',0.0)
+    capCalled = entry.get('Contributions',0.0)
     if capCalled != 0: 
-        distributions = entry.get('Distributions TD',0.0)
+        distributions = entry.get('Distributions',0.0) + entry.get('Redemptions',0.0)
         TVPI = (entry.get('NAV',0.0) + distributions) / capCalled
         DPI = distributions / capCalled
         if TVPI:
@@ -355,6 +358,7 @@ def findSourceName(fams, invs):
         return 'HF Capital Investor'
     else:
         raise RuntimeError('Failed to find source name for report investors')
+pConv = {'IRR ITD': 'IRR ITD' , 'fDist' : 'Distributions','fCont' : 'Contributions', 'fRede' : 'Redemptions'}
 def fullPortfolioCalcs(calculations:list[dict]):
     portfolioCalcs = defaultdict(dict) #dict of dateTime:nodePath:[Target name] for full portfolio data
     for c in calculations: 
@@ -366,10 +370,25 @@ def fullPortfolioCalcs(calculations:list[dict]):
             portfolioCalcs[dt][nP] = {}
         if t not in portfolioCalcs[dt][nP]:
             portfolioCalcs[dt][nP][t] = c.copy()
-            portfolioCalcs[dt][nP][t]['Source name'] = fullPortStr
+            pC = portfolioCalcs[dt][nP][t]
+            for h in (he for he in pConv.values() if he in pC):
+                pC.pop(h) #Delete the investor based value
+            for h in (he for he in ('IRR ITD', 'fDist','fCont') if he in c):
+                if pConv[h] not in pC and c.get(h) not in (None,'None',0): #if not in pC and it is a value
+                    pC[pConv[h]] = c[h] #set the full portfolio value to the correct numer
+                c.pop(h) #strip the investor calculations of these values
+            pC['Source name'] = fullPortStr
+            for h in (he for he in ('fDist','fCont') if he in pC):
+                pC.pop(h) #remove the false headers from the 'Full Portfolio' calculations (occured from .copy())
         else: #aggregate all later entries
             pC = portfolioCalcs[dt][nP][t]
+            for h in (he for he in ('IRR ITD', 'fDist','fCont','fRede') if he in c):
+                if pConv[h] not in pC and c.get(h) not in (None,'None',0): #if not in pC and it is a value
+                    pC[pConv[h]] = c[h] #set the full portfolio value to the correct numer
+                c.pop(h) #strip the investor calculations of these values
             for h in fullPortAggCols: #aggregate by relevant headers
+                if h in pConv.values():
+                    continue #dont aggregate the investor values to 'Full Portfolio'
                 if h not in c or not c[h]:
                     continue
                 elif h not in pC or not pC[h]:

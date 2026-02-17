@@ -353,6 +353,7 @@ class simpleMonthSelector(QWidget):
             month, year = item.split(" ")
             months.add(month)
             years.add(year)
+        years.add(str(max([int(y) for y in years]) + 1))
         month_order = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
         self.monthSelect.addItems([m for m in month_order if m in months])
         self.yearSelect.addItems(sorted(years))

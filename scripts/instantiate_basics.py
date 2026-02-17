@@ -36,7 +36,7 @@ def instantiate_basics(BASE_DIR):
     HELP_PATH = os.path.join(ASSETS_DIR,"helpInfo.txt")
 
     executor = ThreadPoolExecutor()
-    APIexecutor = ThreadPoolExecutor(max_workers=5) #limits overcalling
+    APIexecutor = ThreadPoolExecutor(max_workers=4) #limits overcalling
     gui_queue = queue.Queue()
 
     logging.basicConfig(

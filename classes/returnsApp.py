@@ -3,7 +3,7 @@ from scripts.loggingFuncs import attach_logging_to_class
 from classes.DatabaseManager import DatabaseManager, load_from_db, save_to_db
 from scripts.instantiate_basics import ASSETS_DIR, DATABASE_PATH, gui_queue, executor, APIexecutor, HELP_PATH
 from classes.widgetClasses import CheckboxIntInputWidget, simpleMonthSelector, MultiSelectBox, SortButtonWidget
-from scripts.commonValues import (currentVersion, headerSortExclusions, nameHier, headerOptions, nonAggregatingCols, nonDefaultHeaders, ownershipCorrect, masterFilterOptions, importInterval, 
+from scripts.commonValues import (currentVersion, headerSortExclusions, invNodeOnlyHeaders, nameHier, headerOptions, nonAggregatingCols, nonDefaultHeaders, ownershipCorrect, masterFilterOptions, importInterval, 
                     currentVersion, demoMode, fullRecalculations, calculationPingTime, dashInactiveMinutes, nonFundCols, mainTableNames,
                     nodePathSplitter,assetClass1Order, assetClass2Order,headerOptions, dataOptions, assetLevelLinks, textCols,
                     yearOptions, percent_headers, mainURL, dynamoAPIenvName)
@@ -51,7 +51,7 @@ from PyQt5.QtWidgets import (
                                 QFileDialog, QGridLayout,
                                 QFrame
                             )
-from PyQt5.QtGui import QBrush, QColor, QDesktopServices
+from PyQt5.QtGui import QBrush, QColor, QDesktopServices, QIcon
 from PyQt5.QtCore import Qt, QTimer, QUrl
 
 @attach_logging_to_class
@@ -59,6 +59,7 @@ class returnsApp(QWidget):
     def __init__(self, start_index=0):
         super().__init__()
         self.setWindowTitle('CRSPR')
+        self.setWindowIcon(QIcon(os.path.join(ASSETS_DIR,'images','logo.png')))
         self.setGeometry(100, 100, 1000, 600)
 
         os.makedirs(ASSETS_DIR, exist_ok=True)
@@ -425,7 +426,13 @@ class returnsApp(QWidget):
         mainFilterLayout = QGridLayout()
         filterTitle = QLabel("Filters")
         filterTitle.setObjectName("titleBox")
-        mainFilterLayout.addWidget(filterTitle,0,0,3,1)
+        mainFilterLayout.addWidget(filterTitle,0,0)
+        saveConfigBtn = QPushButton('Configurations')
+        saveConfigBtn.clicked.connect(self.loadConfiguration)
+        mainFilterLayout.addWidget(saveConfigBtn,1,0)
+        saveConfigBtn = QPushButton('Save Configuration')
+        saveConfigBtn.clicked.connect(self.saveConfiguration)
+        mainFilterLayout.addWidget(saveConfigBtn,2,0)
         resetFiltersBtn = QPushButton("Reset Filters")
         def filterReset(*_):
             self.instantiateFilters()
@@ -859,7 +866,7 @@ class returnsApp(QWidget):
                         insertCols.append('Investor')
                     else:
                         sourceCol = None
-                    sorted_cols = ['Level','Name',*insertCols,'AC1','AC2','AC3','Investment',*sorted_cols]
+                    sorted_cols = ['Level','Name',*insertCols,'AC1','AC2','AC3','HF Classification','HF sub-Classification','Node','Investment',*sorted_cols]
                     fund2trait = self.db.fund2trait
                 # 4) create workbook or add sheet if already exists
                 if os.path.exists(path):
@@ -916,20 +923,23 @@ class returnsApp(QWidget):
                             cell.font = Font(color="0000FF")
                         cell.alignment = Alignment(indent=level)
                     else:
+                        sortHierT = sortHier.copy()
                         itemDepth = depth + 2 if dtype != "Total Target name" else depth + 1#TODO: solve to find real depth w node issues
-                        if dtype != "Total Target name" and 'Node' in sortHier and sortHier.index('Node') < depth:
-                            itemHier = code.removeprefix("##(").removesuffix(")##").split("::")
+                        itemHier = code.removeprefix("##(").removesuffix(")##").split("::")
+                        if 'Node' in sortHier and sortHier.index('Node') < depth:
                             prevNodeCnt = 0
                             for nodeTier in (tier for tier in itemHier if tier in nodes):
                                 prevNodeCnt += 1 #find num of nodes passed to adjust depth
                             if prevNodeCnt > 0:
-                                itemDepth -= prevNodeCnt - 1 #reduce depth by all previous nodes more than 1
+                                prevNodeCnt -= 1 #account for the initial node
+                                if dtype != "Total Target name":
+                                    itemDepth -= prevNodeCnt #reduce depth by all previous nodes more than 1
+                                sortHierT = sortHier[:sortHier.index('Node')] + prevNodeCnt * ['Node',] + sortHier[sortHier.index('Node'):]
                         if dtype != "benchmark":
                             row_dict['Level'] = f'L{itemDepth}' #move to 1 indexed. Push past total
                         else:
                             row_dict['Level'] = f'B{itemDepth}'
                         row_dict['Name'] = row_name
-                        itemHier = code.removeprefix("##(").removesuffix(")##").split("::")
                         if dtype == 'Total':
                             row_dict['Level'] = 'L1'
                         elif dtype == "Total Target name":
@@ -939,28 +949,32 @@ class returnsApp(QWidget):
                             AC1 = fundTraits.get('assetClass','Not Found')
                             AC2 = fundTraits.get('subAssetClass','Not Found')
                             AC3 = fundTraits.get('subAssetSleeve','Not Found')
-                            for txt,var in (['AC1',AC1],['AC2',AC2],['AC3',AC3]):
+                            HFclass = fundTraits.get('Classification','Not Found')
+                            HFsubClass = fundTraits.get('subClassification','Not Found')
+                            for txt,var in (['AC1',AC1],['AC2',AC2],['AC3',AC3],['HF Classification',HFclass],['HF sub-Classification',HFsubClass]):
                                 row_dict[txt] = var
                         else:
                             for rowTxt, AClvl in (['AC1','assetClass'],['AC2','subAssetClass'],['AC3','sleeve']):
-                                if AClvl in sortHier and sortHier.index(AClvl) <= len(itemHier) - 1: #check viability
+                                if AClvl in sortHierT and sortHierT.index(AClvl) <= len(itemHier) - 1: #check viability
                                     try:
-                                        row_dict[rowTxt] = itemHier[sortHier.index(AClvl)]
+                                        row_dict[rowTxt] = itemHier[sortHierT.index(AClvl)]
                                     except:
                                         print('Failed assigning AC levels')
                                         raise
                         for stripKey in (key for key in row_dict if key in ('AC1','AC2','AC3','Name')):
                             row_dict[stripKey] = row_dict[stripKey].strip() #remove spaces from these cols. (ex: 'Cash  ' --> 'Cash')
+                        
                         sourceSearch = []
                         if famCol:
                             sourceSearch.append(['Family Branch','Family Branch'])
                         if sourceCol:
                             sourceSearch.append(['Investor','Source name'])
+                        sourceSearch.append(['Node','Node'])
                         if sourceSearch:
                             for rowTxt, lvl in sourceSearch:
-                                if lvl in sortHier and sortHier.index(lvl) <= len(itemHier) - 1: #check viability
+                                if lvl in sortHierT and sortHierT.index(lvl) <= len(itemHier) - 1: #check viability
                                     try:
-                                        row_dict[rowTxt] = itemHier[sortHier.index(lvl)]
+                                        row_dict[rowTxt] = itemHier[sortHierT.index(lvl)]
                                     except:
                                         print('Failed assigning investors and family branches')
                                         raise
@@ -1161,6 +1175,7 @@ class returnsApp(QWidget):
     def buildTable(self, cancelEvent):
         try:
             print("Building return table...")
+            tranEffects = self.db.pullTranEffects()
             self.currentTableData = None #resets so a failed build won't be used
             complexMode = self.tableBtnGroup.checkedButton().text() == "Complex Table"
             gui_queue.put(lambda: self.dataTypeBox.setVisible(not complexMode))
@@ -1199,6 +1214,11 @@ class returnsApp(QWidget):
             consolidatedFunds_local = self.consolidatedFunds
             investor_checked = self.filterDict["Source name"].checkedItems() != []
             fam_checked = self.filterDict["Family Branch"].checkedItems() != []
+            investorMode = investor_checked or fam_checked
+            if not investorMode:
+                headerOptions_local = [h for h in headerOptions_local if h != 'Redemptions'] #full portfolio mode : distributions
+            else:
+                headerOptions_local = [h for h in headerOptions_local if h != 'Distributions'] #investor mode: redemptions
             # Map "%" to NAV only for non-complex mode
             dataOutputType = self.returnOutputType.currentText() if not complexMode_local else "Return"
             if not complexMode_local and dataOutputType == "%":
@@ -1336,6 +1356,18 @@ class returnsApp(QWidget):
                 return
             if  complexMode:
                 output = self.calculateComplexTable(output,complexOutput)
+            if investorMode:
+                self.updateTableLoading(87, text = 'Clearing non-investor data')
+                sortHier = self.sortHierarchy.checkedItems()
+                badAboves = ('assetClass','subAssetClass','sleeve')
+                viableDataTypes = ('Total Node','Total')
+                nodeIn = 'Node' in sortHier
+                if nodeIn and any(bad_above in sortHier and sortHier.index(bad_above) < sortHier.index('Node') for bad_above in badAboves):
+                    viableDataTypes = ('Total') #don't keep node values if they may be split (no longer makes sense)
+                for rowKey in output:
+                    if output[rowKey]['dataType'] not in viableDataTypes:
+                        for h in (he for he in output[rowKey] if he in invNodeOnlyHeaders):
+                            output[rowKey][h] = None
             self.updateTableLoading(90, text = 'Populating table')
             if cancelEvent.is_set(): #exit if new table build request is made
                 return
@@ -2075,6 +2107,106 @@ class returnsApp(QWidget):
             monthEntry = {"dateTime" : monthDT, "Month" : dateString, "tranStart" : tranStart.removesuffix(".000Z"), "endDay" : bothEnd.removesuffix(".000Z"), "accountStart" : accountStart.removesuffix(".000Z")}
             dbDates.append(monthEntry)
         save_to_db(self.db,"Months",dbDates)
+    def loadConfiguration(self,*_):
+        try:
+            configNames = self.db.fetchOptions('configNames')
+            if not configNames:
+                QMessageBox.warning(self,'None Found','No saved configurations were found')
+                return
+            msgBox = QMessageBox(self)
+            msgBox.setWindowTitle("Choose Configuration")
+            msgBox.setText("Choose configuration to apply or discard:")
+            combo = QComboBox(msgBox)
+            combo.addItems(configNames)
+            msgBox.layout().addWidget(combo, 1, 1)
+            msgBox.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel | QMessageBox.Discard)
+            result = msgBox.exec_()
+            if not result == QMessageBox.Ok:
+                if result == QMessageBox.Discard:
+                    name = combo.currentText()
+                    popup2 = QMessageBox(self)
+                    popup2.setWindowTitle('Delete Configuration')
+                    popup2.setText(f'Deleting configuration "{name}". \n Continue?')
+                    popup2.setStandardButtons(QMessageBox.Yes | QMessageBox.Cancel)
+                    popup2.setDefaultButton(QMessageBox.Cancel)
+                    result2 = popup2.exec_()
+                    if result2 == QMessageBox.Yes:
+                        self.db.saveNewOptions(name,[])
+                        self.db.removeOption('configNames',name)
+                        return
+                return
+            configName = combo.currentText()
+            configParams = self.db.fetchOptions(configName)
+            print(configParams)
+            for key in self.filterDict:
+                if key in configParams:
+                    self.filterDict[key].setCheckedItems(configParams[key])
+                else: #No selection --> empty
+                    self.filterDict[key].setCheckedItems([])
+            self.sortHierarchy.setCheckedItems(configParams['sortHierarchy'])
+            self.consolidateFundsBtn.setChecked(configParams['consolidate'] == '1')
+            self.benchmarkSelection.setCheckedItems(configParams.get('benchmarks',[]))
+            self.showBenchmarkLinksBtn.setChecked(configParams['benchmarkLinks'] == '1')
+            hSort = configParams['headerSort']
+            self.headerSort.set_items([*hSort,*[h for h in self.headerSort.options() if h not in hSort]],hSort)
+            if configParams['sortStyle'] == 'NAV':
+                self.sortStyle.setText('Sort Style: NAV')
+            else:
+                self.sortStyle.setText('Sort Style: Alphabetical')
+            monthInt = configParams.get('hideMonths',0)
+            if monthInt != 0:
+                self.exitedFundsInput.setChecked(True)
+                self.exitedFundsInput.setInt(int(monthInt))
+            else:
+                self.exitedFundsInput.setChecked(False)
+            self.buildReturnTable()
+        except Exception as e:
+            QMessageBox.warning(self,'Failure',f'Error occured attempting to load configuration: {e.args}')
+    def saveConfiguration(self,*_):
+        try:
+            popup = QInputDialog(self)
+            popup.setWindowTitle('Set Configuration Name')
+            popup.setLabelText('Input Configuration name:')
+            popup.show()
+            result = popup.exec_()
+            print(result)
+            if result:
+                name = popup.textValue()
+                currentConfigs = self.db.fetchOptions('configNames')
+                if name in currentConfigs:
+                    popup2 = QMessageBox(self)
+                    popup2.setWindowTitle('Name Already Exists')
+                    popup2.setText('A configuration with this name already exists.\nDo you want to overwrite it?')
+                    popup2.setStandardButtons(QMessageBox.Yes | QMessageBox.Cancel)
+                    popup2.setDefaultButton(QMessageBox.Cancel)
+                    result = popup2.exec_()
+                    if not result == QMessageBox.Yes:
+                        return
+                configDict = {}
+                configDict['sortHierarchy'] = self.sortHierarchy.checkedItems()
+                for key, combo in self.filterDict.items():
+                    if combo.checkedItems() != []:
+                        configDict[key] = combo.checkedItems()
+                configDict['consolidate'] = [self.consolidateFundsBtn.isChecked(),]
+                configDict['benchmarks'] = self.benchmarkSelection.checkedItems()
+                configDict['benchmarkLinks'] = [self.showBenchmarkLinksBtn.isChecked(),]
+                configDict['headerSort'] = self.headerSort.popup.get_checked_sorted_items()
+                
+                configSave = []
+                for key, vals in configDict.items():
+                    for idx, v in enumerate(vals):
+                        configSave.append({'id' : key,'value' : v,'idx' : idx})
+                configSave.append({'id' : 'sortStyle','value' : 'NAV' if 'NAV' in self.sortStyle.text() else 'alphabetical', 'idx' : None})
+                hide, monthNum = self.exitedFundsInput.getStatus()
+                if hide:
+                    configSave.append({'id' : 'hideMonths','value' : monthNum,'idx' : None})
+                self.db.saveNewOptions('configNames',[{'id' : name, 'value' : None}],delete=False)
+                self.db.saveNewOptions(name,configSave,multiIdx = True)
+                QMessageBox.information(self,'Success!','Configuration was successfully saved!')
+            else:
+                return
+        except Exception as e:
+            QMessageBox.warning(self,'Failure to Save', f'Saving the configuration has failed: {e.args}')
     def instantiateFilters(self,*_, keepChoices: bool = False):
         if keepChoices:
             CBs = list(self.filterDict.values())
@@ -2123,20 +2255,24 @@ class returnsApp(QWidget):
         self.filterCallLock = False
         self.buildReturnTable()
     def testAPIconnection(self, key=None):
-        apiKey = self.api_key if key is None else key
-        headers = {
-            "Authorization": f"Bearer {apiKey}",
-            "Content-Type":  "application/json"
-        }
-        payload = {
-            "advf": [{ "_name": "Fund" }],
-            "mode": "compact",
-            "page": {"size": 0}
-        }
-        resp = requests.get(f"{mainURL}/Entity", headers=headers, json=payload)
-        if resp.status_code == 200:
-            return True
-        else:
+        try:
+            apiKey = self.api_key if key is None else key
+            headers = {
+                "Authorization": f"Bearer {apiKey}",
+                "Content-Type":  "application/json"
+            }
+            payload = {
+                "advf": [{ "_name": "Fund" }],
+                "mode": "compact",
+                "page": {"size": 0}
+            }
+            resp = requests.get(f"{mainURL}/Entity", headers=headers, json=payload)
+            if resp.status_code == 200:
+                return True
+            else:
+                return False
+        except Exception as e:
+            print(f'WARNING: API connection test has failed: {e.args}')
             return False
     def check_api_key(self, *_):
         key = self.api_input.text().strip()
@@ -2253,6 +2389,8 @@ class returnsApp(QWidget):
         try:
             self.earliestChangeDate = datetime.now() + relativedelta(months=1)
             earlyChangeDateLock = threading.Lock()
+            self.apiFailure = False
+            self.apiFailureLock = threading.Lock()
             gui_queue.put(lambda: self.apiLoadingBarBox.setVisible(True))
             gui_queue.put(lambda: self.importButton.setEnabled(False))
             self.updateMonths()
@@ -2270,6 +2408,8 @@ class returnsApp(QWidget):
                 "accountSort": "As of Date:desc",
                 "fundCols" : "Parent fund, Fund Name, Fund Pipeline Status, Asset class category, HF Classification, HF sub-classification",
                 "secCols" : "Parent Security, Security Name, Asset class category, HF Classification, HF Sub-Classification",
+                'tranDefCols' : 'Transaction type,Effect on original commitment,Effect on remaining commitment,Effect on contributions,Effect on distributions',
+                'pTransferCols' : 'Effective date, Summary Transaction type, Transfer from investing entity, Transfer to multiple investing entities, Amount in system currency, Percent, Fund',
                 "investorCols" : "Parent investor, Account name",
                 "InvestorName" : "",
                 "benchCols" : (f"Index, As of date, MTD %, QTD %, YTD %, ITD cumulative %, ITD TWRR %, "
@@ -2428,6 +2568,7 @@ class returnsApp(QWidget):
                                     "mode": "compact"
                                 }
             def bgPullData(tableName, payload, headers):
+                try:
                     rows = []
                     idx = 0
                     while rows in ([],None) and idx < 3: #if call fails, tries again
@@ -2465,6 +2606,11 @@ class returnsApp(QWidget):
                     frac = self.complete/totalCalls
                     gui_queue.put(lambda val = frac: self.apiLoadingBar.setValue(int(val * 100)))
                     return tableName,tables
+                except:
+                    with self.apiFailureLock:
+                        self.apiFailure = True
+                    print('WARNING: Dynamo api call failed.')
+                    return tableName,{'new':[],'old':[]}
             try:
                 accountTranTableFutures.append(APIexecutor.submit(bgPullData,'transactions',transactionsPayload,apiHeader(apiData["tranCols"], apiData["tranSort"])))
                 accountTranTableFutures.append(APIexecutor.submit(bgPullData,'positions',positionsPayload,apiHeader(apiData["accountCols"], apiData["accountSort"])))
@@ -2566,11 +2712,17 @@ class returnsApp(QWidget):
                         if rows != []:
                             save_to_db(self.db,tableName,rows)
                         else:
+                            with self.apiFailureLock:
+                                self.apiFailure = True
                             print(f"Warning: No {tableName} found from API pull")
                     except Exception as e:
+                        with self.apiFailureLock:
+                            self.apiFailure = True
                         print(f"Error proccessing {tableName} API data : {e} {e.args}.  {traceback.format_exc()}")
                     
                 else:
+                    with self.apiFailureLock:
+                        self.apiFailure = True
                     print(f"Error in API call for {tableName}. Code: {response.status_code}. {response}. {traceback.format_exc()}")
                 with completeLock:
                     self.complete += 1
@@ -2599,31 +2751,78 @@ class returnsApp(QWidget):
                                     },
                                     "mode": "compact"
                                 }
+            tranDefsPayload = {
+                                    "advf": {
+                                        "e": [
+                                            {
+                                                "_name": "TransactionDefinition"
+                                            }
+                                        ]
+                                    },
+                                    "mode": "compact"
+                                }
+            pTransferPayload = {
+                                    "advf": {
+                                        "e": [
+                                            {
+                                                "_name": "SummaryTransaction",
+                                                "rule": [
+                                                    {
+                                                        "_op": "any_item",
+                                                        "_prop": "Summary transaction type",
+                                                        "values": [
+                                                            [
+                                                                {
+                                                                    "id": "41a45020-f0db-4e1e-85c6-5ff8caab8425",
+                                                                    "es": "L_SummaryTransactionType",
+                                                                    "name": "Transfer of interest at FMV"
+                                                                },
+                                                                {
+                                                                    "id": "05092587-2012-4417-9337-84f9e554186d",
+                                                                    "es": "L_SummaryTransactionType",
+                                                                    "name": "Transfer of interest at cost"
+                                                                }
+                                                            ]
+                                                        ]
+                                                    }
+                                                ]
+                                            }
+                                        ]
+                                    },
+                                    "mode": "compact"
+                                }
             def basicAPIpull(name,payload,cols,sort = None):
-                response = requests.post(f"{mainURL}/Search", headers=apiHeader(cols, sort = sort), data=json.dumps(payload))
-                if response.status_code == 200:
-                    try:
-                        data = response.json()
-                        if isinstance(data, dict):
-                            rows = data.get('data', data.get('rows', []))
-                        elif isinstance(data, list):
-                            rows = data
-                        else:
-                            rows = []
-                        keys_to_remove = {'_id', '_es'}
-                        rows = [{k: v for k, v in row.items() if k not in keys_to_remove} for row in rows]
-                        save_to_db(self.db,name,rows)
-                    except Exception as e:
-                        print(f"Error proccessing {name} API data : {e} {e.args}.  {traceback.format_exc()}")
-                    
-                else:
-                    print(f"Error in API call for {name}. Code: {response.status_code}. {response}. {traceback.format_exc()}")
-                with completeLock:
-                    self.complete += 1
-                frac = self.complete/totalCalls
-                gui_queue.put(lambda val = frac: self.apiLoadingBar.setValue(int(val * 100)))
+                try:
+                    response = requests.post(f"{mainURL}/Search", headers=apiHeader(cols, sort = sort), data=json.dumps(payload))
+                    if response.status_code == 200:
+                        try:
+                            data = response.json()
+                            if isinstance(data, dict):
+                                rows = data.get('data', data.get('rows', []))
+                            elif isinstance(data, list):
+                                rows = data
+                            else:
+                                rows = []
+                            keys_to_remove = {'_id', '_es'}
+                            rows = [{k: v for k, v in row.items() if k not in keys_to_remove} for row in rows]
+                            save_to_db(self.db,name,rows)
+                        except Exception as e:
+                            print(f"Error proccessing {name} API data : {e} {e.args}.  {traceback.format_exc()}")
+                        
+                    else:
+                        print(f"Error in API call for {name}. Code: {response.status_code}. {response}. {traceback.format_exc()}")
+                    with completeLock:
+                        self.complete += 1
+                    frac = self.complete/totalCalls
+                    gui_queue.put(lambda val = frac: self.apiLoadingBar.setValue(int(val * 100)))
+                except:
+                    with self.apiFailureLock:
+                        self.apiFailure = True
+                    print('WARNING: API call failed.')
             submitAPIcall(self,basicAPIpull,'benchmarks',benchmarkPayload,apiData['benchCols'])
             submitAPIcall(self,basicAPIpull,'investors',investorPayload,apiData['investorCols'])
+            submitAPIcall(self,basicAPIpull,'tranDefs',tranDefsPayload,apiData['tranDefCols'])
+            submitAPIcall(self,basicAPIpull,'pTransfers',pTransferPayload,apiData['pTransferCols'])
             wait(accountTranTableFutures)
             for future in accountTranTableFutures:
                 #must be careful. There are a maximum of 5 threads but there are 6 calls, and 2 are waited for after
@@ -2648,6 +2847,8 @@ class returnsApp(QWidget):
                         if changeDate >= datetime.strptime(rec["Date"], "%Y-%m-%dT%H:%M:%S"): #old data before the editing date to be kept
                             mergedTable.append(rec)
                     importedTables[table] = mergedTable
+                if importedTables[table] == []:
+                    raise RuntimeError('Error: dynamo API call has failed to return any data. Import and calculations are cancelled.')
             wait(self.apiFutures)
             if skipCalculations:
                 print("Earliest change: ", self.earliestChangeDate)
@@ -2662,6 +2863,8 @@ class returnsApp(QWidget):
             self.processFunds()
             gui_queue.put(lambda: self.apiLoadingBarBox.setVisible(False))
             gui_queue.put(lambda: self.calculationLoadingBox.setVisible(True)) #secondary early change to make it appear faster if running slow
+            if self.apiFailure:
+                raise RuntimeError('WARNING: A dynamo API call has failed. Data import and calculations will be halted.')
             gui_queue.put(lambda: self.calculateReturn(importedTables))
         except RuntimeError as e:
             gui_queue.put(lambda error = e: QMessageBox.warning(self,"Error Importing Data", f"Error pulling data from dynamo: {error} , {error.args}"))
@@ -2747,6 +2950,22 @@ class returnsApp(QWidget):
                                         if not (start <= date <= m["endDay"]):
                                             continue
                                         cache.setdefault(clumpIdxs[potNode], {}).setdefault(potNode, {}).setdefault(tableName, {}).setdefault(m["dateTime"], []).append(row)
+                pTransfers = self.db.pullPtransfers()
+                for pT in pTransfers:
+                    for m in months: #find the month the pT belongs in
+                        start = m["tranStart"]
+                        date = pT.get("Date")
+                        if not (start <= date <= m["endDay"]):
+                            continue
+                        #only reaches here once for appropriate month
+                        if pT['Fund'] not in nodeLib.nodes:
+                                cache.setdefault(-1, {}).setdefault('noNodeData', {}).setdefault('pTransfers', {}).setdefault(m["dateTime"], []).append(pT)
+                        else:
+                            potNode = pT['Fund']
+                            if potNode not in nodeLib.nodes:
+                                continue #Note: this also ignored deleted recursive nodes
+                            else:
+                                cache.setdefault(clumpIdxs[potNode], {}).setdefault(potNode, {}).setdefault('pTransfers', {}).setdefault(m["dateTime"], []).append(pT)
                 self.cachedDynTables = {table : [] for table in mainTableNames}
                 self.cachedLinkedCalculations = []
                 if fullRecalculations:
@@ -2794,6 +3013,7 @@ class returnsApp(QWidget):
                         nodeCount += 1
                         _ = updateStatus(self, nodeDict['name'],len(newMonths), status="Initialization")
                 nodeCount += 1
+                tranEffects = self.db.pullTranEffects()
                 _ = updateStatus(self, 'noNodeData',len(months), status="Initialization")
                 def initializeWorkerPool():
                     self.manager = Manager()
@@ -2809,7 +3029,8 @@ class returnsApp(QWidget):
                     executor.submit(self.watch_db,nodeCount)
 
                     commonData = {"noCalculations" : noCalculations,
-                                    "months" : months, "fundList" : fundList
+                                    "months" : months, "fundList" : fundList,
+                                    'tranEffects' : tranEffects
                                     }
                     
                     self.calcStartTime = datetime.now()
