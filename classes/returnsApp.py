@@ -442,7 +442,7 @@ class returnsApp(QWidget):
         mainFilterLayout.addWidget(resetFiltersBtn,3,0)
 
         self.filterOptions = masterFilterOptions
-        self.filterBtnExclusions = ["Source name","Classification", nameHier["subClassification"]["local"], nameHier["Family Branch"]["local"]]
+        self.filterBtnExclusions = ["Source name","Classification",'subClassification', nameHier["subClassification"]["local"], nameHier["Family Branch"]["local"]]
         self.filterDict = {}
         self.filterRadioBtnDict = {}
         self.filterBtnGroup = QButtonGroup()
@@ -926,6 +926,7 @@ class returnsApp(QWidget):
                         sortHierT = sortHier.copy()
                         itemDepth = depth + 2 if dtype != "Total Target name" else depth + 1#TODO: solve to find real depth w node issues
                         itemHier = code.removeprefix("##(").removesuffix(")##").split("::")
+
                         if 'Node' in sortHier and sortHier.index('Node') < depth:
                             prevNodeCnt = 0
                             for nodeTier in (tier for tier in itemHier if tier in nodes):
@@ -954,13 +955,15 @@ class returnsApp(QWidget):
                             for txt,var in (['AC1',AC1],['AC2',AC2],['AC3',AC3],['HF Classification',HFclass],['HF sub-Classification',HFsubClass]):
                                 row_dict[txt] = var
                         else:
-                            for rowTxt, AClvl in (['AC1','assetClass'],['AC2','subAssetClass'],['AC3','sleeve']):
+                            for rowTxt, AClvl in (['AC1','assetClass'],['AC2','subAssetClass'],['AC3','sleeve'],['HF Classification', 'Classification'],['HF sub-Classification', 'subClassification']):
                                 if AClvl in sortHierT and sortHierT.index(AClvl) <= len(itemHier) - 1: #check viability
                                     try:
                                         row_dict[rowTxt] = itemHier[sortHierT.index(AClvl)]
                                     except:
                                         print('Failed assigning AC levels')
                                         raise
+                        if dtype == 'Node':
+                            row_dict['Node'] = row_name
                         for stripKey in (key for key in row_dict if key in ('AC1','AC2','AC3','Name')):
                             row_dict[stripKey] = row_dict[stripKey].strip() #remove spaces from these cols. (ex: 'Cash  ' --> 'Cash')
                         
@@ -972,7 +975,7 @@ class returnsApp(QWidget):
                         sourceSearch.append(['Node','Node'])
                         if sourceSearch:
                             for rowTxt, lvl in sourceSearch:
-                                if lvl in sortHierT and sortHierT.index(lvl) <= len(itemHier) - 1: #check viability
+                                if itemHier != [''] and lvl in sortHierT and sortHierT.index(lvl) <= len(itemHier) - 1: #check viability
                                     try:
                                         row_dict[rowTxt] = itemHier[sortHierT.index(lvl)]
                                     except:
@@ -2143,6 +2146,12 @@ class returnsApp(QWidget):
                     self.filterDict[key].setCheckedItems(configParams[key])
                 else: #No selection --> empty
                     self.filterDict[key].setCheckedItems([])
+                if f'{key}_hide' in configParams and key in self.filterRadioBtnDict:
+                    self.filterRadioBtnDict[key].setChecked(configParams[f'{key}_hide'] == '0')
+            self.sortHierarchy.clearSelection()
+            for val in configParams['sortHierarchy']:
+                if val in self.sortHierarchy._checkboxes:
+                    self.sortHierarchy._checkboxes[val].click()
             self.sortHierarchy.setCheckedItems(configParams['sortHierarchy'])
             self.consolidateFundsBtn.setChecked(configParams['consolidate'] == '1')
             self.benchmarkSelection.setCheckedItems(configParams.get('benchmarks',[]))
@@ -2187,6 +2196,11 @@ class returnsApp(QWidget):
                 for key, combo in self.filterDict.items():
                     if combo.checkedItems() != []:
                         configDict[key] = combo.checkedItems()
+                    if key in self.filterRadioBtnDict:
+                        if self.filterRadioBtnDict[key].isChecked():
+                            configDict[key + '_hide'] = [False,]
+                        else:
+                            configDict[key + '_hide'] = [True,]
                 configDict['consolidate'] = [self.consolidateFundsBtn.isChecked(),]
                 configDict['benchmarks'] = self.benchmarkSelection.checkedItems()
                 configDict['benchmarkLinks'] = [self.showBenchmarkLinksBtn.isChecked(),]
@@ -2206,6 +2220,7 @@ class returnsApp(QWidget):
             else:
                 return
         except Exception as e:
+            print(traceback.format_exc())
             QMessageBox.warning(self,'Failure to Save', f'Saving the configuration has failed: {e.args}')
     def instantiateFilters(self,*_, keepChoices: bool = False):
         if keepChoices:
@@ -3086,7 +3101,6 @@ class returnsApp(QWidget):
                         completed.append(line)
                 if len(failed) > 0:
                     print(f"Halting progress watch due to worker '{failed[0].get("pool","Bad Pull")}' failure.")
-                    print(self.workerProgress)
                     self.queue.append(-86) #will halt the queue
                     break
                 elif len(completed) == totalNodes:

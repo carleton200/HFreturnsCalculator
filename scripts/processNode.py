@@ -122,11 +122,11 @@ def processNode(nodeData : dict,selfData : dict, statusQueue, _, failed, transac
                         startEntry = startEntry_cache[0]
                     noStartValue = False
                 else: #if no starting entry, take necessary variables and zero out the value
+                    noStartValue = True
                     end_cache = aboveEndEntries.get(source)
                     if end_cache: #continue if there is a future entry
                         startEntry = copy.deepcopy(end_cache[0])
                         startEntry[nameHier["Value"]["dynHigh"]] = 0
-                        noStartValue = True
                     else: #make an empty starting entry to build from
                         startEntry = {}
                 if startEntry.get(nameHier["Value"]["dynHigh"]) in (None,"None"):
@@ -220,12 +220,12 @@ def processNode(nodeData : dict,selfData : dict, statusQueue, _, failed, transac
                         elif date == month['endDay']:
                             alloDec = float(pT.get('Amountinsystemcurrency')) / sourceEntry['NAV'] if sourceEntry['NAV'] != 0 else 0
                         else:
-                            print(f'WARNING: Partner transfer date not at BOM or EOM')
+                            print(f'WARNING: Partner transfer date not at BOM or EOM ({source} in {month['Month']}) \n      {pT}')
                             continue
                     elif pT.get('Percent') not in (None,'None'): 
                         alloDec = float(pT.get('Percent'))
                     else:
-                        print(f'WARNING: Partner transfer passed with no value')
+                        print(f'WARNING: Partner transfer passed with no value ({source} in {month['Month']})')
                         continue #Failed
                     amounts = {}
                     for h in ('Redemptions','Contributions'):

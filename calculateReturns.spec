@@ -175,7 +175,7 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     hide_console='hide-early',
-    icon=None,  # Add icon path here if you have one
+    icon='assets/images/logo.png', 
 )
 coll = COLLECT(
     exe,
