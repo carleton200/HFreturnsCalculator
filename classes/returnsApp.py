@@ -3,14 +3,14 @@ from scripts.loggingFuncs import attach_logging_to_class
 from classes.DatabaseManager import DatabaseManager, load_from_db, save_to_db
 from scripts.instantiate_basics import ASSETS_DIR, DATABASE_PATH, gui_queue, executor, APIexecutor, HELP_PATH
 from classes.widgetClasses import CheckboxIntInputWidget, simpleMonthSelector, MultiSelectBox, SortButtonWidget
-from scripts.commonValues import (currentVersion, headerSortExclusions, invNodeOnlyHeaders, nameHier, headerOptions, nonAggregatingCols, nonDefaultHeaders, ownershipCorrect, masterFilterOptions, importInterval, 
+from scripts.commonValues import (currentVersion, dataTimeStart, headerSortExclusions, invNodeOnlyHeaders, nameHier, headerOptions, nonAggregatingCols, nonDefaultHeaders, ownershipCorrect, masterFilterOptions, importInterval, 
                     currentVersion, demoMode, fullRecalculations, calculationPingTime, dashInactiveMinutes, nonFundCols, mainTableNames,
                     nodePathSplitter,assetClass1Order, assetClass2Order,headerOptions, dataOptions, assetLevelLinks, textCols,
                     yearOptions, percent_headers, mainURL, dynamoAPIenvName)
 from scripts.processInvestments import processInvestments
 from scripts.basicFunctions import (calc_DPI_TVPI, findSign, updateStatus, annualizeITD, submitAPIcall, get_connected_node_groups, 
                                  descendingNavSort, accountBalanceKey, separateRowCode, findSourceName)
-from classes.windowClasses import reportExportWindow, underlyingDataWindow, linkBenchmarksWindow, tableWindow, exportWindow, displayWindow
+from classes.windowClasses import investablesMenu, reportDataWindow, reportExportWindow, underlyingDataWindow, linkBenchmarksWindow, tableWindow, exportWindow, displayWindow
 from classes.tableWidgets import DictListModel, SmartStretchTable
 from TreeScripts.dash_launcher import _run_dash_app_process
 from classes.transactionApp import transactionApp
@@ -71,7 +71,7 @@ class returnsApp(QWidget):
         self.lock = threading.Lock()
         self.db._lock = self.lock #attach the lock to the database manager
         self.tableWindows = {}
-        self.dataTimeStart = datetime(2000,1,1)
+        self.dataTimeStart = dataTimeStart
         self.earliestChangeDate = datetime.now() + relativedelta(months=1)
         self.nodeChangeDates = {"active" : False}
         self.currentTableData = None
@@ -155,6 +155,10 @@ class returnsApp(QWidget):
                             border-radius: 12px;
                             background-color: #514F4F;
                             color : white;
+                        }
+                        QTabWidget {
+                            background-color: #A8A2A2;
+                            color : black;
                         }
                         QComboBox {
                             background-color: #514F4F;
@@ -317,6 +321,12 @@ class returnsApp(QWidget):
         dashAppBtn = QPushButton('Tree Hierarchy Viewer')
         dashAppBtn.clicked.connect(self.openDashApp)
         controlsLayout.addWidget(dashAppBtn, stretch=0)
+        #report data menu
+        reportDataBtn = QPushButton("Reporting Data Menu")
+        reportDataBtn.clicked.connect(self.reportDataMenu)
+        reportDataBtn.setObjectName('exportBtn')
+        controlsLayout.addWidget(reportDataBtn)
+        #Export PDF reports button
         exportReportBtn = QPushButton("PDF Export")
         exportReportBtn.clicked.connect(self.exportReport)
         exportReportBtn.setObjectName('exportBtn')
@@ -363,7 +373,7 @@ class returnsApp(QWidget):
         
         self.dataStartSelect = simpleMonthSelector()
         self.dataEndSelect = simpleMonthSelector()
-        for idx, [text, CB] in enumerate((["Start: ", self.dataStartSelect], ["End: ", self.dataEndSelect])):
+        for idx, [text, CB] in enumerate((["Performance Start: ", self.dataStartSelect], ["End: ", self.dataEndSelect])):
             optionsGrid.addWidget(QLabel(text),idx,2)
             optionsGrid.addWidget(CB,idx,3)
         optionsGrid.addWidget(QLabel("Benchmarks:"),0,4)
@@ -407,6 +417,13 @@ class returnsApp(QWidget):
         self.linkBenchmarksBtn = QPushButton("Link Benchmarks")
         self.linkBenchmarksBtn.clicked.connect(self.linkBenchmarks)
         optionsGrid.addWidget(self.linkBenchmarksBtn,4,2)
+        #Investables Menu
+        self.hideNonInvestablesBtn = QCheckBox('Hide Non-Investables')
+        self.hideNonInvestablesBtn.clicked.connect(self.buildReturnTable)
+        optionsGrid.addWidget(self.hideNonInvestablesBtn,3,3)
+        self.linkBenchmarksBtn = QPushButton("Investables")
+        self.linkBenchmarksBtn.clicked.connect(self.investablesMenu)
+        optionsGrid.addWidget(self.linkBenchmarksBtn,4,3)
 
         #assetClassOrderSorts
         self.AC1sort = SortButtonWidget(btnName='Asset Level 1 Sorting')
@@ -751,6 +768,10 @@ class returnsApp(QWidget):
                 window.show()
         except Exception as e:
             print(f"Error in data viewing window: {e} {traceback.format_exc()}")
+    def reportDataMenu(self,*_):
+        dM = reportDataWindow(parentSource = self)
+        dM.show()
+        self.reportDataMenu = dM
     def exportReport(self,*_):
         msgBox = QMessageBox(self)
         msgBox.setWindowTitle("Choose Export Type")
@@ -779,12 +800,15 @@ class returnsApp(QWidget):
             window = reportExportWindow(self.db, export_type, parentSource = self)
             window.show()
             self.reportExportWindow = window
-        elif export_type == opt1:
+        elif export_type in (opt1,opt2):
             classification = ', '.join(self.filterDict['Classification'].checkedItems())
             famChoices = self.filterDict['Family Branch'].checkedItems()
             invChoices = self.filterDict['Source name'].checkedItems()
             sourceName = findSourceName(famChoices,invChoices)
-            basicHoldingsReportExport(self, classification=classification, sourceName=sourceName)
+            try:
+                basicHoldingsReportExport(self,onlyHoldings=export_type==opt1, classification=classification, sourceName=sourceName)
+            except Exception as e:
+                QMessageBox.warning(self,'Error Building Report',f'An error occured while building the report: {e.args}')
         return
     def exportPage(self,*_):
         # Use a built-in PyQt combobox messagebox for export type selection
@@ -833,6 +857,7 @@ class returnsApp(QWidget):
                 if self.sortHierarchy.checkedItems() != []:
                     full_hierarchy = ["Total"] + ["Total " + level for level in self.sortHierarchy.checkedItems()] + ["Total Target name"]
                 else:
+                    #shouldn't happen and can likely be deleted
                     full_hierarchy = ["Total", "Total assetClass", "Total Target name"]
                 hierarchy_levels = [lvl for lvl in full_hierarchy if lvl in all_types]
 
@@ -1032,7 +1057,7 @@ class returnsApp(QWidget):
                     if date_start and date_end:
                         date_range_str = f"{date_start} to {date_end}"
                     elif date_start:
-                        date_range_str = f"Start: {date_start}"
+                        date_range_str = f"Performance Start: {date_start}"
                     elif date_end:
                         date_range_str = f"End: {date_end}"
 
@@ -1149,6 +1174,9 @@ class returnsApp(QWidget):
         self.dataEndSelect.setCurrentText(monthList[-1])
         self.dataStartSelect.addItems(monthList)
         self.dataStartSelect.setCurrentText(monthList[0])
+    def investablesMenu(self,*_):
+        self.investablesMenu = investablesMenu(parentSource=self)
+        self.investablesMenu.show()
     def linkBenchmarks(self,*_):
         #open the link benchmarks window as its own window that is non blocking
         self.linkBenchmarksWindow = linkBenchmarksWindow(parentSource=self)
@@ -1175,7 +1203,7 @@ class returnsApp(QWidget):
         self.stack.setCurrentIndex(1)
         future = executor.submit(self.buildTable, cancelEvent)
         self.buildTableFuture = future
-    def buildTable(self, cancelEvent):
+    def buildTable(self, cancelEvent, populateTable = True):
         try:
             print("Building return table...")
             tranEffects = self.db.pullTranEffects()
@@ -1186,7 +1214,8 @@ class returnsApp(QWidget):
             endDate = datetime.strptime(self.dataEndSelect.currentText(), "%B %Y")
             sortHier = self.sortHierarchy.checkedItems()
             invSort = any(invStr in sortHier for invStr in ('Source name', 'Family Branch'))
-            condStatement, parameters = filt2Query(self.db, self.filterDict,startDate,endDate, invSort = invSort)
+            hideNonInvestables = self.hideNonInvestablesBtn.isChecked()
+            condStatement, parameters = filt2Query(self.db, self.filterDict,startDate,endDate, invSort = invSort, hideNonInvestables =  hideNonInvestables)
             self.updateTableLoading(20,  text = 'Loading from Database')
             if cancelEvent.is_set(): #exit if new table build request is made
                 return
@@ -1376,7 +1405,8 @@ class returnsApp(QWidget):
                 return
             for key in (key for key in output.keys() if len(output[key].keys()) == 0):
                 output.pop(key) #remove empty entries
-            gui_queue.put(lambda: self.populateReturnsTable(output,flagStruc=flagOutput))
+            if populateTable:
+                gui_queue.put(lambda: self.populateReturnsTable(output,flagStruc=flagOutput))
             self.currentTableData = output
             self.currentTableFlags = flagOutput
         except Exception as e:
@@ -2140,7 +2170,6 @@ class returnsApp(QWidget):
                 return
             configName = combo.currentText()
             configParams = self.db.fetchOptions(configName)
-            print(configParams)
             for key in self.filterDict:
                 if key in configParams:
                     self.filterDict[key].setCheckedItems(configParams[key])

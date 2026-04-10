@@ -431,13 +431,6 @@ class transactionApp(QWidget):
                 data = self.currentTableData  # dict of dicts
 
                 # 2) determine hierarchy levels present
-                all_types = {row.get("dataType") for row in data.values()}
-                if self.sortHierarchy.checkedItems() != []:
-                    full_hierarchy = ["Total"] + ["Total " + level for level in self.sortHierarchy.checkedItems()] + ["Total Pool"]
-                else:
-                    full_hierarchy = ["Total", "Total assetClass", "Total Pool"]
-                hierarchy_levels = [lvl for lvl in full_hierarchy if lvl in all_types]
-                num_hier = len(hierarchy_levels)
 
                 # 3) dynamic data columns minus "dataType"
                 all_cols = {
@@ -466,19 +459,16 @@ class transactionApp(QWidget):
 
                 rowStart = 4
                 # 5) header row
-                for idx, lvl in enumerate(hierarchy_levels, start=1):
-                    ws.cell(row=rowStart, column=idx, value=lvl)
-                for idx, colname in enumerate(sorted_cols, start=num_hier+1):
+                for idx, colname in enumerate(sorted_cols, start=2):
                     ws.cell(row=rowStart, column=idx, value=colname)
 
-                split_cell = f"{get_column_letter(num_hier+1)}4"
+                split_cell = f"{get_column_letter(1)}4"
                 ws.freeze_panes = split_cell
 
                 # 7) populate rows
                 for r, (row_name, row_dict) in enumerate(data.items(), start=rowStart + 1):
                     row_name, code = self.separateRowCode(row_name)
                     dtype = row_dict.get("dataType")
-                    level = hierarchy_levels.index(dtype) if dtype in hierarchy_levels else 0
 
                     # fills
                     # Default: light gray
@@ -539,16 +529,10 @@ class transactionApp(QWidget):
                     data_fill   = PatternFill("solid", data_color, data_color)
                     header_fill = PatternFill("solid", header_color, header_color)
 
-                    # spread header fill across hierarchy cols
-                    data_start = num_hier + 1
-                    for col in range(level+1, data_start):
-                        cell = ws.cell(row=r, column=col, value=row_name if col==level+1 else None)
-                        cell.fill = header_fill
-                        if col == level+1:
-                            cell.alignment = Alignment(indent=level)
-
+                    cell = ws.cell(row=r, column=1, value=row_name)
+                    cell.fill = header_fill
                     # data cells with proper formatting
-                    for c, colname in enumerate(sorted_cols, start=data_start):
+                    for c, colname in enumerate(sorted_cols, start=2):
                         val = row_dict.get(colname, None)
                         cell = ws.cell(row=r, column=c, value=val)
                         cell.fill = data_fill
@@ -574,7 +558,7 @@ class transactionApp(QWidget):
                 for filter in self.filterOptions:
                     if self.filterDict[filter["key"]].checkedItems() != []:
                         appliedFilters[filter["key"]] = self.filterDict[filter["key"]].checkedItems()
-                filterStart = num_hier
+                filterStart = 0
                 if self.filterDict[filter["key"]].checkedItems() != []: #only write if there are filters applied
                     cell= ws.cell(row=1, column=filterStart, value="Filter:")
                     cell.font = Font(bold=True)

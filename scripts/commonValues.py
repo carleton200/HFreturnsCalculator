@@ -1,7 +1,8 @@
 from dateutil.relativedelta import relativedelta
+from datetime import datetime
 
-currentVersion = "1.2.6"
-demoMode = True  #TRUE: exportable mode. FALSE: developer mode
+currentVersion = "1.2.7"
+demoMode = False  #TRUE: exportable mode. FALSE: developer mode
 remoteDBmode = False
 ownershipCorrect = True
 fullRecalculations = True
@@ -10,6 +11,7 @@ calculationPingTime = 2
 ownershipFlagTolerance = 0.01
 dashInactiveMinutes = 1
 maxRecursion = 10
+dataTimeStart = datetime(2000,1,1)
 
 databaseName = 'CRSPRdata.db'
 dynamoAPIenvName = "Dynamo_API"
@@ -109,3 +111,8 @@ if remoteDBmode:
     sqlPlaceholder = "%s"
 else:
     sqlPlaceholder = "?"
+
+#Report Data
+from reportlab.lib.units import inch
+snapshotColWidths = [2.5 * inch, 4.2 * inch,  3.3 * inch]
+defaultSports = ['Browns','Bucks','Bucks Loan','Crew','Predators','Other']

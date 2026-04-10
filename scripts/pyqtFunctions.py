@@ -1,26 +1,30 @@
 
+import copy
 import os
 from PyQt5.QtWidgets import QFileDialog, QMessageBox
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
-from classes.DatabaseManager import DatabaseManager
+from classes.DatabaseManager import DatabaseManager, load_from_db
 from classes.widgetClasses import MultiSelectBox
 from scripts.commonValues import fullPortStr, masterFilterOptions, maxPDFheaderUnits, nonFundCols, sqlPlaceholder
 from scripts.instantiate_basics import ASSETS_DIR
 from scripts.render_report import render_report
-from scripts.basicFunctions import headerUnits
+from scripts.basicFunctions import headerUnits, rebuildParagraph
 
 from PyQt5.QtWidgets import QApplication, QMessageBox
 import threading
 
-def basicHoldingsReportExport(self , sourceName = None, classification = None):
+from scripts.reportWorkbooks import portfolioSnapshot
+
+def basicHoldingsReportExport(self, onlyHoldings:bool , sourceName = None, classification = None):
     if not hasattr(self,'filteredReturnsTableData'):
         QMessageBox.warning(self,'No Table Loaded Yet','WARNING: No table has been loaded and formatted yet for export. Cancelling...')
         return
     elif self.buildTableLoadingBar.isVisible():
         QMessageBox.warning(self,'New table processing','WARNING: The table is currently rebuilding. Allow the table to fully build before attempting to export it. Cancelling...')
         return
-    data = self.filteredReturnsTableData
+    data = copy.deepcopy(self.filteredReturnsTableData)
+    colorDepths = copy.deepcopy(self.tableColorDepths)
     if self.headerSort.active:
         headerOrder = self.headerSort.popup.get_checked_sorted_items()
     else:
@@ -39,7 +43,34 @@ def basicHoldingsReportExport(self , sourceName = None, classification = None):
     report_date = self.dataEndSelect.currentText()
     report_date = datetime.strptime(report_date,'%B %Y')
     footerData = {'reportDate' : report_date, 'portfolioSource' : sourceName, 'classification' : classification, 'headerUnits' : unitMax}
-    render_report(outPath,data,self.tableColorDepths, holdings_header_order=headerOrder, footerData= footerData, onlyHoldings = True)
+    if not onlyHoldings: 
+        #use current settings to pull calcs for portfolio snapshot
+        startDate = datetime.strptime(self.dataStartSelect.currentText(), "%B %Y")
+        endDate = datetime.strptime(self.dataEndSelect.currentText(), "%B %Y")
+        sortHier = self.sortHierarchy.checkedItems()
+        invSort = any(invStr in sortHier for invStr in ('Source name', 'Family Branch'))
+        condStatement, parameters = filt2Query(self.db, self.filterDict,startDate,endDate, invSort = invSort)
+        calcs = load_from_db(self.db,"calculations",condStatement, tuple(parameters))
+        #Find list of currently selected investors
+        invSelections = self.filterDict["Source name"].checkedItems()
+        famSelections = self.filterDict["Family Branch"].checkedItems()
+        if invSelections != [] or famSelections != []:
+            invs = comboInvestorOpts(self.db,invSelections,famSelections)
+            placeholders = ','.join(sqlPlaceholder for _ in invs)
+            if condStatement in ("", " WHERE"):
+                condStatement = f' WHERE [Source name] in ({placeholders})'
+            else:
+                condStatement += f' AND [Source name] in ({placeholders})'
+        else:
+            invs = [fullPortStr]
+        snapshotWb = portfolioSnapshot(calcs,self,invs,endDate)
+        #get summary paragraph
+        summary = self.db.loadFromDB('paragraphInputs',condStatement = ' WHERE month = ? AND section = ? ORDER BY lineNum',inputs = (self.dataEndSelect.currentText(),'reportSummary'))
+        #summaryText = rebuildParagraph(summary)
+    else:
+        snapshotWb = None
+        summary = None
+    render_report(outPath,data,colorDepths, holdings_header_order=headerOrder, footerData= footerData, onlyHoldings = onlyHoldings, snapshotWb=snapshotWb, narrative_text = summary)
 
 def controlTable(rApp, reset : bool = False, reenable : bool = True, filterChoices : dict[list] = {}, sortHierarchy : list[str] = None, benchmarks : list[str] = None, visChoices : dict[bool] = {}, endDate : datetime = None):
     try:
@@ -92,7 +123,7 @@ def comboInvestorOpts(db: DatabaseManager, invSelections,famSelections):
         else: #Union if only one is valid
             invs = invsF.union(invsI)
     return invs
-def filt2Query(db, filterDict : dict[MultiSelectBox], startDate : datetime, endDate : datetime, invSort:bool = False) -> (str,list[str]):
+def filt2Query(db, filterDict : dict[MultiSelectBox], startDate : datetime, endDate : datetime, invSort:bool = False, hideNonInvestables = False) -> (str,list[str]):
     condStatement = ""
     parameters = []
     invSelections = filterDict["Source name"].checkedItems()
@@ -135,6 +166,9 @@ def filt2Query(db, filterDict : dict[MultiSelectBox], startDate : datetime, endD
         if condStatement == "":
             condStatement = " WHERE"
         filteredFunds = db.pullFundsFromFilters(filterParamDict)
+        if hideNonInvestables:
+            nonInvFunds = list(db.pullNonInvestableFunds())
+            filteredFunds = [f for f in filteredFunds if f not in nonInvFunds]
         for param in filteredFunds:
             parameters.append(param)
         placeholders = ','.join('?' for _ in filteredFunds)
@@ -142,6 +176,14 @@ def filt2Query(db, filterDict : dict[MultiSelectBox], startDate : datetime, endD
             condStatement = f"WHERE [Target name] IN ({placeholders})"
         else:
             condStatement += f" AND [Target name] IN ({placeholders})"
+    elif hideNonInvestables:
+        nonInvFunds = list(db.pullNonInvestableFunds())
+        placeholders = ','.join('?' for _ in nonInvFunds)
+        parameters.extend(nonInvFunds)
+        if condStatement == "":
+            condStatement = f"WHERE [Target name] NOT IN ({placeholders})"
+        else:
+            condStatement += f" AND [Target name] NOT IN ({placeholders})"
     # Add time filter to condStatement for database-level filtering
     startDateStr = startDate.strftime("%Y-%m-%d %H:%M:%S") #TODO: is this even necessary?
     endDateStr = endDate.strftime("%Y-%m-%d %H:%M:%S")

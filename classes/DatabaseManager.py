@@ -205,6 +205,53 @@ class DatabaseManager:
                 ],
                 primary_keys=['id',]
             )
+            self.create_table_if_not_exists(
+                cur,
+                'assetClasses',
+                [
+                    ('level', 'INTEGER'),
+                    ('name' , 'TEXT'),
+                    ('investable','BOOL'),
+                ],
+                primary_keys=['level','name']
+            )
+            self.create_table_if_not_exists(
+                cur,
+                'sportsData',
+                [
+                    ('month', 'TEXT'),
+                    ('team' , 'TEXT'),
+                    ('share', 'REAL'),
+                    ('teamValue', 'REAL'),
+                    ('debt','REAL'),
+                    ('equity','REAL'),
+                ],
+                primary_keys=['month','team']
+            )
+            self.create_table_if_not_exists(
+                cur,
+                'investorSportsData',
+                [
+                    ('month', 'TEXT'),
+                    ('investor' , 'TEXT'),
+                    ('team','TEXT'),
+                    ('ownership', 'REAL'),
+                ],
+                primary_keys=['month','investor','team']
+            )
+            self.create_table_if_not_exists(
+                cur,
+                'paragraphInputs',
+                [
+                    ('month', 'TEXT'),
+                    ('section' , 'TEXT'),
+                    ('lineNum','INTEGER'),
+                    ('indentNum', 'INTEGER'),
+                    ('lineText', 'TEXT'),
+                ],
+                primary_keys=['month','section','lineNum']
+            )
+            
             cur.execute("SELECT * FROM history")
             history = cur.fetchall()
             if len(history) == 0: #add a history entry to work with. Will demand a new import
@@ -382,7 +429,7 @@ class DatabaseManager:
             try:
                 with self._lock:
                     rows = []
-                    for tableName in ('funds', 'securities'):
+                    for tableName in ('funds',):
                         cursor = self._conn.cursor()
                         cursor.execute(f"SELECT * FROM {tableName}")
                         headers = [d[0] for d in cursor.description]
@@ -396,6 +443,53 @@ class DatabaseManager:
                 self.fund2trait = {}
                 return {}
         return self.funds
+    def fetchReportData(self,table,month):
+        try:
+            with self._lock:
+                cursor = self._conn.cursor()
+                cursor.execute(f"SELECT * FROM {table} WHERE month = ?",(month,))
+                headers = [d[0] for d in cursor.description]
+                rows = [dict(zip(headers,row)) for row in cursor.fetchall()]
+                cursor.close()
+            return rows
+        except Exception as e:
+            print(f"WARNING: Error occured while fetching report data: {e.args}")
+            return []
+    def updateReportData(self,table,orig,new):
+        try:
+            with self._lock:
+                cursor = self._conn.cursor()
+                whereCond = ' AND '.join(f'[{k}] = {sqlPlaceholder}' for k in orig)
+                cursor.execute(f'SELECT * FROM {table} WHERE ' + whereCond, tuple(orig.values()))
+                rows =  cursor.fetchall()
+                if len(rows) == 0: #no previous entry, make new
+                    cursor.execute(f'INSERT INTO {table} ({', '.join(f'[{k}]' for k in new)}) VALUES ({','.join(sqlPlaceholder for _ in new.values())})', tuple(new.values()))
+                else: #replace the old entry
+                    cursor.execute(f'UPDATE {table} SET {', '.join(f'[{k}] = {sqlPlaceholder}' for k in new)} WHERE {' AND '.join(f'[{k}] = {sqlPlaceholder}' for k in orig)} ', tuple((*list(new.values()),*list(orig.values()))))
+                self._conn.commit()
+                cursor.close()
+            return True
+        except Exception as e:
+            print(f'WARNING: Update to report data failed: {e.args}')
+            return False
+    def updateParagraph(self,section,month,entries : dict):
+        try:
+            self._conn.execute('DELETE FROM paragraphInputs WHERE month = ? AND section = ?',(month,section))
+            for e in entries:
+                line = e.get('lineNum')
+                indents = e.get('indentNum')
+                text = e.get('lineText')
+                if any(val == None for val in (line, indents, text)):
+                    errorMsg = f'WARNING: Entries to update {section} for {month} had missing components\n{e}'
+                    print(errorMsg)
+                    raise RuntimeError(errorMsg)
+                self._conn.execute(f'INSERT INTO paragraphINPUTS (month,section,lineNum,indentNum,lineText) VALUES ({','.join(sqlPlaceholder for _ in range(5))})', (month,section,line,indents,text))
+            self._conn.commit()
+        except Exception as e:
+            errorMsg = f'WARNING: Failed to update paragraph for {section} in {month}\n\n{e.args}'
+            print(errorMsg)
+            raise RuntimeError(errorMsg)
+        return
     def fetchDyn2Key(self):
         filtOpts = masterFilterOptions
         dyn2key = {filt['fundDyn'] : filt['key'] for filt in filtOpts if filt['key'] not in nonFundCols}
@@ -406,9 +500,13 @@ class DatabaseManager:
         dyn2key = {filt['fundDyn'] : filt['key'] for filt in filtOpts if filt['key'] not in nonFundCols}
         fund2trait = {}
         for fund in self.funds:
-            fund2trait[fund['Name']] = {}
+            fundName = fund['Name']
+            if fundName not in fund2trait:
+                fund2trait[fund['Name']] = {}
+            else:
+                print(f'WARNING: "{fundName}" in funds more than once')
             for key, data in fund.items():
-                if key in dyn2key:
+                if key in dyn2key and data not in (None,'None'):
                     fund2trait[fund['Name']][dyn2key[key]] = data
         return fund2trait
     def fetchFund2Trait(self):
@@ -437,6 +535,22 @@ class DatabaseManager:
     def pullInvestorsFromFamilies(self, familyBranches: list[str]):
         investors = self.fetchInvestors()
         return [investor['Name'] for investor in investors if investor['Parentinvestor'] in familyBranches]
+    def pullNonInvestableFunds(self):
+        assetClasses = self.loadFromDB('assetClasses')
+        hideAC = defaultdict(set)
+        for r in (r for r in assetClasses if r.get('investable') != 1):
+            hideAC[r.get('level')].add(r.get('name')) #sort non investable asset classes by level
+        fund2trait = self.fetchFund2Trait()
+        lvlToKey = {1:'assetClass',2:'subAssetClass',3:'sleeve'}
+        nonInvFunds = set()
+        for fund_name, traits in fund2trait.items(): #find funds under non-investable asset classes
+            for lvl in hideAC:
+                fundAC = traits.get(lvlToKey.get(lvl))
+                if isinstance(fundAC,str):
+                    fundAC = fundAC.strip() #remove trailing spaces
+                if fundAC in hideAC[lvl]:
+                    nonInvFunds.add(fund_name)
+        return nonInvFunds
     def pullFundsFromFilters(self, filDict : dict[list[str]]):
         try:
             fund2trait = self.fetchFund2Trait()

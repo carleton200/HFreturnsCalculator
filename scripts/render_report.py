@@ -1,7 +1,7 @@
 import math
 import statistics
 from PyQt5.QtWidgets import QFileDialog
-from scripts.commonValues import maxPDFheaderUnits, maxRowPadding, maxRowsPerPage, minRowPadding, minimumFontSize, shrinkPDFthreshold, standardFontSize
+from scripts.commonValues import maxPDFheaderUnits, maxRowPadding, maxRowsPerPage, minRowPadding, minimumFontSize, shrinkPDFthreshold, snapshotColWidths, standardFontSize
 from scripts.instantiate_basics import ASSETS_DIR
 from reportlab.lib.units import inch
 from datetime import datetime
@@ -13,7 +13,7 @@ import os
 
 from scripts.basicFunctions import separateRowCode
 from scripts.pdf_generator import PDFReportGenerator, CONTENT_WIDTH
-from reportlab.platypus import PageBreak, Spacer, Table, TableStyle, KeepTogether
+from reportlab.platypus import Frame, PageBreak, Spacer, Table, TableStyle, KeepTogether, FrameBreak
 matplotlib.use('Agg')  # Use non-interactive backend
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -204,85 +204,109 @@ def render_report(out_path, holdingDict, colorDepths, snapshotWb = None, benchma
         tableFontSize = standardFontSize
         rowPadding = maxRowPadding
         rowShrinkage = 0
-
     if snapshotWb and not onlyHoldings:
         try:
             dfs = snapshotWb
             # Assets and Flows-------
-            af = dfs["assets_and_flows"].copy()
-            af = af.iloc[:, :4]
-            af.columns = ["label", "month", "year_1", "inception"]
-            assets_and_flows_rows = af.to_dict(orient="records")
-
+            try:
+                af = dfs["assets_and_flows"].copy()
+                af = af.iloc[:, :4]
+                af.columns = ["label", "month", "year_1", "inception"]
+                assets_and_flows_rows = af.to_dict(orient="records")
+            except:
+                print('     WARNING: assets and flows failed')
+                assets_and_flows_rows = []
             # Read that sheet. Usually header row is the first row with
             # ['', 'Month', 'QTD', 'YTD', '1 Year', '3 Year', 'Inception']
-            pr = dfs['portfolio returns']
-            portfolio_returns_rows = pr.to_dict(orient="records")
+            try:
+                pr = dfs['portfolio returns']
+                portfolio_returns_rows = pr.to_dict(orient="records")
+            except:
+                print('     WARNING: Portfolio returns failed')
+                portfolio_returns_rows = []
 
-            # 3b) Overall Family Breakdown (right panel)
-            ofb = dfs["overall_family_breakdown"].copy()
+            try:
+                # 3b) Overall Family Breakdown (right panel)
+                ofb = dfs["overall_family_breakdown"].copy()
 
-            # Assume first 5 cols: Asset, LM $MM, Δ, CM $MM, %
-            ofb = ofb.iloc[:, :5]
-            ofb.columns = ["asset", "lm_mm", "delta_mm", "cm_mm", "pct"]
-            overall_family_breakdown_rows = ofb.to_dict(orient="records")
-
+                # Assume first 5 cols: Asset, LM $MM, Δ, CM $MM, %
+                ofb = ofb.iloc[:, :5]
+                ofb.columns = ["asset", "lm_mm", "delta_mm", "cm_mm", "pct"]
+                overall_family_breakdown_rows = ofb.to_dict(orient="records")
+            except:
+                print('     WARNING: overall family breakdown failed')
+                overall_family_breakdown_rows = []
             # 3c) HF Foundations
             # Find key that matches 'foundations' case-insensitively
-            foundations_key = next((k for k in dfs.keys() if k.lower() == "foundations"), None)
-            if foundations_key:
-                hff = dfs[foundations_key].copy()
-                # Expected columns: Asset Class, $MM, % Allocation
-                # Take first 3 columns
-                hff = hff.iloc[:, :3]
-                hff.columns = ["asset_class", "mm", "pct"]
-                hf_foundations_rows = hff.to_dict(orient="records")
-            else:
-                print("Warning: 'foundations' sheet not found in loaded keys:", list(dfs.keys()))
+            try:
+                foundations_key = next((k for k in dfs.keys() if k.lower() == "foundations"), None)
+                if foundations_key:
+                    hff = dfs[foundations_key].copy()
+                    # Expected columns: Asset Class, $MM, % Allocation
+                    # Take first 3 columns
+                    hff = hff.iloc[:, :3]
+                    hff.columns = ["asset_class", "mm", "pct"]
+                    hf_foundations_rows = hff.to_dict(orient="records")
+                else:
+                    print("Warning: 'foundations' sheet not found in loaded keys:", list(dfs.keys()))
+                    hf_foundations_rows = []
+            except:
+                print('     WARNING: Foundations data has failed')
                 hf_foundations_rows = []
 
-            # 3d) Sports (under Overall Family Breakdown)
-            # Look for "overall_family_breakdown2"
-            sports_key = next((k for k in dfs.keys() if "breakdown2" in k.lower()), None)
-            if sports_key:
-                sprT = dfs[sports_key].copy()
-                # Expected columns: Sports, Share %, Team Value, Debt, Equity, Family Share
-                # Take first 6 columns
-                sprT = sprT.iloc[:, :6]
-                sprT.columns = ["sports", "share_pct", "team_value", "debt", "equity", "family_share"]
-                sports_rows = sprT.to_dict(orient="records")
-            else:
-                print("Warning: 'overall_family_breakdown2' sheet not found in loaded keys:", list(dfs.keys()))
+            try:
+                # 3d) Sports (under Overall Family Breakdown)
+                # Look for "overall_family_breakdown2"
+                sports_key = next((k for k in dfs.keys() if "breakdown2" in k.lower()), None)
+                if sports_key:
+                    sprT = dfs[sports_key].copy()
+                    # Expected columns: Sports, Share %, Team Value, Debt, Equity, Family Share
+                    # Take first 6 columns
+                    sprT = sprT.iloc[:, :6]
+                    sprT.columns = ["sports", "share_pct", "team_value", "debt", "equity", "family_share"]
+                    sports_rows = sprT.to_dict(orient="records")
+                else:
+                    print("Warning: 'overall_family_breakdown2' sheet not found in loaded keys:", list(dfs.keys()))
+                    sports_rows = []
+            except:
+                print('      WARNING: Sports data has failed')
                 sports_rows = []
 
-            # 3e) Returns vs Benchmark
-            rvb_key = next((k for k in dfs.keys() if "returns_vs_benchmark" in k.lower()), None)
-            if rvb_key:
-                rvb = dfs[rvb_key].copy()
-                # Expecting ~20 columns
-                # 0: Asset Class, 1: $MM
-                # 2-4: Alloc vs Target (%, Tgt %, Delta $)
-                # 5-7: Month (RTN, BM, Delta)
-                # 8-10: YTD
-                # 11-13: 1 Year
-                # 14-16: 3 Year
-                # 17-19: Inception
-                rvb = rvb.iloc[:, :20]
-                rvb.columns = [
-                    "asset_class", "mm",
-                    "alloc_pct", "tgt_pct", "alloc_delta",
-                    "m_rtn", "m_bm", "m_delta",
-                    "ytd_rtn", "ytd_bm", "ytd_delta",
-                    "y1_rtn", "y1_bm", "y1_delta",
-                    "y3_rtn", "y3_bm", "y3_delta",
-                    "inc_rtn", "inc_bm", "inc_delta"
-                ]
-                returns_vs_benchmark_rows = rvb.to_dict(orient="records")
-            else:
-                print("Warning: 'returns_vs_benchmark' sheet not found in loaded keys:", list(dfs.keys()))
+            try:
+                # 3e) Returns vs Benchmark
+                rvb_key = next((k for k in dfs.keys() if "returns_vs_benchmark" in k.lower()), None)
+                if rvb_key:
+                    rvb = dfs[rvb_key].copy()
+                    # Expecting ~20 columns
+                    # 0: Asset Class, 1: $MM
+                    # 2-4: Alloc vs Target (%, Tgt %, Delta $)
+                    # 5-7: Month (RTN, BM, Delta)
+                    # 8-10: YTD
+                    # 11-13: 1 Year
+                    # 14-16: 3 Year
+                    # 17-19: Inception
+                    rvb = rvb.iloc[:, :20]
+                    rvb.columns = [
+                        "asset_class", "mm",
+                        "alloc_pct", "tgt_pct", "alloc_delta",
+                        "m_rtn", "m_bm", "m_delta",
+                        "ytd_rtn", "ytd_bm", "ytd_delta",
+                        "y1_rtn", "y1_bm", "y1_delta",
+                        "y3_rtn", "y3_bm", "y3_delta",
+                        "inc_rtn", "inc_bm", "inc_delta"
+                    ]
+                    returns_vs_benchmark_rows = rvb.to_dict(orient="records")
+                else:
+                    print("Warning: 'returns_vs_benchmark' sheet not found in loaded keys:", list(dfs.keys()))
+                    returns_vs_benchmark_rows = []
+            except:
+                print(f'    WARNING: Returns vs. Benchmarks data has failed')
                 returns_vs_benchmark_rows = []
         except Exception as e:
             print(f'WARNING: Error occured processing snapshot data for report export: {e.args}')
+            import traceback
+            print(traceback.format_exc())
+            raise
     else:
         hf_foundations_rows = []
         assets_and_flows_rows = []
@@ -447,12 +471,9 @@ def render_report(out_path, holdingDict, colorDepths, snapshotWb = None, benchma
         # 4) Load Narrative
         narrative_path = ASSETS_DIR + "/reportFiles/narrative.md"
         narrative_path = Path(narrative_path)
-        if os.path.exists(narrative_path):
-            narrative_text = narrative_path.read_text(encoding="utf-8")
-            narrative_html = markdown.markdown(narrative_text)
-        else:
+        if not narrative_text:
             print(f"Warning: Narrative text not found.")
-            narrative_html = "<p>No narrative found.</p>"
+            narrative_text = "No narrative found."
 
         # 4b) Load JPM Commentary
         jpm_commentary_path = ASSETS_DIR + "/reportFiles/jpm_commentary.md"
@@ -475,61 +496,64 @@ def render_report(out_path, holdingDict, colorDepths, snapshotWb = None, benchma
         pdf_gen = PDFReportGenerator(str(out_path), ASSETS_DIR, footerData=footerData)
         
         if not onlyHoldings:
+            pageBreakToCols = PageBreak(nextTemplate='snapshot')
+            pageBreakToStandard = PageBreak(nextTemplate='standard')
             # Cover page
             pdf_gen.add_cover_page(
                 "Overall Post HFC - report automation test",
                 "Monthly Portfolio Overview",
                 formatted_date
             )
-            
+            pdf_gen.story.append(pageBreakToStandard)
             # Narrative page
             pdf_gen.add_narrative_page(
                 "High-Level Portfolio Snapshot Narrative",
                 formatted_date,
-                narrative_html
+                narrative_text
             )
-            
+            pdf_gen.story.append(pageBreakToCols)
             # Main snapshot page
             pdf_gen.add_header_row("High-Level Portfolio Snapshot", formatted_date)
-        
+            pdf_gen.story.append(FrameBreak)
+
             # Top row: 3-column layout
             # Since ReportLab has issues with nested KeepTogether in Tables,
             # we'll use a custom approach: add tables directly but adjust their widths
             # to fit the 3-column layout when rendered
             
-            col1_width = 2.8 * inch
-            col2_width = 3.8 * inch
-            col3_width = 3.36 * inch
+            col1_width = snapshotColWidths[0]
+            col2_width = snapshotColWidths[1]
+            col3_width = snapshotColWidths[2]
             
             # Add left column: Assets and Flows + Foundations
             left_content = pdf_gen.add_assets_and_flows_table(assets_and_flows_rows, col1_width)
             for item in left_content:
                 pdf_gen.story.append(item)
-            pdf_gen.story.append(Spacer(1, 0.2*inch))
+            #pdf_gen.story.append(Spacer(1, 0.2*inch))
             foundations_content = pdf_gen.add_foundations_table(hf_foundations_rows, col1_width)
             for item in foundations_content:
                 pdf_gen.story.append(item)
+            pdf_gen.story.append(FrameBreak) #column break
             
             # Add middle column: Portfolio Returns
-            pdf_gen.story.append(Spacer(1, 0.2*inch))
             middle_content = pdf_gen.add_portfolio_returns_table(portfolio_returns_rows, col2_width)
             for item in middle_content:
                 pdf_gen.story.append(item)
-            
+            pdf_gen.story.append(FrameBreak) #column break
             # Add right column: Overall Family Breakdown + Sports
-            pdf_gen.story.append(Spacer(1, 0.2*inch))
             right_content = pdf_gen.add_overall_family_breakdown_table(overall_family_breakdown_rows, col3_width)
             for item in right_content:
                 pdf_gen.story.append(item)
-            sports_content = pdf_gen.add_sports_table(sports_rows, col3_width)
-            for item in sports_content:
-                pdf_gen.story.append(item)
-            
+            if sports_rows:
+                sports_content = pdf_gen.add_sports_table(sports_rows, col3_width)
+                for item in sports_content:
+                    pdf_gen.story.append(item)
+            pdf_gen.story.append(FrameBreak) #column break
             # Returns vs Benchmark table
-            pdf_gen.story.append(Spacer(1, 0.2*inch))
             rvb_content = pdf_gen.add_returns_vs_benchmark_table(returns_vs_benchmark_rows)
             pdf_gen.story.extend(rvb_content)
             
+            pdf_gen.story.append(pageBreakToStandard)
             # Benchmarks page (if data available)
             if benchmarks_rows:
                 pdf_gen.story.append(PageBreak())
@@ -550,8 +574,6 @@ def render_report(out_path, holdingDict, colorDepths, snapshotWb = None, benchma
         
         # Portfolio Holdings pages - start on new page
         if portfolio_holdings_pages:
-            if not onlyHoldings:
-                pdf_gen.story.append(PageBreak())  # Always start on new page
             for page_num, page_rows in enumerate(portfolio_holdings_pages):
                 if page_num > 0:
                     pdf_gen.story.append(PageBreak())

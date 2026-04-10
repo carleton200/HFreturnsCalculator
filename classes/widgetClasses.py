@@ -1,9 +1,13 @@
+from datetime import datetime
 from PyQt5.QtCore import Qt, QPoint, pyqtSignal
+from PyQt5.QtGui import QBrush, QColor
 from PyQt5.QtWidgets import (
-    QWidget, QLineEdit, QVBoxLayout, QPushButton, QScrollArea,
+    QRadioButton, QTableWidget, QTableWidgetItem, QWidget, QLineEdit, QVBoxLayout, QPushButton, QScrollArea,
     QCheckBox, QListWidget, QListWidgetItem, QDialog, QLabel,
     QHBoxLayout, QComboBox, QDateEdit, QApplication, QSpinBox
 )
+from dateutil.relativedelta import relativedelta
+from scripts.commonValues import dataTimeStart
 from scripts.loggingFuncs import attach_logging_to_class
 
 class ClickableLineEdit(QLineEdit):
@@ -47,7 +51,7 @@ class PopupPanel(QWidget):
 
 
 class MultiSelectBox(QWidget):
-    def __init__(self, parent=None, dispLib:dict = {'id2disp' : {}, 'disp2id' : {}}):
+    def __init__(self, parent=None, dispLib:dict = {'id2disp' : {}, 'disp2id' : {}}, singleSelect = False):
         super().__init__(parent)
 
         # ——— top line edit ———
@@ -59,6 +63,7 @@ class MultiSelectBox(QWidget):
         self.currentItems = []
         self.disp2id = dispLib['disp2id'].get
         self.id2disp = dispLib['id2disp'].get
+        self.singleSelect = singleSelect
 
         # ——— pop-up panel ———
         self.popup = PopupPanel(self)
@@ -120,8 +125,12 @@ class MultiSelectBox(QWidget):
         text = self.id2disp(text,text) #put checkboxes to show the display version
         if text in self._checkboxes:
             return
-        cb = QCheckBox(text, self.popup)
-        cb.stateChanged.connect(self._updateLine)
+        if self.singleSelect:
+            cb = QRadioButton(text,self.popup)
+            cb.clicked.connect(self._updateLine)
+        else:
+            cb = QCheckBox(text, self.popup)
+            cb.stateChanged.connect(self._updateLine)
         self.popup.box_layout.insertWidget(
             self.popup.box_layout.count() - 1, cb
         )
@@ -335,7 +344,7 @@ class SortButtonWidget(QWidget):
 
 class simpleMonthSelector(QWidget):
     currentTextChanged = pyqtSignal()
-    def __init__(self, parent = None):
+    def __init__(self, parent = None, autoPopulate = False):
         super().__init__(parent)
         layout = QHBoxLayout(self)
         self.monthSelect = QComboBox()
@@ -345,6 +354,17 @@ class simpleMonthSelector(QWidget):
         layout.addWidget(self.yearSelect)
         self.monthSelect.currentTextChanged.connect(self.emitSignal)
         self.yearSelect.currentTextChanged.connect(self.emitSignal)
+        if autoPopulate:
+            start = dataTimeStart
+            end = datetime.now() + relativedelta(months=3)
+            index = start
+            monthList = []
+            while index < end:
+                monthList.append(datetime.strftime(index,"%B %Y"))
+                index += relativedelta(months=1)
+            self.addItems(monthList)
+            if len(monthList) > 5:
+                self.setCurrentText(monthList[-5])
     def addItems(self, items):
         self.changeLock = True
         months = set()
@@ -417,3 +437,248 @@ class CheckboxIntInputWidget(QWidget):
         Returns a tuple: (is_checked: bool, integer_value: int)
         """
         return (self.checkbox.isChecked(), self.intInput.value())
+
+class EditableDBTableWidget(QTableWidget):
+    """
+    Table widget for displaying and editing database-backed tabular data.
+
+    Args:
+        db_manager (DatabaseManager): The database manager for data updates.
+        table_name (str): The name of the table in the database.
+        month (str): Month string or identifier for filtering rows.
+        headers (list): List of headers/column names to display.
+        data_rows (list of dict): Each row is a dict with keys matching headers.
+
+    When a cell is edited and the new value is different, calls:
+        db_manager.update_table_row(table_name, original_row_dict, updated_row_dict)
+    The table updates the cell only if the update returns True.
+    """
+
+    def __init__(self, db_manager, table_name, _, headerDict, data_rows, constants = {}, XYmode = [], parent=None, total = False):
+        super().__init__(parent)
+        self.db_manager = db_manager
+        self.table_name = table_name
+        self.constants = constants
+        self.XYmode = XYmode if XYmode else []
+        self.xy_active = len(self.XYmode) == 3
+        self.total = total
+        headers = list(headerDict.keys()) if not self.xy_active else []
+        self.headers = headers
+        self.headerDict = headerDict
+        self.data_rows = data_rows
+        self.totalRow = 0
+        self._original_rows = []  # Track original dicts for change comparison
+        self._xy_lookup = {}
+        self._xy_rows = []
+        self._xy_cols = []
+        self._xy_value_type = str
+        
+        headerConversions = {'team' : 'Team', 'share' : 'Share (%)', 'teamValue' : 'Team Value',
+                             'debt' : 'Debt', 'equity' : 'Equity' , 'ownership' : 'Ownership (%)'}
+        totalHeaderLabels = [] if not total else ['Total',]
+        if self.xy_active:
+            x_key, y_key, value_key = self.XYmode
+            row_labels = []
+            col_labels = []
+            for row_dict in self.data_rows:
+                x_val = row_dict.get(x_key)
+                y_val = row_dict.get(y_key)
+                if x_val not in row_labels:
+                    row_labels.append(x_val)
+                if y_val not in col_labels:
+                    col_labels.append(y_val)
+                self._xy_lookup[(x_val, y_val)] = row_dict.copy()
+                curr_val = row_dict.get(value_key)
+                if curr_val is not None:
+                    self._xy_value_type = type(curr_val)
+            self._xy_rows = row_labels
+            self._xy_cols = col_labels
+            self.setColumnCount(len(self._xy_cols))
+            self.setRowCount(len(self._xy_rows) + len(totalHeaderLabels))
+            y_headers = [headerConversions.get(h, h) for h in self._xy_cols]
+            self.setHorizontalHeaderLabels(y_headers)
+            self.setVerticalHeaderLabels([h for h in row_labels] + totalHeaderLabels)
+        else:
+            self.setColumnCount(len(headers))
+            self.setRowCount(len(data_rows) + len(totalHeaderLabels))
+            self.setHorizontalHeaderLabels([headerConversions.get(h,h) for h in headers])
+        self.setEditTriggers(QTableWidget.DoubleClicked | QTableWidget.SelectedClicked | QTableWidget.EditKeyPressed)
+
+        self.populate_table()
+        self.cellChanged.connect(self.on_cell_changed)
+        self._editing = False  # Prevent recursive triggers
+
+    def populate_table(self):
+        """Populate table with current data_rows and build _original_rows."""
+        self._original_rows = []
+        row_idx = 0
+        if self.xy_active:
+            x_key, y_key, value_key = self.XYmode
+            for row_idx, x_val in enumerate(self._xy_rows):
+                for col_offset, y_val in enumerate(self._xy_cols, start=0):
+                    source_row = self._xy_lookup.get((x_val, y_val), {})
+                    item_val = source_row.get(value_key, "")
+                    table_item = QTableWidgetItem("" if item_val is None else str(item_val))
+                    table_item.setBackground(QColor("#FFFFFF"))
+                    table_item.setData(Qt.UserRole, self.headerDict.get(value_key, self._xy_value_type))
+                    self.setItem(row_idx, col_offset, table_item)
+                    base_row = source_row.copy()
+                    if x_key not in base_row:
+                        base_row[x_key] = x_val
+                    if y_key not in base_row:
+                        base_row[y_key] = y_val
+                    if value_key not in base_row:
+                        base_row[value_key] = item_val
+                    self._original_rows.append(base_row)
+        else:
+            for row_idx, row_dict in enumerate(self.data_rows):
+                self._original_rows.append(row_dict.copy())
+                for col_idx, header in enumerate(self.headers):
+                    item_val = row_dict.get(header, "")
+                    if self.headerDict.get(header) == bool:
+                        item_val = 'True' if item_val == 1 else 'False'
+                    table_item = QTableWidgetItem(str(item_val))
+                    table_item.setBackground(QColor("#FFFFFF"))
+                    table_item.setData(Qt.UserRole, self.headerDict.get(header,str))  # Save type info for validation
+                    self.setItem(row_idx, col_idx, table_item)
+        self.totalRow = row_idx + 1
+        if self.total:
+            self.setTotals()
+    def setTotals(self):
+        self._editing = True
+        cols = self.columnCount()
+        rows = self.rowCount() - 1
+        for c in range(cols):
+            colSum = 0
+            for r in range(rows):
+                val = self.item(r,c).text()
+                dt = self.item(r,c).data(Qt.UserRole)
+                if dt in (int,float):
+                    val = float(val)
+                    colSum += val
+            totalItem = QTableWidgetItem(str(colSum))
+            if colSum == 100:
+                totalItem.setBackground(QColor("#99ff99"))
+            else:
+                totalItem.setBackground(QColor("#ff6666"))
+            totalItem.setFlags(totalItem.flags() & ~Qt.ItemIsEditable)
+            self.setItem(self.totalRow, c, totalItem)
+        self._editing = False
+    def on_cell_changed(self, row, column):
+        """
+        Called when a cell's value is changed by the user.
+        Compares with original data and calls db_manager.update_table_row if a real change is made.
+        If not successful, resets item to old value.
+        """
+        if self._editing:
+            return  # Avoid recursive triggers
+        try:
+            if self.xy_active:
+                x_key, y_key, value_key = self.XYmode
+                header = value_key
+                x_val = self._xy_rows[row]
+                y_val = self._xy_cols[column]
+                source_row = self._xy_lookup.get((x_val, y_val), {})
+                old_row = source_row.copy()
+                if x_key not in old_row:
+                    old_row[x_key] = x_val
+                if y_key not in old_row:
+                    old_row[y_key] = y_val
+                if value_key not in old_row:
+                    old_row[value_key] = ""
+                new_row = old_row.copy()
+            else:
+                header = self.headers[column]
+                old_row = self._original_rows[row].copy()
+                new_row = self._row_to_dict(row)
+            # type conversion: get expected type from Qt.UserRole
+            item = self.item(row, column)
+            orig_type = item.data(Qt.UserRole)
+            new_val_raw = self.item(row, column).text()
+
+            # Try to convert to original type, fallback to string
+            try:
+                if orig_type is int:
+                    new_val = int(new_val_raw)
+                elif orig_type is float:
+                    new_val = float(new_val_raw)
+                elif orig_type is bool:
+                    new_val = new_val_raw.lower() in ("true", "1", "yes")
+                else:
+                    new_val = new_val_raw
+            except Exception:
+                #Don't allow bad data types. Revert value and mark failed
+                self._editing = True
+                self.item(row, column).setText(str(old_row.get(header, "")))
+                self.item(row, column).setBackground(QBrush(QColor('#FFB4B4')))
+                self._editing = False
+                return
+
+            # Only proceed if change is real
+            if old_row.get(header, "") != new_val:
+                new_row[header] = new_val
+                success = False
+                if hasattr(self.db_manager, "updateReportData"):  # Defensive for not-yet-created function
+                    dbOld = old_row.copy()
+                    for k,v in self.constants.items(): #put the hidden col values that don't change
+                        dbOld[k] = v
+                    dbNew = new_row.copy()
+                    for k,v in self.constants.items():
+                        dbNew[k] = v
+                    success = self.db_manager.updateReportData(
+                        self.table_name, dbOld, dbNew
+                    )
+                if success:
+                    if self.xy_active:
+                        self._xy_lookup[(x_val, y_val)] = new_row.copy()
+                    else:
+                        self._original_rows[row] = new_row.copy()
+                    # Optionally, visually mark success
+                    self.item(row, column).setBackground(QBrush(QColor('#FFFFFF')))
+                    self.setTotals()
+                else:
+                    # Revert value and mark failed
+                    self._editing = True
+                    self.item(row, column).setText(str(old_row.get(header, "")))
+                    self.item(row, column).setBackground(QBrush(QColor('#FFB4B4')))
+                    self._editing = False
+            else:
+                # No real change, silently ignore/reset background
+                self.item(row, column).setBackground(QBrush())
+        except Exception as e:
+            # Fallback: if error, revert cell
+            print(f'Table edit failed: {e.args}')
+            if self.xy_active:
+                x_key, y_key, value_key = self.XYmode
+                if column == 0:
+                    return
+                x_val = self._xy_rows[row]
+                y_val = self._xy_cols[column]
+                old_row = self._xy_lookup.get((x_val, y_val), {})
+                header = value_key
+            else:
+                old_row = self._original_rows[row]
+                header = self.headers[column]
+            self._editing = True
+            self.item(row, column).setText(str(old_row.get(header, "")))
+            self._editing = False
+
+    def _row_to_dict(self, row_idx):
+        """Build a dictionary representing the table row at row_idx."""
+        row_dict = {}
+        for col_idx, header in enumerate(self.headers):
+            item = self.item(row_idx, col_idx)
+            val = item.text() if item else ""
+            # Optionally, try to infer type from original
+            orig_type = item.data(Qt.UserRole) if item else str
+            try:
+                if orig_type is int:
+                    val = int(val)
+                elif orig_type is float:
+                    val = float(val)
+                elif orig_type is bool:
+                    val = val.lower() in ("true", "1", "yes")
+            except Exception:
+                pass
+            row_dict[header] = val
+        return row_dict

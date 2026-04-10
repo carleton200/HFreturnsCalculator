@@ -396,3 +396,19 @@ def fullPortfolioCalcs(calculations:list[dict]):
                 pC[h] += c[h]
     calculations.extend([entry for dt in portfolioCalcs for nP in portfolioCalcs[dt] for entry in portfolioCalcs[dt][nP].values()])
     return calculations
+def rebuildParagraph(entries):
+    #entries must be ordered by lineNum in the database call before this
+    if not entries:
+        return None
+    paragraph = ''
+    for e in entries:
+        indents = e.get('indentNum')
+        text = e.get('lineText')
+        if any(val == None for val in (indents,text)) or not isinstance(text,str):
+            continue
+        try:
+            indents = int(indents)
+        except:
+            continue
+        paragraph += f'{'\t' * indents}{text}\n'
+    return paragraph

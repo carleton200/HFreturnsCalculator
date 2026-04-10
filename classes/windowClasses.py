@@ -1,8 +1,11 @@
+from collections import defaultdict
+
+from numpy.char import count
 from classes import DatabaseManager
 from classes.DatabaseManager import load_from_db
-from scripts.basicFunctions import separateRowCode, findSourceName
+from scripts.basicFunctions import rebuildParagraph, separateRowCode, findSourceName
 from scripts.loggingFuncs import attach_logging_to_class
-from classes.widgetClasses import SortButtonWidget, MultiSelectBox, simpleMonthSelector
+from classes.widgetClasses import EditableDBTableWidget, SortButtonWidget, MultiSelectBox, simpleMonthSelector
 from scripts.exportTableToExcel import exportTableToExcel
 from scripts.pyqtFunctions import basicHoldingsReportExport, comboInvestorOpts, controlTable, filt2Query
 from scripts.render_report import render_report
@@ -11,7 +14,7 @@ from openpyxl.utils import get_column_letter
 from dateutil.relativedelta import relativedelta
 from openpyxl import Workbook
 from scripts.instantiate_basics import gui_queue, executor
-from scripts.commonValues import aggTransFields, sqlPlaceholder, timeOptions, percent_headers, demoMode, nonFundCols
+from scripts.commonValues import aggTransFields, defaultSports, fullPortStr, sqlPlaceholder, timeOptions, percent_headers, demoMode, nonFundCols
 import sqlite3
 import logging
 import traceback
@@ -20,14 +23,14 @@ import pandas as pd
 from datetime import datetime
 from openpyxl import load_workbook
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout,
+    QGridLayout, QTabWidget, QTextEdit, QWidget, QVBoxLayout,
     QLabel,  QPushButton, QFormLayout,
     QRadioButton, QButtonGroup, QComboBox, QHBoxLayout,
     QTableWidget, QTableWidgetItem,  QMessageBox,
     QScrollArea, QFileDialog, 
      QHeaderView, QDateEdit, QSplitter
 )
-from PyQt5.QtGui import QDesktopServices
+from PyQt5.QtGui import QBrush, QColor, QDesktopServices, QTextBlock
 from PyQt5.QtCore import Qt,  QUrl, QDate
 from scripts.instantiate_basics import DATABASE_PATH
 
@@ -898,7 +901,39 @@ class tableWindow(QWidget):
                 self.table.setItem(r, c, item)
     def export(self,*_):
         exportTableToExcel(self,self.rows,self.headers)
+class investablesMenu(QWidget):
+    def __init__(self, parent = None, parentSource = None) -> None:
+        super().__init__(parent)
+        self.parent = parentSource
+        self.initUI()
+    def initUI(self):
+        layout = QGridLayout(self)
+        self.setStyleSheet(self.parent.appStyle)
+        self.setObjectName('mainPage')
+        self.resize(1300,500)
 
+    
+        data = self.parent.db.loadFromDB('assetClasses',condStatement = ' ORDER BY level')
+        headerDict = {'level' : int, 'name' : str, 'investable' : bool}
+        lvlToKey = {1:'assetClass',2:'subAssetClass',3:'sleeve'}
+        assetLevels = {1: set(), 2: set(), 3: set()}
+        for lvl in assetLevels: #find all expected asset levels from data
+            asset_key = lvlToKey[lvl]
+            options = self.parent.db.fetchFundOptions(asset_key)
+            assets = sorted({opt for opt in options if opt not in (None,"", "None")})
+            assetLevels[lvl].update(assets)
+        currAClevels = defaultdict(set)
+        for r in data: #find the asset levels listed in database
+            lvl = r.get('level')
+            name = r.get('name')
+            currAClevels[lvl].add(name)
+        for lvl, names in assetLevels.items(): #add space filling entries for all expected entries not present
+            for name in names:
+                if name not in currAClevels[lvl]:
+                    newEntry = {'level' : lvl, 'name' : name}
+                    data.append(newEntry)
+        self.assetsTable = EditableDBTableWidget(self.parent.db,'assetClasses',None,headerDict,data)
+        layout.addWidget(self.assetsTable,2,0,1,2)
 class reportExportWindow(QWidget):
     def __init__(self, db: DatabaseManager, exportType, parent = None, flags = Qt.WindowFlags(), parentSource = None):
         super().__init__(parent, flags)
@@ -1042,8 +1077,7 @@ class reportExportWindow(QWidget):
                 inputs = (*investors,)
                 condStatement = f' WHERE [Source name] in ({placeholders})'
                 calcs = self.parent.db.loadCalcs(condStatement,inputs)
-                trans = self.parent.db.loadFromDB('transactions',condStatement,inputs)
-                snapshotWorkbook = portfolioSnapshot(calcs, trans, self.parent,investors,dateDt)
+                snapshotWorkbook = portfolioSnapshot(calcs, self.parent,investors,dateDt)
                 render_report(self.parent,snapshotWorkbook)
             else:
                 filters = {'Source name' : investors}
@@ -1058,3 +1092,130 @@ class reportExportWindow(QWidget):
             QMessageBox.warning(self,'Error in report export', f"An error occured initializing the report export \n {e.args}")
             print(traceback.format_exc())
             self.confirmBtn.setEnabled(True)
+class reportDataWindow(QWidget):
+    def __init__(self, parent = None, parentSource = None) -> None:
+        super().__init__(parent)
+        self.parent = parentSource
+        self.initUI()
+    def initUI(self):
+        layout = QVBoxLayout(self)
+        self.setStyleSheet(self.parent.appStyle)
+        self.setObjectName('mainPage')
+        self.resize(1300,500)
+        monthSelBox = QWidget()
+        layout.addWidget(monthSelBox)
+        monthSelLayout = QHBoxLayout(monthSelBox)
+        monthSelLayout.addWidget(QLabel('Month For Report Data: '))
+        self.monthSelect = simpleMonthSelector(autoPopulate=True)
+        monthSelLayout.addWidget(self.monthSelect)
+        monthSelLayout.addStretch()
+        #Sports data entry
+        tabContainer = QTabWidget()
+        layout.addWidget(tabContainer)
+        tabContainer.addTab(self.sportsTab(),'Sports Data')
+        tabContainer.addTab(self.summaryTab(),'Summary Paragraph')
+    def sportsTab(self):
+        def populateSportsTables():
+            month = self.monthSelect.currentText()
+            #Overall sports data
+            data = self.parent.db.fetchReportData('sportsData',month)
+            headerDict = {'team' : str, 'share' : float, 'teamValue' : float, 'debt' : float, 'equity' : float }
+            currTeams = [r.get('team') for r in data]
+            for team in defaultSports: #make sure a row exists for each expected team
+                if team not in currTeams:
+                    newRow = {k : '' if headerDict[k] == str else 0.0 for k,v in headerDict.items()}
+                    newRow['team'] = team
+                    data.append(newRow)
+            constants = {'month' : month}
+            self.sportsDataTable = EditableDBTableWidget(self.parent.db,'sportsData',month,headerDict,data, constants=constants)
+            layout.addWidget(self.sportsDataTable,2,0,1,2)
+            populateInvestorTable()
+        def populateInvestorTable():
+            month = self.monthSelect.currentText()
+            #investor = self.investorSelector.checkedItems()
+            #if len(investor) == 1:
+            #    investor = investor[0]
+            #else:
+            #    return
+            #Sports Data by Investor
+            allInvestorData = self.parent.db.fetchReportData('investorSportsData',month)
+            investors = self.investors
+            headerDict = {'team' : str, 'ownership' : float}
+            #Build in warning to determine if values total to 100% or not
+            for inv in investors:
+                investorData = [r for r in allInvestorData if r.get('investor') == inv]
+                currTeams = [r.get('team') for r in investorData]
+                for team in defaultSports: #make sure a row exists for each expected team
+                    if team not in currTeams:
+                        newRow = {k : '' if headerDict[k] == str else 0.0 for k,v in headerDict.items()}
+                        newRow['team'] = team
+                        newRow['investor'] = inv
+                        allInvestorData.append(newRow)
+            constants = {'month' : month}
+            self.investorTable = EditableDBTableWidget(self.parent.db,'investorSportsData',month,headerDict,allInvestorData,
+                                                         constants = constants, XYmode=['investor','team','ownership'], total = True)
+            layout.addWidget(self.investorTable,2,2,1,2)
+        tabBox = QWidget()
+        tabBox.setObjectName('mainPage')
+        layout = QGridLayout(tabBox)
+
+        layout.addWidget(QLabel('Month of data:'),1,0)
+        
+        self.investors = sorted([inv.get('Name') for inv in self.parent.db.fetchInvestors()])
+        layout.addWidget(QLabel('Investor Ownerships For Selected Month (%)'),1,3)
+        self.sportsDataTable = QWidget()
+        self.investorTable = QWidget()
+        layout.addWidget(self.sportsDataTable,2,0,1,2)
+        layout.setColumnStretch(1,3)
+        layout.addWidget(self.investorTable,2,2,1,2)
+        layout.setColumnStretch(3,6)
+        self.monthSelect.currentTextChanged.connect(populateSportsTables)
+        populateSportsTables()
+        return tabBox
+    def summaryTab(self):
+        def saveParagraph():
+            try:
+                month = self.monthSelect.currentText()
+                text = self.summaryTextEntry.toPlainText()
+                split = text.split('\n')
+                newEntries = []
+                for idx, line in enumerate(split):
+                    # Find the leading whitespace (spaces or tabs) at the start of the line
+                    leading_ws = len(line) - len(line.lstrip())
+                    newEntries.append({'lineNum':idx,'indentNum' : leading_ws, 'lineText' : line[leading_ws:]})
+                self.parent.db.updateParagraph('reportSummary',month,newEntries)
+                self.summaryStatusMsg.setText('')
+                QMessageBox.information(self,'Success!',f'The summary paragraph for {month} has been successfully updated.')
+            except Exception as e:
+                QMessageBox.warning(self,'Error saving paragraph',f'Error has occured processing text entry: {e}')
+        def updateCurrParagraph():
+            month = self.monthSelect.currentText()
+            summaryLines = self.parent.db.loadFromDB('paragraphInputs',condStatement = ' WHERE month = ? AND section = ?',inputs = (month,'reportSummary'))
+            summary = rebuildParagraph(summaryLines)
+            if not summary:
+                self.summaryStatusMsg.setText('NOTICE: The currently selected month has no entries. The current display shows either the last selected month that has a summary or manually edited text.')
+            else: #Only update if there is a summary
+                self.summaryTextEntry.setText(summary)
+        self.monthSelect.currentTextChanged.connect(updateCurrParagraph)
+        tabBox = QWidget()
+        tabBox.setObjectName('mainPage')
+        layout = QGridLayout(tabBox)
+        submitBtn = QPushButton('Save Summary Paragraph For This Month')
+        submitBtn.clicked.connect(saveParagraph)
+        layout.addWidget(QLabel('NOTICE:\n- Updating the month will clear the text entry if the newly selected month has a previous entry.'
+                                                '\n- Indents carry through the whole line, even if the screen shrinks too much so they wrap, do not add more indents unless you want them to appear in the report.'
+                                                '\n- Bullet points will be automatically added to each line in the report.'))
+        layout.addWidget(submitBtn)
+        self.summaryStatusMsg = QLabel('')
+        layout.addWidget(self.summaryStatusMsg)
+        self.summaryTextEntry = QTextEdit()
+        layout.addWidget(self.summaryTextEntry)
+        updateCurrParagraph() #populate the paragraph
+        return tabBox
+        # Editable database-backed table widget for monthly data.
+
+
+
+
+
+        

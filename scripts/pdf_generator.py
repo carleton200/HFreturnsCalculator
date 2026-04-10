@@ -3,15 +3,17 @@ PDF Generator using ReportLab - Direct PDF creation matching HTML template forma
 Uses Frame system for proper layout and two-pass build for page numbering
 """
 from ctypes import alignment
+import math
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter, landscape
 from reportlab.lib.units import inch
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_LEFT, TA_RIGHT, TA_CENTER, TA_JUSTIFY
 from reportlab.platypus import (
-    SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak,
-    Image, KeepTogether, KeepInFrame, Frame, PageTemplate, BaseDocTemplate
+    NextPageTemplate, SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak,
+    Image, KeepTogether, KeepInFrame, Frame, PageTemplate, BaseDocTemplate, FragLine
 )
+from reportlab.platypus.flowables import Flowable
 from datetime import datetime
 from reportlab.pdfgen import canvas
 from reportlab.lib.colors import HexColor, blue
@@ -20,7 +22,7 @@ from pathlib import Path
 import os
 from typing import List, Dict, Optional, Tuple
 
-from scripts.commonValues import maxRowPadding, standardFontSize, textCols
+from scripts.commonValues import maxRowPadding, snapshotColWidths, standardFontSize, textCols
 try:
     from scripts.basicFunctions import headerUnits
     from scripts.commonValues import smallHeaders, fraction_headers, percent_headers, yearOptions
@@ -32,13 +34,14 @@ from reportlab.pdfbase.ttfonts import TTFont
 
 pdfmetrics.registerFont(TTFont('Tahoma', 'Tahoma.ttf'))
 pdfmetrics.registerFont(TTFont('Tahoma-Bold', 'TahomaBd.ttf'))
+pdfmetrics.registerFont(TTFont('Tahoma-bold', 'TahomaBd.ttf'))
 
 
 
 
 # Color definitions matching HTML template
 COLOR_PRIMARY = HexColor(0x004225)  #HF Capital official color 'British Racing Green'
-COLOR_GRAY_HEADER = HexColor(0x4E4E4E)
+COLOR_GRAY_HEADER = HexColor(0x7E7E7E)
 COLOR_TOTAL = HexColor(0xbebfc2)  # rgb(190, 191, 194) - light gray for totals
 COLOR_SUBCLASS = HexColor(0xf3f3f4)  # rgb(243, 243, 244) - very light gray
 COLOR_POOL = HexColor(0xd7d7d9)  # rgb(215, 215, 217) - medium gray
@@ -65,8 +68,10 @@ FONT_SIZE_SMALL = FONT_SIZE_NORMAL - 1
 FONT_SIZE_MEDIUM = FONT_SIZE_NORMAL + 1
 FONT_SIZE_LARGE = FONT_SIZE_NORMAL + 3
 FONT_SIZE_TITLE = FONT_SIZE_NORMAL + 5
-FONT_SIZE_COVER_TITLE = FONT_SIZE_NORMAL * 4
-FONT_SIZE_COVER_SUBTITLE = int(FONT_SIZE_NORMAL * 2)
+FONT_SIZE_COVER_TITLE = FONT_SIZE_NORMAL * 3
+FONT_SIZE_COVER_SUBTITLE = int(FONT_SIZE_NORMAL * 1.6)
+
+snapshotRowHeight = inch * 0.19
 
 fontName = 'Tahoma'
 italicFontName = 'Helvetica-Oblique'
@@ -123,6 +128,7 @@ class NumberedCanvas(canvas.Canvas):
         self.restoreState()
 
 
+
 class PDFReportGenerator:
     """Generates PDF reports directly using ReportLab, matching HTML template formatting."""
     
@@ -147,7 +153,15 @@ class PDFReportGenerator:
             textColor=colors.black,
             alignment=TA_LEFT
         ))
-        
+        self.styles.add(ParagraphStyle(
+            name='snapshotText',
+            parent=self.styles['Normal'],
+            fontName=f'{fontName}',
+            fontSize=FONT_SIZE_NORMAL * 0.6,
+            leading=FONT_SIZE_NORMAL,
+            textColor=colors.black,
+            alignment=TA_RIGHT
+        ))
         # Header style
         self.styles.add(ParagraphStyle(
             name='HeaderTitle',
@@ -184,7 +198,7 @@ class PDFReportGenerator:
         self.styles.add(ParagraphStyle(
             name='CoverTitle',
             parent=self.styles['Heading1'],
-            fontName=f'{fontName}-Bold',
+            fontName=f'{fontName}',
             fontSize=FONT_SIZE_COVER_TITLE,
             textColor=COLOR_PRIMARY,
             alignment=TA_LEFT,
@@ -231,10 +245,16 @@ class PDFReportGenerator:
         """Format numbers matching HTML template formatting."""
         if value is None or (isinstance(value, float) and pd.isna(value)):
             return "-"
-        
         if isinstance(value, str):
-            return value
-        
+            try:
+                temp = value
+                temp = temp.strip()
+                temp = temp.strip('%')
+                value = float(temp)
+            except Exception as e:
+                return value
+        if value == 15.515333563061562:
+                print('     Checking as number')
         if is_percent:
             if value < 0:
                 return f"({abs(value):.{decimals}f}%)"
@@ -243,34 +263,35 @@ class PDFReportGenerator:
         
         if is_currency:
             if value < 0:
-                return f"({abs(value):,.0f})"
+                return f"(${abs(value):,.0f})"
             else:
-                return f"{value:,.0f}"
+                return f"${value:,.0f}"
         
         return f"{value:,.{decimals}f}"
     
-    def _create_table_caption(self, text: str) -> Table:
+    def _create_table_caption(self, text: str, width = CONTENT_WIDTH) -> Table:
         """Create a table caption matching HTML template style."""
         caption_style = TableStyle([
             ('BACKGROUND', (0, 0), (-1, -1), COLOR_GRAY_HEADER),
             ('TEXTCOLOR', (0, 0), (-1, -1), colors.white),
             ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
             ('FONTNAME', (0, 0), (-1, -1), f'{fontName}-Bold'),
-            ('FONTSIZE', (0, 0), (-1, -1), FONT_SIZE_NORMAL),
+            ('FONTSIZE', (0, 0), (-1, -1), FONT_SIZE_NORMAL * 0.8),
             ('LEFTPADDING', (0, 0), (-1, -1), 6),
             ('RIGHTPADDING', (0, 0), (-1, -1), 6),
-            ('TOPPADDING', (0, 0), (-1, -1), 4),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+            ('TOPPADDING', (0, 0), (-1, -1), 2),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 0),
         ])
         
-        caption_table = Table([[text]], colWidths=[CONTENT_WIDTH], style=caption_style)
+        caption_table = Table([[text]], colWidths=[width], style=caption_style)
         return caption_table
     
     def _create_panel_table(self, headers: List[str], data: List[List], 
                            col_widths: List[float] = None,
                            caption: str = None,
                            row_colors: List[Optional[HexColor]] = None,
-                           alignments: List[str] = None) -> Table:
+                           alignments: List[str] = None, lineAfters = None, lineBelows = None, boldRows = [], specBorders = {},
+                           rowHeights = None) -> Table:
         """Create a table matching HTML panel style with proper row borders."""
         # Build table data
         table_data = [headers]
@@ -283,7 +304,6 @@ class PDFReportGenerator:
         # Default alignments (first column left, rest right)
         if alignments is None:
             alignments = ['LEFT'] + ['RIGHT'] * (len(headers) - 1)
-        
         # Create table style
         table_style = TableStyle([
             # Outer border
@@ -293,29 +313,46 @@ class PDFReportGenerator:
             ('BACKGROUND', (0, 0), (-1, 0), colors.white),
             ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
             ('FONTNAME', (0, 0), (-1, 0), f'{fontName}-Bold'),
-            ('FONTSIZE', (0, 0), (-1, 0), FONT_SIZE_NORMAL),
-            ('BOTTOMPADDING', (0, 0), (-1, 0), 2),
-            ('TOPPADDING', (0, 0), (-1, 0), 2),
+            ('FONTSIZE', (0, 0), (-1, 0), FONT_SIZE_NORMAL * 0.8),
+            ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
+            #('BOTTOMPADDING', (0, 0), (-1, 0), 2),
+            #('TOPPADDING', (0, 0), (-1, 0), 4),
             ('LEFTPADDING', (0, 0), (-1, 0), 3),
             ('RIGHTPADDING', (0, 0), (-1, 0), 3),
-            ('LINEBELOW', (0, 0), (-1, 0), 1, colors.black),  # Header bottom border
-            
-            # First column vertical border
-            ('LINEAFTER', (0, 0), (0, -1), 1, colors.black),
-            
             # Data rows - add horizontal lines between ALL rows
             ('FONTNAME', (0, 1), (-1, -1), f'{fontName}'),
-            ('FONTSIZE', (0, 1), (-1, -1), FONT_SIZE_NORMAL),
+            ('FONTSIZE', (0, 1), (-1, -1), FONT_SIZE_NORMAL * 0.7),
             ('LEFTPADDING', (0, 1), (-1, -1), 3),
             ('RIGHTPADDING', (0, 1), (-1, -1), 3),
-            ('TOPPADDING', (0, 1), (-1, -1), 2),
-            ('BOTTOMPADDING', (0, 1), (-1, -1), 2),
+            #('TOPPADDING', (0, 1), (-1, -1), 4),
+            #('BOTTOMPADDING', (0, 1), (-1, -1), 2),
+            ('TOPPADDING', (0, 0), (-1, -1), 15),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), -2),
         ])
-        
+        if not specBorders:
+            if lineAfters == None: #first column has line if not specified
+                table_style.add('LINEAFTER', (0, 0), (0, -1), 1, colors.black)
+            else:
+                for row in lineAfters:
+                    table_style.add('LINEAFTER', (0, row), (0, row), 1, colors.black)
+            if lineBelows:
+                for row in lineBelows:
+                    table_style.add('LINEBELOW', (0, row), (-1, row), 1, colors.black)
+            else:
+                if len(data) > 0:
+                    table_style.add('LINEABOVE', (0, -1), (-1, -1), 1, colors.black)
+                table_style.add('LINEBELOW', (0, 0), (-1, 0), 1, colors.black)
+        else: #specifically control all borders
+            for lineType, spots in specBorders.items():
+                for (c1,c2,r1,r2) in spots:
+                    table_style.add(lineType, (c1, r1), (c2, r2), 1, colors.black)
+        for row in boldRows:
+            table_style.add('FONTNAME', (0, row), (-1, row), f'{fontName}-Bold')
         # Add horizontal lines between all data rows
-        for i in range(1, len(table_data)):
-            table_style.add('LINEBELOW', (0, i), (-1, i), 0.5, colors.black)
-        
+        #for i in range(1, len(table_data)):
+        #    table_style.add('LINEBELOW', (0, i), (-1, i), 0.5, colors.black)
+        colIdxDict = {h : i for i,h in enumerate(headers)}
+        table_style = self.tableStyleRedText(table_style,data,colIdxDict, headerRows=1)
         # Add alignments
         for i, align in enumerate(alignments):
             if align == 'LEFT':
@@ -334,20 +371,19 @@ class PDFReportGenerator:
         
         # Add top border for last row (total row) if it's a total
         if len(data) > 0:
-            table_style.add('LINEABOVE', (0, -1), (-1, -1), 1, colors.black)
             # Check if last row should be bold
             if row_colors and len(row_colors) > 0 and row_colors[-1] == COLOR_TOTAL:
                 table_style.add('FONTNAME', (0, -1), (-1, -1), f'{fontName}-Bold')
         
-        table = Table(table_data, colWidths=col_widths, style=table_style)
+        table = Table(table_data, colWidths=col_widths, style=table_style, rowHeights=rowHeights)
         return table
     
     def add_cover_page(self, title: str, subtitle: str, date: str):
         """Add cover page matching HTML template."""
         # Logo
-        logo_path = self.assets_dir / "logo.png"
+        logo_path = self.assets_dir/'images' / "HFlogo.png"
         if logo_path.exists():
-            logo = Image(str(logo_path), width=1.5*inch, height=1.5*inch)
+            logo = Image(str(logo_path), width=1.5*inch, height=0.59*inch)
             logo.hAlign = 'RIGHT'
             self.story.append(logo)
         
@@ -358,6 +394,8 @@ class PDFReportGenerator:
         title_para = Paragraph(title, self.styles['CoverTitle'])
         self.story.append(title_para)
         
+        lineBreak = Paragraph('_'*85, self.styles['CoverSubtitle'])
+        self.story.append(lineBreak)
         # Subtitle
         subtitle_para = Paragraph(subtitle, self.styles['CoverSubtitle'])
         self.story.append(subtitle_para)
@@ -365,9 +403,6 @@ class PDFReportGenerator:
         # Date
         date_para = Paragraph(date, self.styles['CoverSubtitle'])
         self.story.append(date_para)
-        
-        # Page break
-        self.story.append(PageBreak())
     
     def add_header_row(self, title: str, date: str):
         """Add header row with title and date."""
@@ -384,15 +419,29 @@ class PDFReportGenerator:
         self.story.append(header_table)
         self.story.append(Spacer(1, 0.2*inch))
     
-    def add_narrative_page(self, title: str, date: str, narrative_html: str):
+    def add_narrative_page(self, title: str, date: str, narrative_text: list[dict]):
         """Add narrative page with markdown content."""
         self.add_header_row(title, date)
-        
-        # Convert HTML to paragraphs
-        narrative_para = Paragraph(narrative_html.replace('<p>', '').replace('</p>', '<br/>'), 
-                                   self.styles['NarrativeContent'])
-        self.story.append(narrative_para)
-        self.story.append(PageBreak())
+        defStyle = self.styles['NarrativeContent']
+        base_tab_width = 0.35 * inch  # Or choose a value that fits your document layout
+        bulletWidth = 10
+        for line in narrative_text:
+            indents = line.get('indentNum')
+            text = line.get('lineText')
+            if indents is None or text is None or not isinstance(text, str):
+                continue
+            try:
+                indent_tabs = int(indents)
+            except Exception:
+                continue
+            lineStyle = ParagraphStyle(
+                name=f"NarrativeContentIndent{indent_tabs}",
+                parent=defStyle,
+                leftIndent=defStyle.leftIndent + indent_tabs * base_tab_width + bulletWidth,
+                firstLineIndent= -1 * bulletWidth
+            )
+            narrative_line = Paragraph(f'- {text}', style=lineStyle)
+            self.story.append(narrative_line)
     
     
     def add_assets_and_flows_table(self, data: List[Dict], width: float):
@@ -409,11 +458,12 @@ class PDFReportGenerator:
             ])
         
         col_widths = [width * 0.35, width * 0.22, width * 0.22, width * 0.21]
+        rowHeights = [snapshotRowHeight] * (1 + len(data))
         alignments = ['LEFT', 'CENTER', 'RIGHT', 'RIGHT']
         
-        caption = self._create_table_caption('Assets and Flows')
-        table = self._create_panel_table(headers, table_data, col_widths, alignments=alignments)
-        return [caption, table]
+        caption = self._create_table_caption('Assets and Flows',width=width)
+        table = self._create_panel_table(headers, table_data, col_widths, alignments=alignments, rowHeights=rowHeights, boldRows=[5,])
+        return [caption, Spacer(1,0.05*inch),table]
     
     def add_foundations_table(self, data: List[Dict], width: float):
         """Add HF Foundations table."""
@@ -428,24 +478,24 @@ class PDFReportGenerator:
                 self._format_number(row.get('mm'), is_currency=True),
                 self._format_number(row.get('pct'), is_percent=True)
             ])
-            row_colors.append(COLOR_TOTAL if is_total else None)
+            row_colors.append(None)
         
         col_widths = [width * 0.4, width * 0.3, width * 0.3]
+        rowHeights = [snapshotRowHeight] * (1 + len(data))
         alignments = ['LEFT', 'CENTER', 'RIGHT']
         
-        caption = self._create_table_caption('HF Foundations')
+        caption = self._create_table_caption('HF Foundations',width=width)
         table = self._create_panel_table(headers, table_data, col_widths, 
-                                        alignments=alignments, row_colors=row_colors)
-        return [Spacer(1, 0.2*inch), caption, table]
+                                        alignments=alignments, row_colors=row_colors, rowHeights=rowHeights)
+        return [Spacer(1, 0.2*inch), caption, Spacer(1,0.05*inch), table]
     
     def add_portfolio_returns_table(self, data: List[Dict], width: float):
         """Add Portfolio Returns table."""
         headers = ['', '$MM', 'Month', 'YTD', '1 Year', '3 Year', 'Inception']
         table_data = []
         row_colors = []
-        
         for row in data:
-            label = row.get('label', '')
+            label = row.get('', '') #label is blank as the corner text is ''
             label_lower = label.lower()
             
             # Determine row color - only special rows get colors
@@ -462,26 +512,26 @@ class PDFReportGenerator:
             
             row_colors.append(bg_color)
             
-            is_benchmark = (row.get('month') is None) or 'benchmark' in label_lower or 'acwi' in label_lower
-            
             table_data.append([
                 label,
-                self._format_number(row.get('month'), is_currency=True) if not is_benchmark and row.get('month') is not None else '',
-                self._format_number(row.get('qtd'), is_percent=True) if row.get('qtd') is not None else '',
-                self._format_number(row.get('ytd'), is_percent=True) if row.get('ytd') is not None else '',
-                self._format_number(row.get('one_year'), is_percent=True) if row.get('one_year') is not None else '',
-                self._format_number(row.get('three_year'), is_percent=True) if row.get('three_year') is not None else '',
-                self._format_number(row.get('inception'), is_percent=True) if row.get('inception') is not None else ''
+                self._format_number(row.get('$MM'), is_currency=True) if row.get('$MM') not in (None,0.0) else '',
+                self._format_number(row.get('Month'), is_percent=True) if row.get('Month') is not None else '',
+                self._format_number(row.get('YTD'), is_percent=True) if row.get('YTD') is not None else '',
+                self._format_number(row.get('1 Year'), is_percent=True) if row.get('1 Year') is not None else '',
+                self._format_number(row.get('3 Year'), is_percent=True) if row.get('3 Year') is not None else '',
+                self._format_number(row.get('Inception'), is_percent=True) if row.get('Inception') is not None else ''
             ])
         
         col_widths = [width * 0.25, width * 0.12, width * 0.11, width * 0.11, 
                      width * 0.11, width * 0.11, width * 0.19]
+        rowHeights = [snapshotRowHeight] * (1 + len(data))
         alignments = ['LEFT', 'RIGHT', 'RIGHT', 'RIGHT', 'RIGHT', 'RIGHT', 'RIGHT']
         
-        caption = self._create_table_caption('Portfolio Returns')
+        caption = self._create_table_caption('Portfolio Returns',width=width)
         table = self._create_panel_table(headers, table_data, col_widths, 
-                                        alignments=alignments, row_colors=row_colors)
-        return [caption, table]
+                                        alignments=alignments, row_colors=row_colors, rowHeights = rowHeights,
+                                        lineAfters=[0,1,2,3], lineBelows=[3,], boldRows=[4,])
+        return [caption, Spacer(1,0.1*inch), table]
     
     def add_overall_family_breakdown_table(self, data: List[Dict], width: float):
         """Add Overall Family Breakdown table."""
@@ -497,22 +547,22 @@ class PDFReportGenerator:
                 self._format_number(row.get('pct'), is_percent=True)
             ])
         
-        col_widths = [width * 0.31, width * 0.27, width * 0.16, width * 0.27, width * 0.16]
+        col_widths = [width * 0.28, width * 0.23, width * 0.13, width * 0.23, width * 0.13]
+        rowHeights = [snapshotRowHeight] * (1 + len(data))
         alignments = ['LEFT', 'RIGHT', 'RIGHT', 'RIGHT', 'RIGHT']
         
-        caption = self._create_table_caption('Overall Family Breakdown')
-        table = self._create_panel_table(headers, table_data, col_widths, alignments=alignments)
-        return [caption, table]
+        caption = self._create_table_caption('Overall Family Breakdown',width=width)
+        table = self._create_panel_table(headers, table_data, col_widths, alignments=alignments, boldRows=[8,], rowHeights=rowHeights)
+        return [caption, Spacer(1,0.05*inch), table]
     
     def add_sports_table(self, data: List[Dict], width: float):
         """Add Sports table."""
-        headers = ['Sports', 'Share %', 'Team Value', 'Debt', 'Equity', 'Family Share']
+        headers = ['Sports', 'Share', 'Team Value', 'Debt', 'Equity', 'Family Share']
         table_data = []
         row_colors = []
         
         for row in data:
-            is_total = str(row.get('sports', '')).lower() == 'total'
-            row_colors.append(COLOR_TOTAL if is_total else None)
+            row_colors.append(None)
             
             table_data.append([
                 row.get('sports', ''),
@@ -523,12 +573,20 @@ class PDFReportGenerator:
                 self._format_number(row.get('family_share'), is_currency=True) if row.get('family_share') is not None else ''
             ])
         
-        col_widths = [width * 0.25, width * 0.12, width * 0.15, width * 0.15, width * 0.15, width * 0.18]
+        col_widths = [width * 0.15, width * 0.12, width * 0.18, width * 0.15, width * 0.15, width * 0.25]
+        rowHeights = [snapshotRowHeight] * (1 + len(data))
         alignments = ['LEFT', 'RIGHT', 'RIGHT', 'RIGHT', 'RIGHT', 'RIGHT']
-        
+        if len(data) > 2:
+            specBorders = {'LINEBEFORE' : [(-1,-1,0,-1),],
+                            'LINEAFTER' : [(0,0,1,len(data) - 1),],
+                            'LINEBELOW' : [(0,-1,0,0),],
+                            'LINEABOVE' : [(0,-1,-1,-1),]}
+        else:
+            specBorders = None
+
         table = self._create_panel_table(headers, table_data, col_widths, 
-                                        alignments=alignments, row_colors=row_colors)
-        return [Spacer(1, 0.2*inch), table]
+                                        alignments=alignments, row_colors=row_colors, rowHeights=rowHeights, specBorders=specBorders)
+        return [Spacer(1, 0.05*inch), table]
     
     def add_returns_vs_benchmark_table(self, data: List[Dict]):
         """Add Returns vs Benchmark table with complex header structure."""
@@ -581,19 +639,19 @@ class PDFReportGenerator:
                 self._format_number(row.get('tgt_pct'), is_percent=True),
                 self._format_number(row.get('alloc_delta'), is_currency=True) if row.get('alloc_delta') is not None and not pd.isna(row.get('alloc_delta')) else '-',
                 self._format_percent_with_bm(row.get('m_rtn')),
-                self._format_percent_with_bm(row.get('m_bm')),
+                self._format_percent_with_bm(row.get('m_bm'), bench = True),
                 self._format_percent_with_bm(row.get('m_delta')),
                 self._format_percent_with_bm(row.get('ytd_rtn')),
-                self._format_percent_with_bm(row.get('ytd_bm')),
+                self._format_percent_with_bm(row.get('ytd_bm'), bench = True),
                 self._format_percent_with_bm(row.get('ytd_delta')),
                 self._format_percent_with_bm(row.get('y1_rtn')),
-                self._format_percent_with_bm(row.get('y1_bm')),
+                self._format_percent_with_bm(row.get('y1_bm'), bench = True),
                 self._format_percent_with_bm(row.get('y1_delta')),
                 self._format_percent_with_bm(row.get('y3_rtn')),
-                self._format_percent_with_bm(row.get('y3_bm')),
+                self._format_percent_with_bm(row.get('y3_bm'), bench = True),
                 self._format_percent_with_bm(row.get('y3_delta')),
                 self._format_percent_with_bm(row.get('inc_rtn')),
-                self._format_percent_with_bm(row.get('inc_bm')),
+                self._format_percent_with_bm(row.get('inc_bm'), bench = True),
                 self._format_percent_with_bm(row.get('inc_delta'))
             ])
         
@@ -623,19 +681,22 @@ class PDFReportGenerator:
             CONTENT_WIDTH * 0.04,  # BM % (inc)
             CONTENT_WIDTH * 0.04   # Δ (inc)
         ]
-        
+        if sum(col_widths) != CONTENT_WIDTH: #scale up or down if percentages do not equal 100%
+            ratio = CONTENT_WIDTH / sum(col_widths)
+            col_widths = [c * ratio for c in col_widths]
+        rowHeights = [snapshotRowHeight] * (2 + len(data))
         alignments = ['LEFT', 'RIGHT'] + ['CENTER'] * 18
         
         caption = self._create_table_caption('Asset Class Returns Vs. Benchmarks')
         
         # Create table with custom style for merged headers
-        table = Table(full_table_data, colWidths=col_widths)
+        table = Table(full_table_data, colWidths=col_widths, rowHeights=rowHeights)
         table_style = TableStyle([
             ('BOX', (0, 0), (-1, -1), 1, colors.black),
             ('LINEBELOW', (0, 1), (-1, 1), 1, colors.black),
             ('BACKGROUND', (0, 0), (-1, 1), colors.white),
             ('FONTNAME', (0, 0), (-1, 1), f'{fontName}-Bold'),
-            ('FONTSIZE', (0, 0), (-1, 1), FONT_SIZE_NORMAL),
+            ('FONTSIZE', (0, 0), (-1, 1), FONT_SIZE_NORMAL * 0.8),
             ('ALIGN', (0, 0), (1, 1), 'LEFT'),
             ('ALIGN', (2, 0), (-1, 1), 'CENTER'),
             ('VALIGN', (0, 0), (-1, 1), 'BOTTOM'),
@@ -652,7 +713,18 @@ class PDFReportGenerator:
             ('LINEAFTER', (13, 0), (13, -1), 1, colors.black), # After Δ (1y)
             ('LINEAFTER', (16, 0), (16, -1), 1, colors.black), # After Δ (3y)
         ])
-        
+
+        colIdxDict = {'mm' : 1, "alloc_pct" : 2, 'tgt_pct' : 3 , 'alloc_delta' : 4, 
+                    'm_rtn': 5, 'm_bm' : 6, 'm_delta' : 7,
+                    'ytd_rtn': 8, 'ytd_bm' : 9, 'ytd_delta' : 10,
+                    'y1_rtn': 11, 'y1_bm' : 12, 'y1_delta' : 13,
+                    'y3_rtn': 14, 'y3_bm' : 15, 'y3_delta' : 16,
+                    'inc_rtn': 17, 'inc_bm' : 18, 'inc_delta' : 19,
+                    }
+        table_style = self.tableStyleRedText(table_style,data,colIdxDict,headerRows=2)
+                
+
+
         # Add horizontal lines between all data rows
         for i in range(2, len(full_table_data)):
             table_style.add('LINEBELOW', (0, i), (-1, i), 0.5, colors.black)
@@ -663,14 +735,16 @@ class PDFReportGenerator:
                 table_style.add('BACKGROUND', (0, i), (-1, i), color)
         
         table_style.add('FONTNAME', (0, 2), (-1, -1), f'{fontName}')
-        table_style.add('FONTSIZE', (0, 2), (-1, -1), FONT_SIZE_NORMAL)
+        table_style.add('FONTSIZE', (0, 2), (-1, -1), FONT_SIZE_NORMAL * 0.6)
         table_style.add('ALIGN', (0, 2), (0, -1), 'LEFT')
         table_style.add('ALIGN', (1, 2), (-1, -1), 'CENTER')
         table_style.add('LEFTPADDING', (0, 0), (-1, -1), 3)
         table_style.add('RIGHTPADDING', (0, 0), (-1, -1), 3)
-        table_style.add('TOPPADDING', (0, 0), (-1, -1), 2)
-        table_style.add('BOTTOMPADDING', (0, 0), (-1, -1), 2)
+        table_style.add('TOPPADDING', (0, 0), (-1, -1), 6)
+        table_style.add('BOTTOMPADDING', (0, 0), (-1, -1), -2)
         
+        table_style.add('FONTNAME', (0, -1), (-1, -1), f'{fontName}-bold') #last row - bold
+
         table.setStyle(table_style)
         
         # Add footnote
@@ -678,17 +752,51 @@ class PDFReportGenerator:
             '<font size="9">Cash includes mark to market impacts; current yield at 4.1%</font>',
             self.styles['CustomNormal']
         )
-        return [caption, table, Spacer(1, 0.05*inch), footnote]
-    
-    def _format_percent_with_bm(self, value):
+        return [caption, Spacer(1,0.1*inch), table, Spacer(1, 0.05*inch), footnote]
+    def tableStyleRedText(self,table_style,data, colIdxDict, headerRows = 0):
+        for j, row in enumerate(data):
+            for idx, header in enumerate(row):
+                if isinstance(row,dict):
+                    val = row.get(header)
+                    i = colIdxDict.get(header,0)
+                else:
+                    val = header
+                    i = idx
+                try:
+                    neg = False
+                    if isinstance(val,str):
+                        
+                        neg = '(' in val
+                        for char in ('(',')','%','$'):
+                            val = val.strip(char)
+                        val = val.strip()
+                        val = val.replace(',','')
+                    val = float(val)
+                    if neg:
+                        val = -1 *  val
+                except:
+                    pass
+                if (val and ((isinstance(val,float) and val < 0)) or ('bm' in header and val in (None,''))):
+                    
+                    table_style.add('TEXTCOLOR', (i,j + headerRows), (i,j + headerRows), colors.red)
+        return table_style
+    def _format_percent_with_bm(self, value, bench = False):
         """Format percentage values with 'No BM' handling. Returns Paragraph for proper HTML rendering."""
-        if value is None or (isinstance(value, float) and pd.isna(value)):
-            return Paragraph('<font color="red">No BM</font>', self.styles['CustomNormal'])
-        if isinstance(value, str):
-            return Paragraph(f'<font color="red">{value}</font>', self.styles['CustomNormal'])
-        if value < 0:
-            return Paragraph(f'<font color="red">({abs(value) * 100:.1f}%)</font>', self.styles['CustomNormal'])
-        return Paragraph(f"{value * 100:.1f}%", self.styles['CustomNormal'])
+        if bench and (value is None or (isinstance(value, float) and pd.isna(value)) or value == ''):
+            return 'No BM'
+        try:
+            if isinstance(value,str):
+                value = value.strip('%')
+                value = value.strip()
+                value = float(value) / 100
+            else:
+                value = float(value)
+            if value >= 0:
+                return f'{(value * 100):.1f}%'
+            else:
+                return f'({(value * 100):.1f}%)'
+        except:
+            return value
     
     def add_portfolio_holdings_table(self, data: List[Dict], colorDepths, page_num: int = 0, 
                                      exclude_keys: List[str] = None, header_order: List[str] = None,
@@ -1219,10 +1327,30 @@ class PDFReportGenerator:
             leftPadding=0, bottomPadding=0, rightPadding=0, topPadding=0,
             id='standard'
         )
-        
+        rvbHeight = inch * 3.3
+        splitPadding = inch * 0
+        titleHeight = inch * 0.5
+        snapshotFrames = []
+        snapshotFrames.append(Frame( #Add in frame for the title
+            MARGIN_LEFT, MARGIN_BOTTOM + CONTENT_HEIGHT - titleHeight, CONTENT_WIDTH, titleHeight,
+            leftPadding=0, bottomPadding=0, rightPadding=0, topPadding=0,
+        ))
+        colWidthSum = 0
+        colSpacer = 0.1 * inch
+        for i in range(3): #three frames for the three columns
+            snapshotFrames.append(Frame(
+                MARGIN_LEFT + colWidthSum, MARGIN_BOTTOM + rvbHeight + splitPadding, snapshotColWidths[i], CONTENT_HEIGHT - rvbHeight - splitPadding - titleHeight,
+                leftPadding=0, bottomPadding=0, rightPadding=0, topPadding=0,
+            ))
+            colWidthSum += snapshotColWidths[i] + colSpacer
+        snapshotFrames.append(Frame(
+            MARGIN_LEFT, MARGIN_BOTTOM, CONTENT_WIDTH, rvbHeight,
+            leftPadding=0, bottomPadding=0, rightPadding=0, topPadding=0,
+        ))
         # Use standard single-column template
-        standard_template = PageTemplate(id='Standard', frames=[standard_frame])
-        doc.addPageTemplates([standard_template])
+        standard = PageTemplate(id='standard', frames=[standard_frame])
+        snapshot = PageTemplate(id='snapshot', frames=snapshotFrames)
+        doc.addPageTemplates([standard,snapshot])
         
         # Build with two-pass for page numbering
         doc.build(self.story, canvasmaker=lambda filename, **kwargs: NumberedCanvas(filename, footerData=self.footerData, **kwargs))
